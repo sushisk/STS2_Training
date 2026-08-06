@@ -167,6 +167,34 @@ def test_none_run_result_does_not_mark_nonterminal_run() -> None:
     assert "room_result" not in events[0]
 
 
+def test_false_run_outcome_is_preserved() -> None:
+    before = _decision_response(
+        request_id="req-002",
+        operation="get_decision",
+        decision_point_id="d-1",
+        boundary="event_choice",
+        room_context={"room_id": 99},
+        legal_actions=[{"action_id": "lose"}],
+    )
+    after = _decision_response(
+        request_id="req-003",
+        operation="commit_action",
+        decision_point_id="d-2",
+        boundary="run_terminal",
+        room_context={"room_id": 99},
+        legal_actions=[],
+        run_outcome=False,
+    )
+    events: list[dict] = []
+    client = _client([_start_response(), before, after], events)
+    instance_id = client.start_instance({"instance_type": "whole_run"}, timeout_s=1.0)
+    client.get_decision(instance_id, timeout_s=1.0)
+
+    client.commit_action(instance_id, "d-1", "lose", timeout_s=1.0)
+
+    assert events[0]["run_result"] is False
+
+
 def test_emulate_action_logs_parent_decision_and_branch_result() -> None:
     before = _decision_response(
         request_id="req-002",
