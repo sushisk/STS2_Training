@@ -123,15 +123,16 @@ def _root_outcomes(
             "room_context_after": after.get("room_context"),
         }
     if _is_run_terminal(after):
-        outcomes["run_result"] = (
-            after.get("run_result")
-            or after.get("run_outcome")
-            or {
+        run_result = after.get("run_result")
+        if run_result is None:
+            run_result = after.get("run_outcome")
+        if run_result is None:
+            run_result = {
                 "boundary": after_boundary,
                 "room_context": after.get("room_context"),
                 "transition": after.get("transition"),
             }
-        )
+        outcomes["run_result"] = run_result
     return outcomes
 
 
