@@ -20,12 +20,7 @@ DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024
 
 
 class AsyncioTcpTransport:
-    """Persistent newline-delimited JSON connection to ``API.tcp_server``.
-
-    This is intentionally an async transport rather than an implementation of the
-    existing synchronous ``RlTransport`` protocol. It is the minimal foundation for
-    Training and RL to run as independently managed OS processes.
-    """
+    """Persistent newline-delimited JSON connection to ``API.tcp_server``."""
 
     def __init__(
         self,
@@ -50,32 +45,16 @@ class AsyncioTcpTransport:
         self._max_message_bytes = max_message_bytes
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
-        self._call_lock = asyncio.Lock()
+        self._lock = asyncio.Lock()
         self._closed = False
 
     async def connect(self) -> None:
-        if self._closed:
-            raise TransportClosedError("transport is closed")
-        if self.is_alive():
-            return
-        try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(
-                    self._host,
-                    self._port,
-                    limit=self._max_message_bytes + 1,
-                ),
-                timeout=self._connect_timeout_s,
-            )
-        except (TimeoutError, OSError) as exc:
-            raise TransportError(
-                f"could not connect to RL TCP server at {self._host}:{self._port}"
-            ) from exc
+        async with self._lock:
+            await self._connect()
 
     async def ping(self, *, timeout_s: float = 5.0) -> JsonObject:
         response = await self._exchange(
-            {"transport_operation": "ping"},
-            timeout_s=timeout_s,
+            {"transport_operation": "ping"}, timeout_s=timeout_s
         )
         if response.get("transport_operation") != "pong":
             raise TransportError("RL TCP server returned an invalid ping response")
@@ -99,18 +78,10 @@ class AsyncioTcpTransport:
         )
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        writer = self._writer
-        self._reader = None
-        self._writer = None
-        if writer is not None:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
-                pass
+        async with self._lock:
+            if not self._closed:
+                self._closed = True
+                await self._disconnect()
 
     async def __aenter__(self) -> "AsyncioTcpTransport":
         await self.connect()
@@ -118,6 +89,25 @@ class AsyncioTcpTransport:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+    async def _connect(self) -> None:
+        if self._closed:
+            raise TransportClosedError("transport is closed")
+        if self.is_alive():
+            return
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    self._host,
+                    self._port,
+                    limit=self._max_message_bytes + 1,
+                ),
+                timeout=self._connect_timeout_s,
+            )
+        except (TimeoutError, OSError) as exc:
+            raise TransportError(
+                f"could not connect to RL TCP server at {self._host}:{self._port}"
+            ) from exc
 
     async def _exchange(
         self,
@@ -127,55 +117,60 @@ class AsyncioTcpTransport:
     ) -> JsonObject:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
-        if self._closed:
-            raise TransportClosedError("transport is closed")
-        if not self.is_alive():
-            await self.connect()
-
-        assert self._reader is not None
-        assert self._writer is not None
         encoded = json.dumps(
-            request,
-            ensure_ascii=False,
-            separators=(",", ":"),
+            request, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8") + b"\n"
         if len(encoded) > self._max_message_bytes:
             raise TransportError(
                 f"request exceeds max_message_bytes={self._max_message_bytes}"
             )
 
-        async with self._call_lock:
+        async with self._lock:
+            await self._connect()
+            assert self._reader is not None
+            assert self._writer is not None
             try:
-                response = await asyncio.wait_for(
-                    self._round_trip(encoded),
-                    timeout=timeout_s,
-                )
+                async with asyncio.timeout(timeout_s):
+                    self._writer.write(encoded)
+                    await self._writer.drain()
+                    line = await self._reader.readline()
             except TimeoutError as exc:
+                await self._disconnect()
                 raise TransportError("RL TCP request timed out") from exc
             except (ConnectionError, OSError) as exc:
+                await self._disconnect()
                 raise RuntimeExitedError(
                     "RL TCP connection closed during request"
                 ) from exc
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                await self._disconnect()
+                raise TransportError(
+                    "RL TCP response exceeds max_message_bytes"
+                ) from exc
 
-        return response
+            if not line:
+                await self._disconnect()
+                raise RuntimeExitedError("RL TCP server closed the connection")
+            if len(line) > self._max_message_bytes:
+                await self._disconnect()
+                raise TransportError("RL TCP response exceeds max_message_bytes")
+            try:
+                response: Any = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                await self._disconnect()
+                raise TransportError("RL TCP server returned invalid JSON") from exc
+            if not isinstance(response, dict):
+                await self._disconnect()
+                raise TransportError("RL TCP response must be a JSON object")
+            return response
 
-    async def _round_trip(self, encoded: bytes) -> JsonObject:
-        assert self._reader is not None
-        assert self._writer is not None
-        self._writer.write(encoded)
-        await self._writer.drain()
-        try:
-            line = await self._reader.readline()
-        except (ValueError, asyncio.LimitOverrunError) as exc:
-            raise TransportError("RL TCP response exceeds max_message_bytes") from exc
-        if not line:
-            raise RuntimeExitedError("RL TCP server closed the connection")
-        if len(line) > self._max_message_bytes:
-            raise TransportError("RL TCP response exceeds max_message_bytes")
-        try:
-            response: Any = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise TransportError("RL TCP server returned invalid JSON") from exc
-        if not isinstance(response, dict):
-            raise TransportError("RL TCP response must be a JSON object")
-        return response
+    async def _disconnect(self) -> None:
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
