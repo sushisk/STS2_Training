@@ -1,4 +1,4 @@
-# RL–Training Communication DTO Documentation v0.5
+# RL–Training Communication DTO Documentation
 
 ## 0. この文書の目的
 
