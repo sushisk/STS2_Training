@@ -37,6 +37,15 @@ def _legal_actions(response: dict) -> list[dict]:
     assert actions
     return actions
 
+def _find_card_action(response: dict, card_id: str) -> dict:
+    matches = [
+        action
+        for action in _legal_actions(response)
+        if action.get("action_type") == "card"
+        and (action.get("parameters") or {}).get("cardId") == card_id
+    ]
+    assert len(matches) == 1, matches
+    return matches[0]
 
 def test_combat_root_branch_commit_and_close(
     api_client: TrainingApiClient,
@@ -113,3 +122,46 @@ def test_whole_run_start_decide_and_close(
     _legal_actions(decision)
     closed = api_client.close_instance(instance_id, timeout_s=120.0)
     assert closed["status"] == "completed"
+
+def test_combat_branch_can_play_card(
+    api_client: TrainingApiClient,
+) -> None:
+    instance_id = api_client.start_instance(COMBAT_CONFIG, timeout_s=120.0)
+
+    try:
+        before = api_client.get_decision(
+            instance_id,
+            "root",
+            timeout_s=120.0,
+        )
+        assert before["status"] == "completed"
+
+        action = _find_card_action(before, "DEFEND_IRONCLAD")
+        branch_id = "branch-card-smoke-001"
+
+        branch = api_client.emulate_action(
+            instance_id,
+            parent_branch_id="root",
+            branch_id=branch_id,
+            rng_id=1,
+            decision_point_id=before["decision_point_id"],
+            action_id=action["action_id"],
+            simulation_options={
+                "max_time_ms": 120_000,
+                "stop_condition": "next_decision",
+            },
+            timeout_s=150.0,
+        )
+
+        assert branch["status"] == "completed"
+        assert branch["branch_id"] == branch_id
+        assert branch["decision_point_id"] != before["decision_point_id"]
+
+        status = api_client.get_branch_status(
+            instance_id,
+            [branch_id],
+            timeout_s=120.0,
+        )
+        assert status["branch_statuses"][branch_id] == "completed"
+    finally:
+        api_client.close_instance(instance_id, timeout_s=120.0)
