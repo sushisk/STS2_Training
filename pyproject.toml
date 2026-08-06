@@ -21,4 +21,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
   "integration: requires STS2_RL_ROOT and the real Emulator runtime",
+  "emulator: verifies CoreCLR/Sts2Emulator.dll loading and a real Emulator step",
 ]
