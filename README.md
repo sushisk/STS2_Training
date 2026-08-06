@@ -20,5 +20,11 @@ test: Training starts the spawned RL process, `start_instance` loads CoreCLR and
 Emulator and returns a real decision, a Branch Worker executes one speculative action,
 and the root action is committed and closed.
 
+The same integration file also performs deterministic random root walks for both an
+independent combat and a whole run. These tests never call `emulate_action`; they choose
+one published legal action at a time with a locally seeded PRNG, commit it directly to
+root, and verify that decision IDs, branch logs, and the public board DTO progress for a
+minimum number of decisions.
+
 `LocalProcessTransport` imports `API.api_runtime.RLApiServerProcess` from
 `STS2_RL_ROOT`. CLR initialization remains inside the spawned RL child process.
