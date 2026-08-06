@@ -277,7 +277,7 @@ class TrainingApiClient:
             raise ApiProtocolError(f"unknown status: {status}")
 
         request_instance_id = request.get("instance_id")
-        if request_instance_id is not None:
+        if request_instance_id is not None and "instance_id" in response:
             self._require_response_match(
                 response, "instance_id", request_instance_id
             )
