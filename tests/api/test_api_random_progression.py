@@ -120,7 +120,9 @@ def _random_root_walk(
         assert initial["status"] == "completed", initial
         current = initial
         board_fingerprints = [_board_fingerprint(initial)]
-        decision_point_ids: list[str] = []
+        initial_decision_point_id = initial["decision_point_id"]
+        assert isinstance(initial_decision_point_id, str) and initial_decision_point_id
+        decision_point_ids = [initial_decision_point_id]
 
         for step_index in range(max_decisions):
             actions = _available_actions(current)
@@ -137,6 +139,7 @@ def _random_root_walk(
                 timeout_s=120.0,
             )
 
+            post_board_fingerprint = _board_fingerprint(current)
             trace_entry = {
                 "step": step_index,
                 "decision_point_id": previous_decision_point_id,
@@ -145,6 +148,8 @@ def _random_root_walk(
                 "action_id": chosen["action_id"],
                 "action_type": chosen.get("action_type"),
                 "label": chosen.get("label"),
+                "post_boundary": _masked_dto(current).get("boundary"),
+                "board_changed": post_board_fingerprint != board_fingerprints[-1],
             }
             trace.append(trace_entry)
             diagnostics = _trace_json(trace)
@@ -163,7 +168,7 @@ def _random_root_walk(
             }, diagnostics
 
             decision_point_ids.append(current["decision_point_id"])
-            board_fingerprints.append(_board_fingerprint(current))
+            board_fingerprints.append(post_board_fingerprint)
 
         diagnostics = _trace_json(trace)
         assert len(trace) >= min_decisions, diagnostics
