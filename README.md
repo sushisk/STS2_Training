@@ -2,6 +2,24 @@
 
 Training-side implementation for the `sushisk/STS2_RL` API v0.5.
 
+## Asyncio TCP smoke test
+
+RLとTrainingを別プロセスとして起動し、UTF-8 newline-delimited JSONで疎通します。
+まず`STS2_RL`側を起動します。
+
+```bash
+python -m API.tcp_server --host 127.0.0.1 --port 8765
+```
+
+別のプロセスでTraining側のpingを実行します。
+
+```bash
+python -m sts2_training.api.tcp_smoke --host 127.0.0.1 --port 8765
+```
+
+成功時は `{"transport_operation": "pong"}` が表示されます。
+`AsyncioTcpTransport.call()`には既存API v0.5のrequest dictをそのまま渡せます。
+
 ## Unit tests
 
 ```bash
