@@ -8,6 +8,31 @@ Training-side implementation for the `sushisk/STS2_RL` API v0.5.
 python -m pytest tests/api -m "not integration"
 ```
 
+## Selection audit logging
+
+Pass a `JsonlSelectionLogger` to `TrainingApiClient` to append one flushed UTF-8 JSON
+record for each `commit_action` or `emulate_action` call.
+
+```python
+from sts2_training.api.client import TrainingApiClient
+from sts2_training.selection_log import JsonlSelectionLogger
+
+with JsonlSelectionLogger("logs/selection.jsonl") as selection_log:
+    client = TrainingApiClient(
+        transport,
+        selection_logger=selection_log,
+    )
+```
+
+Each record contains the public Decision received from RL, the selection request, and the
+correlated result. A successful root selection also includes `room_result` when it ends a
+room and `run_result` when it ends a Whole Run. Rejected and faulted selections are logged
+before their exception is raised.
+
+Only the already-masked DTO received from RL is written. Training does not reconstruct or
+add hidden state, and speculative Branch results are never counted as root room/run
+results.
+
 ## Real Emulator integration test (Windows cmd.exe)
 
 ```bat

@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from sts2_training.api.transport import JsonObject, RlTransport
+from sts2_training.selection_log import SelectionAudit, SelectionEventLogger
 
 SCHEMA_VERSION = "0.5"
 ROOT_BRANCH_ID = "root"
@@ -46,18 +47,21 @@ class RequestFaultedError(ApiOperationError):
 
 
 class TrainingApiClient:
-    """Builds API v0.5 requests and validates correlated responses."""
+    """Build API v0.5 requests and validate correlated responses."""
 
     def __init__(
         self,
         transport: RlTransport,
         request_id_factory: Callable[[], str] | None = None,
+        *,
+        selection_logger: SelectionEventLogger | None = None,
     ) -> None:
         self._transport = transport
         serial = itertools.count(1)
         self._request_id_factory = request_id_factory or (
             lambda: f"req-{next(serial):06d}"
         )
+        self._audit = SelectionAudit(selection_logger)
         self._instance_id: str | None = None
 
     @property
@@ -78,6 +82,8 @@ class TrainingApiClient:
         self._require_status(response, {"completed"})
         instance_id = self._require_non_empty_str(response, "instance_id")
         self._instance_id = instance_id
+        self._audit.clear()
+        self._audit.remember(response)
         return instance_id
 
     def get_decision(
@@ -98,6 +104,7 @@ class TrainingApiClient:
         if response["status"] == "completed":
             self._require_response_match(response, "branch_id", branch_id)
             self._validate_decision_payload(response)
+            self._audit.remember(response)
         return response
 
     def commit_action(
@@ -119,11 +126,11 @@ class TrainingApiClient:
             decision_point_id=decision_point_id,
             action_id=action_id,
         )
-        response = self._execute(request, timeout_s=timeout_s)
-        if response["status"] == "completed":
-            self._require_response_match(response, "branch_id", ROOT_BRANCH_ID)
-            self._validate_decision_payload(response)
-        return response
+        return self._execute_selected_action(
+            request,
+            source_branch_id=ROOT_BRANCH_ID,
+            timeout_s=timeout_s,
+        )
 
     def emulate_action(
         self,
@@ -159,19 +166,11 @@ class TrainingApiClient:
             self._validate_simulation_options(simulation_options)
             fields["simulation_options"] = dict(simulation_options)
 
-        request = self._new_request("emulate_action", **fields)
-        response = self._execute(request, timeout_s=timeout_s)
-        if response["status"] in {"completed", "partial", "queued", "running"}:
-            self._require_response_match(response, "branch_id", branch_id)
-            if "parent_branch_id" in response:
-                self._require_response_match(
-                    response, "parent_branch_id", parent_branch_id
-                )
-            if "rng_id" in response:
-                self._require_response_match(response, "rng_id", rng_id)
-        if response["status"] in {"completed", "partial"}:
-            self._validate_decision_payload(response)
-        return response
+        return self._execute_selected_action(
+            self._new_request("emulate_action", **fields),
+            source_branch_id=parent_branch_id,
+            timeout_s=timeout_s,
+        )
 
     def cancel_branches(
         self,
@@ -217,6 +216,7 @@ class TrainingApiClient:
         response = self._execute(request, timeout_s=timeout_s)
         self._require_status(response, {"completed"})
         self._instance_id = None
+        self._audit.clear()
         return response
 
     def close(self) -> None:
@@ -259,6 +259,56 @@ class TrainingApiClient:
         if response["status"] == "faulted":
             raise RequestFaultedError(response)
         return response
+
+    def _execute_selected_action(
+        self,
+        request: JsonObject,
+        *,
+        source_branch_id: str,
+        timeout_s: float,
+    ) -> JsonObject:
+        response: JsonObject | None = None
+        try:
+            response = self._execute(request, timeout_s=timeout_s)
+            self._validate_selected_action_response(request, response)
+        except ApiOperationError as exc:
+            self._audit.record_action(
+                request, source_branch_id=source_branch_id, result=exc.response
+            )
+            raise
+        except Exception as exc:
+            self._audit.record_action(
+                request, source_branch_id=source_branch_id, result=response, error=exc
+            )
+            raise
+
+        self._audit.record_action(
+            request, source_branch_id=source_branch_id, result=response
+        )
+        return response
+
+    def _validate_selected_action_response(
+        self,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> None:
+        status = response["status"]
+        if request["operation"] == "commit_action":
+            if status == "completed":
+                self._require_response_match(response, "branch_id", ROOT_BRANCH_ID)
+                self._validate_decision_payload(response)
+            return
+
+        if status in {"completed", "partial", "queued", "running"}:
+            self._require_response_match(response, "branch_id", request["branch_id"])
+            if "parent_branch_id" in response:
+                self._require_response_match(
+                    response, "parent_branch_id", request["parent_branch_id"]
+                )
+            if "rng_id" in response:
+                self._require_response_match(response, "rng_id", request["rng_id"])
+        if status in {"completed", "partial"}:
+            self._validate_decision_payload(response)
 
     def _validate_envelope(
         self,
