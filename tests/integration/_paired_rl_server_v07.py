@@ -4,6 +4,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+_SERVER_MAX_MESSAGE_BYTES = 4096
+
 
 def _configure_rl_imports(root: Path) -> None:
     for subdirectory in ("Combat", "Run"):
@@ -65,6 +67,7 @@ async def _serve(root: Path, host: str, port: int) -> None:
         server_epoch=dispatcher.server_epoch,
         host=host,
         port=port,
+        max_message_bytes=_SERVER_MAX_MESSAGE_BYTES,
     )
     await server.start()
     print("PAIRED_RL_READY", flush=True)
