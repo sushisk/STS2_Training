@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.api.transport import (
     JsonObject,
     RetryRequest,
@@ -259,6 +260,7 @@ class TcpConnection:
         hello = json.dumps(
             {
                 "transport_operation": "hello",
+                "schema_version": SCHEMA_VERSION,
                 "client_session_id": self._client_session_id,
             },
             separators=(",", ":"),
@@ -270,9 +272,17 @@ class TcpConnection:
             response = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TransportError("RL hello response is not valid JSON") from exc
+        if not isinstance(response, dict):
+            raise TransportError("RL hello response must be a JSON object")
+        if response.get("transport_error") is not None:
+            detail = response.get("error")
+            suffix = f": {detail}" if isinstance(detail, str) and detail else ""
+            raise TransportError(
+                f"RL TCP hello failed with {response['transport_error']!r}{suffix}"
+            )
         if (
-            not isinstance(response, dict)
-            or response.get("transport_operation") != "hello"
+            response.get("transport_operation") != "hello"
+            or response.get("schema_version") != SCHEMA_VERSION
             or response.get("client_session_id") != self._client_session_id
         ):
             raise TransportError("RL TCP server returned an invalid hello response")
