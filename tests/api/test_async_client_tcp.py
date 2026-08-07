@@ -162,7 +162,8 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             return_exceptions=True,
         )
 
-        self.assertEqual(sum(result == "inst-001" for result in results), 1)
+        successes = [result for result in results if isinstance(result, str)]
+        self.assertEqual(successes, ["inst-001"])
         errors = [result for result in results if isinstance(result, RuntimeError)]
         self.assertEqual(len(errors), 1)
         self.assertIn("already has an active instance", str(errors[0]))
