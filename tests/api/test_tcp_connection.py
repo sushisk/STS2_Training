@@ -15,6 +15,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.connection_count = 0
         self.cancel_received = asyncio.Event()
         self.release_cancel = asyncio.Event()
+        self.delay_ping = False
         self.epoch = "epoch-1"
         self.server = await asyncio.start_server(self._handle_client, "127.0.0.1", 0)
         self.port = int(self.server.sockets[0].getsockname()[1])
@@ -53,6 +54,8 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                         "server_epoch": self.epoch,
                     }
                 elif request == {"transport_operation": "ping"}:
+                    if self.delay_ping:
+                        await asyncio.sleep(0.05)
                     response = {
                         "transport_operation": "pong",
                         "server_epoch": self.epoch,
@@ -98,6 +101,19 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.connection.server_epoch, "epoch-1")
         self.assertEqual(self.requests, [])
+
+    async def test_ping_timeout_discards_stream_before_next_exchange(self) -> None:
+        self.delay_ping = True
+        with self.assertRaisesRegex(TransportError, "ping timed out"):
+            await self.connection.ping(timeout_s=0.01)
+        self.assertFalse(self.connection.is_alive())
+
+        self.delay_ping = False
+        response = await self.connection.exchange(
+            self._message("after-ping-timeout"), timeout_s=1.0
+        )
+        self.assertEqual(response["echo"], self._message("after-ping-timeout"))
+        self.assertEqual(self.connection_count, 2)
 
     async def test_concurrent_exchanges_are_serialized_on_one_connection(self) -> None:
         first, second = await asyncio.gather(
