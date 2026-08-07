@@ -16,7 +16,7 @@ jobs:
     runs-on: [self-hosted, Windows]
     timeout-minutes: 15
     env:
-      PAIRED_RL_SHA: 7ec10030411b484267e5013639b0ca44979c7b33
+      PAIRED_RL_SHA: f0e6209fcbe943d2bdb912ec1e424fa01d114e4f
     steps:
       - name: Checkout Training PR
         uses: actions/checkout@v4
