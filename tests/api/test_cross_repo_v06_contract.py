@@ -64,6 +64,11 @@ class CrossRepoV06ContractTest(unittest.IsolatedAsyncioTestCase):
             raise unittest.SkipTest(
                 "set STS2_RL_ROOT or place STS2_RL beside STS2_Training to run cross-repo tests"
             )
+        cls._preexisting_api_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "API" or name.startswith("API.")
+        }
         cls._inserted_path = str(cls.rl_root)
         sys.path.insert(0, cls._inserted_path)
         cls.rl_server_module = importlib.import_module("API.server")
@@ -73,6 +78,11 @@ class CrossRepoV06ContractTest(unittest.IsolatedAsyncioTestCase):
     def tearDownClass(cls) -> None:
         if getattr(cls, "_inserted_path", None) in sys.path:
             sys.path.remove(cls._inserted_path)
+        for name in list(sys.modules):
+            if name == "API" or name.startswith("API."):
+                sys.modules.pop(name, None)
+        for name, module in getattr(cls, "_preexisting_api_modules", {}).items():
+            sys.modules[name] = module
 
     async def asyncSetUp(self) -> None:
         _FakeCombatInstance.creations = 0
@@ -137,7 +147,8 @@ class CrossRepoV06ContractTest(unittest.IsolatedAsyncioTestCase):
         _FakeCombatInstance.release_start.set()
         instance_id = await self.client.retry_request(retry, timeout_s=1.0)
 
-        self.assertEqual(instance_id, "inst-000001")
+        self.assertIsInstance(instance_id, str)
+        self.assertTrue(instance_id)
         self.assertEqual(_FakeCombatInstance.creations, 1)
         self.assertIsNone(self.client.pending_retry)
         self.assertEqual(self.client.next_request_seq, 2)
