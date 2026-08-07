@@ -7,7 +7,7 @@ from typing import Any
 from sts2_training.selection_log import SelectionAudit, SelectionEventLogger
 
 JsonObject = dict[str, Any]
-SCHEMA_VERSION = "0.6"
+SCHEMA_VERSION = "0.7"
 ROOT_BRANCH_ID = "root"
 ROOT_RNG_ID = 0
 KNOWN_STATUSES = frozenset(
@@ -27,6 +27,9 @@ _BRANCH_BATCH_OPERATIONS = frozenset(
 )
 _BRANCH_STATUS_VALUES = frozenset(
     {"queued", "running", "completed", "cancelled", "faulted", "released"}
+)
+_EMULATE_ACTIONS_BRANCH_STATUSES = frozenset(
+    {"completed", "partial", "queued", "running", "faulted"}
 )
 
 
@@ -165,6 +168,93 @@ class ApiContract:
             fields["simulation_options"] = dict(simulation_options)
         return self._new_request(request_seq, "emulate_action", **fields)
 
+    def _build_emulate_actions(
+        self,
+        request_seq: int,
+        instance_id: str,
+        items: Sequence[Mapping[str, Any]],
+        simulation_options: Mapping[str, Any] | None,
+    ) -> JsonObject:
+        """Build DTO v0.7's ``emulate_actions`` batch request: many parent/action pairs
+        admitted and executed as one Branch batch (e.g. one Beam Search frontier) in a
+        single request/response round trip, over the SAME single in-flight
+        request/retry machinery used for every other operation."""
+        self._validate_instance_id(instance_id)
+        if isinstance(items, (str, bytes)):
+            raise TypeError("items must be a sequence of item mappings")
+        items = list(items)
+        if not items:
+            raise ValueError("emulate_actions items must not be empty")
+
+        seen_branch_ids: set[str] = set()
+        normalized_items: list[JsonObject] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise TypeError("each emulate_actions item must be a mapping")
+            parent_branch_id = item["parent_branch_id"]
+            branch_id = item["branch_id"]
+            rng_id = item["rng_id"]
+            decision_point_id = item["decision_point_id"]
+            action_id = item["action_id"]
+            for value, name in (
+                (parent_branch_id, "parent_branch_id"),
+                (branch_id, "branch_id"),
+                (decision_point_id, "decision_point_id"),
+                (action_id, "action_id"),
+            ):
+                self._validate_non_empty_str(value, name)
+            if branch_id == ROOT_BRANCH_ID:
+                raise ValueError("emulate_actions item branch_id must not be 'root'")
+            if branch_id in seen_branch_ids:
+                raise ValueError(f"emulate_actions item branch_id {branch_id!r} is duplicated")
+            seen_branch_ids.add(branch_id)
+            if not isinstance(rng_id, int) or isinstance(rng_id, bool) or rng_id <= 0:
+                raise ValueError("emulate_actions item rng_id must be a positive integer")
+            normalized_items.append(
+                {
+                    "parent_branch_id": parent_branch_id,
+                    "branch_id": branch_id,
+                    "rng_id": rng_id,
+                    "decision_point_id": decision_point_id,
+                    "action_id": action_id,
+                }
+            )
+
+        fields: JsonObject = {"instance_id": instance_id, "items": normalized_items}
+        if simulation_options is not None:
+            self._validate_simulation_options(simulation_options)
+            fields["simulation_options"] = dict(simulation_options)
+        return self._new_request(request_seq, "emulate_actions", **fields)
+
+    def _validate_emulate_actions_response(
+        self,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> None:
+        self._require_status(response, {"completed"})
+        branch_results = response.get("branch_results")
+        if not isinstance(branch_results, dict):
+            raise ApiProtocolError("branch_results must be a dictionary")
+
+        items = request.get("items")
+        if not isinstance(items, list):
+            raise ApiProtocolError("emulate_actions request is missing items")
+        expected_branch_ids = {item["branch_id"] for item in items}
+        if set(branch_results) != expected_branch_ids:
+            raise ApiProtocolError("response branch_results keys do not match request items")
+
+        for branch_id, branch_result in branch_results.items():
+            if not isinstance(branch_result, Mapping):
+                raise ApiProtocolError(f"branch_results[{branch_id!r}] must be a dictionary")
+            status = branch_result.get("status")
+            if status not in _EMULATE_ACTIONS_BRANCH_STATUSES:
+                raise ApiProtocolError(f"invalid branch status for {branch_id!r}: {status!r}")
+            if status in {"completed", "partial"}:
+                self._require_response_match(branch_result, "branch_id", branch_id)
+                self._validate_decision_payload(branch_result)
+            elif status == "faulted":
+                self._require_non_empty_str(branch_result, "error")
+
     def _build_branch_batch_operation(
         self,
         request_seq: int,
@@ -210,6 +300,8 @@ class ApiContract:
             raise RequestFaultedError(response)
         if request.get("operation") in _BRANCH_BATCH_OPERATIONS:
             self._validate_branch_batch_response(request, response)
+        elif request.get("operation") == "emulate_actions":
+            self._validate_emulate_actions_response(request, response)
         return dict(response)
 
     def _validate_branch_batch_response(

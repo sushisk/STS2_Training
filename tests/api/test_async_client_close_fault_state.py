@@ -15,7 +15,7 @@ class _CloseFaultConnection:
     @staticmethod
     def _common(request: dict) -> dict:
         return {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],

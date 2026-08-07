@@ -21,7 +21,7 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
                     json.dumps(
                         {
                             "transport_operation": "hello",
-                            "schema_version": "0.6",
+                            "schema_version": "0.7",
                             "client_session_id": hello["client_session_id"],
                             "server_epoch": "epoch-1",
                         }
@@ -32,7 +32,7 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
 
                 request = json.loads(await reader.readline())
                 response = {
-                    "schema_version": "0.6",
+                    "schema_version": "0.7",
                     "server_epoch": "epoch-1",
                     "client_session_id": request["client_session_id"],
                     "request_seq": request["request_seq"],
@@ -66,7 +66,7 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
             max_response_bytes=128,
         )
         request = {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "client_session_id": "session-a",
             "request_seq": 1,
             "request_id": "session-a:1",
@@ -114,7 +114,7 @@ class SelectionAuditRetryTest(unittest.TestCase):
             }
         )
         request = {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "client_session_id": "session-a",
             "request_seq": 2,
             "request_id": "session-a:2",

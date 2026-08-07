@@ -1,4 +1,4 @@
-"""Async TCP connection for the RL/Training session-sequenced DTO contract v0.6."""
+"""Async TCP connection for the RL/Training session-sequenced DTO contract v0.7."""
 
 from __future__ import annotations
 

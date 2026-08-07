@@ -1,4 +1,4 @@
-"""Async-first Training client for RL/Training DTO contract v0.6."""
+"""Async-first Training client for RL/Training DTO contract v0.7."""
 
 from __future__ import annotations
 
@@ -138,6 +138,12 @@ class AsyncTrainingApiClient(ApiContract):
                     request, source_branch_id=parent, deadline=deadline
                 )
 
+            if operation == "emulate_actions":
+                items = request.get("items")
+                if not isinstance(items, list) or not items:
+                    raise ApiProtocolError("retry emulate_actions is missing items")
+                return await self._execute_emulate_actions(request, deadline=deadline)
+
             if operation in {"cancel_branches", "release_branches", "get_branch_status"}:
                 response = await self._execute(request, deadline=deadline)
                 self._consume_sequence(retry_request)
@@ -242,6 +248,65 @@ class AsyncTrainingApiClient(ApiContract):
             )
             return await self._execute_selected_action(
                 request, source_branch_id=parent_branch_id, deadline=deadline
+            )
+
+    async def emulate_actions(
+        self,
+        instance_id: str,
+        items: Sequence[Mapping[str, object]],
+        *,
+        timeout_s: float,
+        simulation_options: Mapping[str, object] | None = None,
+    ) -> JsonObject:
+        """DTO v0.7 batch counterpart of `emulate_action`: submit many parent/action
+        Branches (e.g. a whole Beam Search frontier) as ONE request over the same
+        single in-flight session-sequenced protocol - never as several concurrent
+        requests."""
+        async with self._operation_deadline(timeout_s) as deadline:
+            self._ensure_fresh_request_allowed()
+            request = self._build_emulate_actions(
+                self._next_request_seq, instance_id, items, simulation_options
+            )
+            return await self._execute_emulate_actions(request, deadline=deadline)
+
+    async def _execute_emulate_actions(
+        self,
+        request: JsonObject,
+        *,
+        deadline: float,
+    ) -> JsonObject:
+        token = RetryRequest.from_message(request)
+        response = await self._execute(request, deadline=deadline)
+        self._record_emulate_actions_batch(request, response)
+        self._consume_sequence(token)
+        return response
+
+    def _record_emulate_actions_batch(
+        self,
+        request: Mapping[str, object],
+        response: Mapping[str, object],
+    ) -> None:
+        branch_results = response.get("branch_results")
+        if not isinstance(branch_results, Mapping):
+            return
+        items = request.get("items")
+        if not isinstance(items, list):
+            return
+        for item in items:
+            branch_id = item.get("branch_id")
+            branch_result = branch_results.get(branch_id)
+            item_request = {
+                "instance_id": request.get("instance_id"),
+                "parent_branch_id": item.get("parent_branch_id"),
+                "branch_id": branch_id,
+                "decision_point_id": item.get("decision_point_id"),
+                "action_id": item.get("action_id"),
+                "request_id": request.get("request_id"),
+            }
+            self._record_selected_action(
+                item_request,
+                source_branch_id=item.get("parent_branch_id"),
+                result=branch_result,
             )
 
     async def cancel_branches(

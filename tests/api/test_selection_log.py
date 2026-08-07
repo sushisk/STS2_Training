@@ -29,7 +29,7 @@ def _decision(
 
 def _commit_request(*, request_id: str = "session-a:2") -> dict:
     return {
-        "schema_version": "0.6",
+        "schema_version": "0.7",
         "client_session_id": "session-a",
         "request_seq": 2,
         "request_id": request_id,

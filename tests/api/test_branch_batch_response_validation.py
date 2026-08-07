@@ -25,7 +25,7 @@ class _BranchBatchConnection:
 
     async def exchange(self, message: dict, *, deadline: float) -> dict:
         common = {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "server_epoch": "epoch-1",
             "client_session_id": message["client_session_id"],
             "request_seq": message["request_seq"],
