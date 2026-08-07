@@ -6,13 +6,21 @@ import json
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.asyncio_tcp_transport import AsyncioTcpTransport
-from sts2_training.api.client import RequestRejectedError
+from sts2_training.api.client import RequestRejectedError, TrainingApiClient
+from sts2_training.api.contract import ApiContract
+from sts2_training.api.tcp_connection import TcpConnection
 
 
 def ids():
     counter = itertools.count(1)
     return lambda: f"req-{next(counter):03d}"
+
+
+class ApiClientArchitectureTest(unittest.TestCase):
+    def test_sync_and_async_clients_share_contract_not_each_other(self) -> None:
+        self.assertTrue(issubclass(TrainingApiClient, ApiContract))
+        self.assertTrue(issubclass(AsyncTrainingApiClient, ApiContract))
+        self.assertFalse(issubclass(AsyncTrainingApiClient, TrainingApiClient))
 
 
 class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
@@ -24,9 +32,9 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             0,
         )
         self.port = int(self.server.sockets[0].getsockname()[1])
-        self.transport = AsyncioTcpTransport(port=self.port)
+        self.connection = TcpConnection(port=self.port)
         self.client = AsyncTrainingApiClient(
-            self.transport,
+            self.connection,
             request_id_factory=ids(),
         )
 
