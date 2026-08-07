@@ -40,6 +40,13 @@ sent. `request_seq` advances only after the operation-specific response is accep
 `operation` is `"emulate_actions"` and the request contains a non-empty `items` array.
 Optional `simulation_options` uses the same validation rules as `emulate_action`.
 
+For Combat, `simulation_options.max_time_ms` is a **per-Branch execution timeout**, not
+a wall-clock deadline for the entire batch. Each worker's current FIFO-head Branch gets
+an absolute deadline; completion on another worker does not extend that deadline. If a
+worker has multiple Branches queued, the next Branch receives a fresh deadline after the
+preceding Branch on that worker completes. Consequently total batch wall-clock time may
+exceed `max_time_ms` when a batch is larger than the worker count.
+
 Conceptual shape:
 
 ```json
@@ -67,7 +74,8 @@ Conceptual shape:
     }
   ],
   "simulation_options": {
-    "stop_condition": "next_decision"
+    "stop_condition": "next_decision",
+    "max_time_ms": 60000
   }
 }
 ```
@@ -103,7 +111,14 @@ pre-existing b1 -> c1
 pre-existing b2 -> c2
 ```
 
-The target integration is one Beam depth per `emulate_actions` request.
+### Batch-size capability
+
+A single `emulate_actions` request cannot contain more Branches than RL's configured
+`BranchManager.max_branches` capacity. The standard Combat configuration uses 64. A
+frontier wider than the active capacity must therefore be split into multiple
+`emulate_actions` requests at the same Beam depth. The Beam integration target is
+"one depth = one or more bounded batch requests", not an unconditional one-request-per-
+depth guarantee.
 
 ## Admission and execution
 
@@ -111,10 +126,16 @@ Admission is all-or-nothing. RL validates every item in Phase A before registeri
 new Branch or mutating RNG hypothesis state. If any item is invalid, the entire request
 is rejected and no item is admitted.
 
-After successful admission, Phase B registers and queues every WorkItem before one
-`BranchManager.poll()` call. That call synchronously waits for every Branch dispatched
-by the call to reach a terminal outcome. Worker processes may execute the queued items
-in parallel.
+After admission, Phase B prepares all WorkItems before committing internal Branch
+records. Heterogeneous-parent Branches are then registered as one manager batch before a
+single `BranchManager.poll()` call. If coordinator-side preparation, submission,
+dispatch, or response finalization raises, all internal Branches from that batch are
+cancelled/released, batch bookkeeping is removed, and RNG allocation state is restored.
+Any public branch ID already registered before such an unexpected failure remains burned
+(non-reusable) but is quarantined and cannot become a parent or execute later.
+
+`BranchManager.poll()` synchronously waits for every Branch dispatched by the call to
+reach a terminal outcome. Worker processes may execute queued items in parallel.
 
 ## Response
 
@@ -175,6 +196,11 @@ item-scoped identity equivalent to `(request_id, branch_id)`:
 - exact replay: one `selection_recovery` event per item;
 - replay never creates a second logical `selection` for the same item.
 
+Because the protocol is single-in-flight, Training only retains replay identities for
+the immediately current/previous request. When a different `request_id` is observed,
+older selection identities are discarded; audit replay bookkeeping is therefore bounded
+by one batch rather than total speculative selections over the search.
+
 ## Explicit non-goals for v0.7
 
 The following are outside this contract change:
@@ -190,4 +216,5 @@ The following are outside this contract change:
 - Beam frontier generation/scoring/pruning changes themselves.
 
 Beam integration is a follow-up change that should replace frontier-by-frontier single
-calls with `emulate_actions([...])`, targeting `1 Beam depth = 1 emulate_actions request`.
+calls with bounded `emulate_actions([...])` chunks, targeting one Beam depth per one or
+more batch requests.
