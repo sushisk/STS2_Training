@@ -34,9 +34,10 @@ class SimulationOptionsContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not supported"):
             self._build({"stop_condition": "never"})
 
-    def test_valid_and_extension_options_are_preserved(self) -> None:
+    def test_valid_nullable_and_extension_options_are_preserved(self) -> None:
         options = {
             "max_depth": 1,
+            "max_steps": None,
             "stop_condition": "next_decision",
             "future_extension": {"enabled": True},
         }
