@@ -21,6 +21,7 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
                     json.dumps(
                         {
                             "transport_operation": "hello",
+                            "schema_version": "0.6",
                             "client_session_id": hello["client_session_id"],
                             "server_epoch": "epoch-1",
                         }
