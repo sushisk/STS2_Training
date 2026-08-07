@@ -75,31 +75,30 @@ class SelectionAudit:
 
         # A completion-uncertain action is recorded on its first attempt so external
         # cancellation and transport failures remain auditable. Exact same-request-id
-        # replay is transport recovery for that logical selection, not a second
-        # selection. Suppress the duplicate event while still applying a successful
-        # replay result to the in-memory decision audit below.
-        if not is_retry_of_last_selection:
-            event: dict[str, Any] = {
-                "event": "selection",
-                "received": received,
-                "request": dict(request),
-                "result": dict(result) if result is not None else None,
+        # replay is transport recovery for that logical selection, so keep the original
+        # `selection` record and append a distinct recovery record with the definitive
+        # replay outcome instead of emitting a second logical selection.
+        event: dict[str, Any] = {
+            "event": "selection_recovery" if is_retry_of_last_selection else "selection",
+            "received": received,
+            "request": dict(request),
+            "result": dict(result) if result is not None else None,
+        }
+        if request["operation"] == "commit_action" and result is not None:
+            event.update(_root_outcomes(received, result))
+        if error is not None:
+            event["client_error"] = {
+                "type": type(error).__name__,
+                "message": str(error),
             }
-            if request["operation"] == "commit_action" and result is not None:
-                event.update(_root_outcomes(received, result))
-            if error is not None:
-                event["client_error"] = {
-                    "type": type(error).__name__,
-                    "message": str(error),
-                }
 
-            try:
-                self._logger(deepcopy(event))
-            except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
-                _LOG.exception("selection logger failed")
+        try:
+            self._logger(deepcopy(event))
+        except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
+            _LOG.exception("selection logger failed")
 
-            if isinstance(request_id, str) and request_id:
-                self._last_selection_request_id = request_id
+        if not is_retry_of_last_selection and isinstance(request_id, str) and request_id:
+            self._last_selection_request_id = request_id
 
         successful = (
             error is None
