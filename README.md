@@ -35,6 +35,9 @@ Instanceを解釈しません。
 v0.5では1接続上のrequest/responseを直列化するため、TCP専用のinternal IDやresponse routerは
 持ちません。相関はDTO自身の`request_id`を`AsyncTrainingApiClient`が検証します。
 
+デフォルトの`request_id`はUUIDベースです。Training processを再起動したりclientを作り直したりしても
+`req-000001`のような短いcounterへ戻らないため、RL server-wideのrequest ledgerと衝突しません。
+
 ```python
 import asyncio
 
@@ -62,11 +65,46 @@ TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送
 `schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
 DTO契約と同一です。
 
+### Timeout / cancellation / retry semantics
+
+TCP timeoutは「RLが未実行」という意味ではなく、「Trainingが結果を観測できなかった」という
+ambiguous completionです。送信開始後にtimeoutまたはtask cancellationが起きた場合、
+`TcpConnection`はそのstreamを破棄します。request_id/operation mismatchなどAPI correlation failureを
+検出した場合も、次のcallの前にconnectionをinvalidateします。
+
+同一の論理requestをretryする場合は、**同じpayloadと同じ`request_id`**をfresh connection上で再送します。
+新しい`request_id`で`start_instance` / `commit_action` / `emulate_action`を呼び直すと別の論理requestになり、
+二重実行の可能性があります。raw DTOを保持しているrecovery codeでは`TcpConnection.exchange()`へ
+同じdictを再度渡すことでsame-ID retryできます。高レベルAPIはambiguous completionを自動的に
+「成功」または「未実行」と推測しません。
+
+`ApiContract`のactive instance / selection audit stateは、correlated API responseを正常に受理した時だけ
+更新されます。したがってtimeoutした`start_instance`ではローカルstateは未開始のまま、timeoutした
+`close_instance`ではローカルstateはactiveのままです。これはRL stateが確定したことを意味しないため、
+同一requestのretry/replayで結果をreconcileしてから次の論理操作へ進みます。
+
+transport-only response（例: `{"transport_error":"message_too_large", ...}`）はAPI DTOではなく
+`TransportError`として扱われ、API envelope validationには渡しません。
+
 ## Unit tests
 
 ```bash
 python -m pytest tests/api -m "not integration"
 ```
+
+### Cross-repository TCP contract tests
+
+`STS2_RL` checkoutを`PYTHONPATH`へ追加すると、Training側からreal
+`AsyncioTcpServer + RLApiServer`へ接続するcontract testも実行できます。RL checkoutが見つからない通常環境では
+このmoduleだけskipされます。
+
+```bash
+PYTHONPATH=src:../STS2_RL python -m pytest tests/api/test_rl_cross_repo_contract.py -vv
+```
+
+このtestは、client再生成後の`start_instance` request_id collision、fresh connection上のsame-ID replay、
+responseを観測できなかった`close_instance`のretry、RL側response frame limitから返る`transport_error`の
+Training側分類を確認します。
 
 ## Selection audit logging
 
