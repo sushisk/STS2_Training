@@ -110,8 +110,6 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertFalse(self.connection.is_alive())
 
-        # Let the old server-side handler produce its late response after the client has
-        # already discarded that stream. The next call must use a fresh connection.
         self.release_cancel.set()
         await asyncio.sleep(0)
         response = await self.connection.exchange(
@@ -129,20 +127,20 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(self.connection.is_alive())
 
-    async def test_response_can_exceed_request_frame_limit(self) -> None:
+    async def test_response_frame_limit_is_enforced(self) -> None:
         connection = TcpConnection(
             port=self.port,
             max_message_bytes=128,
         )
         try:
-            response = await connection.exchange(
-                {"request_id": "large-response"},
-                timeout_s=1.0,
-            )
+            with self.assertRaisesRegex(TransportError, "response exceeds"):
+                await connection.exchange(
+                    {"request_id": "large-response"},
+                    timeout_s=1.0,
+                )
+            self.assertFalse(connection.is_alive())
         finally:
             await connection.close()
-
-        self.assertEqual(response, {"payload": "x" * 4096})
 
 
 if __name__ == "__main__":
