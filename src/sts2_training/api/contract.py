@@ -28,19 +28,6 @@ _BRANCH_BATCH_OPERATIONS = frozenset(
 _BRANCH_STATUS_VALUES = frozenset(
     {"queued", "running", "completed", "cancelled", "faulted", "released"}
 )
-_SIMULATION_OPTION_TYPES = {
-    "stop_condition": str,
-    "max_depth": int,
-    "max_steps": int,
-    "max_time_ms": int,
-    "max_hypotheses": int,
-}
-_POSITIVE_INTEGER_SIMULATION_OPTIONS = frozenset(
-    {"max_depth", "max_steps", "max_time_ms", "max_hypotheses"}
-)
-_SUPPORTED_STOP_CONDITIONS = frozenset(
-    {"next_decision", "combat_end", "room_end", "run_end"}
-)
 
 
 class ApiProtocolError(RuntimeError):
@@ -296,24 +283,19 @@ class ApiContract:
     def _validate_simulation_options(options: Mapping[str, Any]) -> None:
         if not isinstance(options, Mapping):
             raise TypeError("simulation_options must be a mapping")
-        for key, value in options.items():
-            expected = _SIMULATION_OPTION_TYPES.get(key)
-            if expected is None or value is None:
-                continue
-            if expected is int:
-                if isinstance(value, bool) or not isinstance(value, int):
-                    raise ValueError(f"simulation_options.{key} must be an integer")
-                if key in _POSITIVE_INTEGER_SIMULATION_OPTIONS and value <= 0:
-                    raise ValueError(
-                        f"simulation_options.{key} must be a positive integer"
-                    )
-                continue
-            if not isinstance(value, expected):
-                raise ValueError(
-                    f"simulation_options.{key} must be of type {expected.__name__}"
-                )
+        for key in ("max_depth", "max_steps", "max_time_ms", "max_hypotheses"):
+            value = options.get(key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"simulation_options.{key} must be a positive integer")
         stop_condition = options.get("stop_condition")
-        if stop_condition is not None and stop_condition not in _SUPPORTED_STOP_CONDITIONS:
+        if stop_condition is not None and stop_condition not in {
+            "next_decision",
+            "combat_end",
+            "room_end",
+            "run_end",
+        }:
             raise ValueError(
                 f"simulation_options.stop_condition {stop_condition!r} is not supported"
             )
