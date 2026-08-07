@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 from sts2_training.api.tcp_connection import TcpConnection
 from sts2_training.api.transport import TransportError
@@ -82,12 +83,51 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second, {"echo": {"request_id": "2"}})
         self.assertEqual(self.connection_count, 1)
 
-    async def test_timeout_discards_connection(self) -> None:
-        with self.assertRaisesRegex(TransportError, "timed out"):
+    async def test_connection_lock_wait_consumes_exchange_timeout(self) -> None:
+        await self.connection._lock.acquire()
+        try:
+            with self.assertRaisesRegex(TransportError, "timed out") as caught:
+                await self.connection.exchange(
+                    {"request_id": "queued"},
+                    timeout_s=0.01,
+                )
+        finally:
+            self.connection._lock.release()
+
+        self.assertFalse(caught.exception.completion_uncertain)
+        self.assertEqual(self.requests, [])
+
+    async def test_connect_consumes_exchange_timeout(self) -> None:
+        connection = TcpConnection(
+            port=self.port,
+            connect_timeout_s=5.0,
+        )
+
+        async def slow_open_connection(*args, **kwargs):
+            await asyncio.sleep(1.0)
+            raise AssertionError("exchange deadline should expire first")
+
+        try:
+            with patch(
+                "sts2_training.api.tcp_connection.asyncio.open_connection",
+                side_effect=slow_open_connection,
+            ):
+                with self.assertRaisesRegex(TransportError, "timed out") as caught:
+                    await connection.exchange(
+                        {"request_id": "connect-slow"},
+                        timeout_s=0.01,
+                    )
+            self.assertFalse(caught.exception.completion_uncertain)
+        finally:
+            await connection.close()
+
+    async def test_timeout_after_send_is_completion_uncertain(self) -> None:
+        with self.assertRaisesRegex(TransportError, "timed out") as caught:
             await self.connection.exchange(
                 {"request_id": "slow"},
                 timeout_s=0.01,
             )
+        self.assertTrue(caught.exception.completion_uncertain)
         self.assertFalse(self.connection.is_alive())
 
         response = await self.connection.exchange(
@@ -97,7 +137,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response, {"echo": {"request_id": "next"}})
         self.assertEqual(self.connection_count, 2)
 
-    async def test_external_cancellation_discards_connection_before_next_request(self) -> None:
+    async def test_external_cancellation_after_send_marks_completion_uncertain(self) -> None:
         task = asyncio.create_task(
             self.connection.exchange(
                 {"request_id": "cancel"},
@@ -106,8 +146,9 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(self.cancel_received.wait(), timeout=1.0)
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(asyncio.CancelledError) as caught:
             await task
+        self.assertTrue(getattr(caught.exception, "completion_uncertain", False))
         self.assertFalse(self.connection.is_alive())
 
         self.release_cancel.set()
@@ -119,12 +160,29 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response, {"echo": {"request_id": "after-cancel"}})
         self.assertEqual(self.connection_count, 2)
 
-    async def test_transport_error_response_is_transport_error_and_disconnects(self) -> None:
-        with self.assertRaisesRegex(TransportError, "message_too_large"):
+    async def test_request_too_large_is_known_pre_send_failure(self) -> None:
+        connection = TcpConnection(
+            port=self.port,
+            max_message_bytes=32,
+        )
+        try:
+            with self.assertRaisesRegex(TransportError, "request exceeds") as caught:
+                await connection.exchange(
+                    {"request_id": "large", "payload": "x" * 128},
+                    timeout_s=1.0,
+                )
+            self.assertFalse(caught.exception.completion_uncertain)
+            self.assertEqual(self.requests, [])
+        finally:
+            await connection.close()
+
+    async def test_transport_error_response_is_definitive_failure(self) -> None:
+        with self.assertRaisesRegex(TransportError, "message_too_large") as caught:
             await self.connection.exchange(
                 {"request_id": "transport-error"},
                 timeout_s=1.0,
             )
+        self.assertFalse(caught.exception.completion_uncertain)
         self.assertFalse(self.connection.is_alive())
 
     async def test_response_is_not_capped_by_request_frame_limit(self) -> None:
