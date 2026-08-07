@@ -84,7 +84,7 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SelectionAuditRetryTest(unittest.TestCase):
-    def test_exact_retry_does_not_emit_second_selection_event(self) -> None:
+    def test_exact_retry_records_recovery_without_second_selection(self) -> None:
         events: list[dict] = []
         audit = SelectionAudit(events.append)
         audit.remember(
@@ -124,10 +124,13 @@ class SelectionAuditRetryTest(unittest.TestCase):
             result=replay_result,
         )
 
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["event"], "selection")
         self.assertEqual(events[0]["request"]["request_id"], "req-commit-1")
         self.assertEqual(events[0]["client_error"]["type"], "TransportError")
+        self.assertEqual(events[1]["event"], "selection_recovery")
+        self.assertEqual(events[1]["request"]["request_id"], "req-commit-1")
+        self.assertEqual(events[1]["result"], replay_result)
 
         next_request = {
             **request,
@@ -141,8 +144,8 @@ class SelectionAuditRetryTest(unittest.TestCase):
             result=None,
             error=RuntimeError("stop"),
         )
-        self.assertEqual(len(events), 2)
-        self.assertEqual(events[1]["received"]["decision_point_id"], "decision-2")
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[2]["received"]["decision_point_id"], "decision-2")
 
 
 if __name__ == "__main__":
