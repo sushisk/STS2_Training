@@ -9,6 +9,7 @@ from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.api.client import RequestRejectedError, TrainingApiClient
 from sts2_training.api.contract import ApiContract, ApiProtocolError
 from sts2_training.api.tcp_connection import TcpConnection
+from sts2_training.api.transport import TransportError
 
 
 def ids():
@@ -149,6 +150,20 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_client_lock_wait_consumes_method_timeout_without_uncertainty(self) -> None:
+        await self.client._operation_lock.acquire()
+        try:
+            with self.assertRaisesRegex(TransportError, "timed out before request"):
+                await self.client.start_instance(
+                    {"instance_type": "combat"},
+                    timeout_s=0.01,
+                )
+        finally:
+            self.client._operation_lock.release()
+
+        self.assertFalse(self.client.start_uncertain)
+        self.assertEqual(self.requests, [])
+
     async def test_concurrent_start_instance_creates_only_one_instance(self) -> None:
         results = await asyncio.gather(
             self.client.start_instance(
@@ -243,27 +258,30 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             {"stop_condition": "next_decision"},
         )
 
-    async def test_rejected_dto_response_raises_api_error(self) -> None:
+    async def test_rejected_dto_response_raises_api_error_without_uncertainty(self) -> None:
         with self.assertRaises(RequestRejectedError):
             await self.client.start_instance(
                 {"instance_type": "reject"},
                 timeout_s=1.0,
             )
 
-    async def test_protocol_mismatch_invalidates_connection_before_next_call(self) -> None:
+        self.assertFalse(self.client.start_uncertain)
+
+    async def test_protocol_mismatch_invalidates_connection_and_marks_start_uncertain(self) -> None:
         with self.assertRaisesRegex(ApiProtocolError, "request_id does not match"):
             await self.client.start_instance(
                 {"instance_type": "mismatch"},
                 timeout_s=1.0,
             )
         self.assertFalse(self.connection.is_alive())
+        self.assertTrue(self.client.start_uncertain)
 
-        instance_id = await self.client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
-        )
-        self.assertEqual(instance_id, "inst-001")
-        self.assertEqual(self.connection_count, 2)
+        with self.assertRaisesRegex(RuntimeError, "result is unknown"):
+            await self.client.start_instance(
+                {"instance_type": "combat"},
+                timeout_s=1.0,
+            )
+        self.assertEqual(self.connection_count, 1)
 
 
 if __name__ == "__main__":
