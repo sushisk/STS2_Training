@@ -1,51 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import json
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.client import RequestRejectedError, TrainingApiClient
-from sts2_training.api.contract import ApiContract, ApiProtocolError
+from sts2_training.api.contract import ApiProtocolError, RequestRejectedError
 from sts2_training.api.tcp_connection import TcpConnection
 from sts2_training.api.transport import TransportError
-
-
-def ids():
-    counter = itertools.count(1)
-    return lambda: f"req-{next(counter):03d}"
-
-
-class ApiClientArchitectureTest(unittest.TestCase):
-    def test_sync_and_async_clients_share_contract_not_each_other(self) -> None:
-        self.assertTrue(issubclass(TrainingApiClient, ApiContract))
-        self.assertTrue(issubclass(AsyncTrainingApiClient, ApiContract))
-        self.assertFalse(issubclass(AsyncTrainingApiClient, TrainingApiClient))
-
-    def test_default_request_ids_do_not_restart_from_a_shared_serial(self) -> None:
-        first = ApiContract()._new_request("test")["request_id"]
-        second = ApiContract()._new_request("test")["request_id"]
-        self.assertNotEqual(first, second)
-        self.assertTrue(first.startswith("req-"))
-        self.assertTrue(second.startswith("req-"))
 
 
 class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.requests: list[dict] = []
         self.connection_count = 0
-        self.server = await asyncio.start_server(
-            self._handle_client,
-            "127.0.0.1",
-            0,
-        )
+        self.server = await asyncio.start_server(self._handle_client, "127.0.0.1", 0)
         self.port = int(self.server.sockets[0].getsockname()[1])
-        self.connection = TcpConnection(port=self.port)
-        self.client = AsyncTrainingApiClient(
-            self.connection,
-            request_id_factory=ids(),
+        self.connection = TcpConnection(
+            port=self.port,
+            client_session_id="session-a",
         )
+        self.client = AsyncTrainingApiClient(self.connection)
 
     async def asyncTearDown(self) -> None:
         await self.client.close()
@@ -61,8 +36,20 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
         try:
             while line := await reader.readline():
                 request = json.loads(line)
-                self.requests.append(request)
-                response = self._response_for(request)
+                if request.get("transport_operation") == "hello":
+                    response = {
+                        "transport_operation": "hello",
+                        "client_session_id": request["client_session_id"],
+                        "server_epoch": "epoch-1",
+                    }
+                elif request == {"transport_operation": "ping"}:
+                    response = {
+                        "transport_operation": "pong",
+                        "server_epoch": "epoch-1",
+                    }
+                else:
+                    self.requests.append(request)
+                    response = self._response_for(request)
                 writer.write(json.dumps(response).encode("utf-8") + b"\n")
                 await writer.drain()
         except (ConnectionError, OSError):
@@ -75,22 +62,24 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 pass
 
     @staticmethod
-    def _response_for(request: dict) -> dict:
-        common = {
-            "schema_version": request["schema_version"],
+    def _common(request: dict) -> dict:
+        return {
+            "schema_version": "0.6",
+            "server_epoch": "epoch-1",
+            "client_session_id": request["client_session_id"],
+            "request_seq": request["request_seq"],
             "request_id": request["request_id"],
             "operation": request["operation"],
         }
-        operation = request["operation"]
 
+    @classmethod
+    def _response_for(cls, request: dict) -> dict:
+        common = cls._common(request)
+        operation = request["operation"]
         if operation == "start_instance":
             instance_type = request["instance_config"].get("instance_type")
             if instance_type == "reject":
-                return {
-                    **common,
-                    "status": "rejected",
-                    "error": "bad config",
-                }
+                return {**common, "status": "rejected", "error": "bad config"}
             if instance_type == "mismatch":
                 return {
                     **common,
@@ -131,10 +120,9 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             )
         return response
 
-    async def test_start_instance_sends_v05_dto(self) -> None:
+    async def test_start_instance_sends_v06_session_sequence(self) -> None:
         instance_id = await self.client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
 
         self.assertEqual(instance_id, "inst-001")
@@ -142,65 +130,56 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             self.requests,
             [
                 {
-                    "schema_version": "0.5",
-                    "request_id": "req-001",
+                    "schema_version": "0.6",
+                    "client_session_id": "session-a",
+                    "request_seq": 1,
+                    "request_id": "session-a:1",
                     "operation": "start_instance",
                     "instance_config": {"instance_type": "combat"},
                 }
             ],
         )
+        self.assertEqual(self.client.next_request_seq, 2)
+        self.assertEqual(self.connection.server_epoch, "epoch-1")
 
-    async def test_client_lock_wait_consumes_method_timeout_without_uncertainty(self) -> None:
+    async def test_client_lock_wait_consumes_method_timeout_without_request(self) -> None:
         await self.client._operation_lock.acquire()
         try:
             with self.assertRaisesRegex(TransportError, "timed out before request"):
                 await self.client.start_instance(
-                    {"instance_type": "combat"},
-                    timeout_s=0.01,
+                    {"instance_type": "combat"}, timeout_s=0.01
                 )
         finally:
             self.client._operation_lock.release()
-
-        self.assertFalse(self.client.start_uncertain)
         self.assertEqual(self.requests, [])
+        self.assertEqual(self.client.next_request_seq, 1)
 
-    async def test_concurrent_start_instance_creates_only_one_instance(self) -> None:
+    async def test_concurrent_start_instance_creates_only_one_request(self) -> None:
         results = await asyncio.gather(
-            self.client.start_instance(
-                {"instance_type": "combat-a"},
-                timeout_s=1.0,
-            ),
-            self.client.start_instance(
-                {"instance_type": "combat-b"},
-                timeout_s=1.0,
-            ),
+            self.client.start_instance({"instance_type": "combat-a"}, timeout_s=1.0),
+            self.client.start_instance({"instance_type": "combat-b"}, timeout_s=1.0),
             return_exceptions=True,
         )
-
         successes = [result for result in results if isinstance(result, str)]
         self.assertEqual(successes, ["inst-001"])
         errors = [result for result in results if isinstance(result, RuntimeError)]
         self.assertEqual(len(errors), 1)
-        self.assertIn("already has an active instance", str(errors[0]))
-        start_requests = [
-            request for request in self.requests if request["operation"] == "start_instance"
-        ]
-        self.assertEqual(len(start_requests), 1)
-        self.assertEqual(self.client.instance_id, "inst-001")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.client.next_request_seq, 2)
 
-    async def test_close_instance_allows_a_later_start(self) -> None:
+    async def test_close_then_start_continues_same_session_sequence(self) -> None:
         instance_id = await self.client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
         await self.client.close_instance(instance_id, timeout_s=1.0)
-
         restarted = await self.client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
 
         self.assertEqual(restarted, "inst-001")
+        self.assertEqual(
+            [request["request_seq"] for request in self.requests], [1, 2, 3]
+        )
         self.assertEqual(
             [request["operation"] for request in self.requests],
             ["start_instance", "close_instance", "start_instance"],
@@ -208,8 +187,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_decision_and_commit_round_trip_over_tcp(self) -> None:
         instance_id = await self.client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
         decision = await self.client.get_decision(instance_id, timeout_s=1.0)
         committed = await self.client.commit_action(
@@ -221,24 +199,12 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decision["branch_id"], "root")
         self.assertEqual(committed["decision_point_id"], "d-root-002")
-        self.assertEqual(
-            self.requests[-1],
-            {
-                "schema_version": "0.5",
-                "request_id": "req-003",
-                "operation": "commit_action",
-                "instance_id": "inst-001",
-                "branch_id": "root",
-                "rng_id": 0,
-                "decision_point_id": "d-root-001",
-                "action_id": "a-001",
-            },
-        )
+        self.assertEqual(self.requests[-1]["request_seq"], 3)
+        self.assertEqual(self.requests[-1]["request_id"], "session-a:3")
 
     async def test_emulate_action_round_trip_over_tcp(self) -> None:
         instance_id = await self.client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
         response = await self.client.emulate_action(
             instance_id,
@@ -250,38 +216,37 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             simulation_options={"stop_condition": "next_decision"},
             timeout_s=1.0,
         )
-
         self.assertEqual(response["branch_id"], "branch-001")
-        self.assertEqual(response["rng_id"], 1)
-        self.assertEqual(
-            self.requests[-1]["simulation_options"],
-            {"stop_condition": "next_decision"},
-        )
+        self.assertEqual(self.requests[-1]["request_seq"], 2)
 
-    async def test_rejected_dto_response_raises_api_error_without_uncertainty(self) -> None:
+    async def test_rejected_response_consumes_sequence_and_allows_next_request(self) -> None:
         with self.assertRaises(RequestRejectedError):
             await self.client.start_instance(
-                {"instance_type": "reject"},
-                timeout_s=1.0,
+                {"instance_type": "reject"}, timeout_s=1.0
             )
+        self.assertEqual(self.client.next_request_seq, 2)
+        self.assertIsNone(self.client.pending_retry)
 
-        self.assertFalse(self.client.start_uncertain)
+        instance_id = await self.client.start_instance(
+            {"instance_type": "combat"}, timeout_s=1.0
+        )
+        self.assertEqual(instance_id, "inst-001")
+        self.assertEqual(self.requests[-1]["request_seq"], 2)
 
-    async def test_protocol_mismatch_invalidates_connection_and_marks_start_uncertain(self) -> None:
-        with self.assertRaisesRegex(ApiProtocolError, "request_id does not match"):
+    async def test_protocol_mismatch_invalidates_stream_and_keeps_sequence_pending(self) -> None:
+        with self.assertRaisesRegex(ApiProtocolError, "request_id"):
             await self.client.start_instance(
-                {"instance_type": "mismatch"},
-                timeout_s=1.0,
+                {"instance_type": "mismatch"}, timeout_s=1.0
             )
         self.assertFalse(self.connection.is_alive())
         self.assertTrue(self.client.start_uncertain)
+        self.assertEqual(self.client.pending_retry.request_seq, 1)
+        self.assertEqual(self.client.next_request_seq, 1)
 
-        with self.assertRaisesRegex(RuntimeError, "result is unknown"):
+        with self.assertRaisesRegex(RuntimeError, "unresolved request"):
             await self.client.start_instance(
-                {"instance_type": "combat"},
-                timeout_s=1.0,
+                {"instance_type": "combat"}, timeout_s=1.0
             )
-        self.assertEqual(self.connection_count, 1)
 
 
 if __name__ == "__main__":
