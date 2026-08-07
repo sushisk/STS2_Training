@@ -161,6 +161,7 @@ class ApiContract:
             "action_id": action_id,
         }
         if simulation_options is not None:
+            self._validate_simulation_options(simulation_options)
             fields["simulation_options"] = dict(simulation_options)
         return self._new_request(request_seq, "emulate_action", **fields)
 
@@ -277,6 +278,27 @@ class ApiContract:
             raise RuntimeError("client has no active instance")
         if instance_id != self._instance_id:
             raise ValueError("instance_id does not match the active client instance")
+
+    @staticmethod
+    def _validate_simulation_options(options: Mapping[str, Any]) -> None:
+        if not isinstance(options, Mapping):
+            raise TypeError("simulation_options must be a mapping")
+        for key in ("max_depth", "max_steps", "max_time_ms", "max_hypotheses"):
+            value = options.get(key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"simulation_options.{key} must be a positive integer")
+        stop_condition = options.get("stop_condition")
+        if stop_condition is not None and stop_condition not in {
+            "next_decision",
+            "combat_end",
+            "room_end",
+            "run_end",
+        }:
+            raise ValueError(
+                f"simulation_options.stop_condition {stop_condition!r} is not supported"
+            )
 
     def _validate_decision_payload(self, response: Mapping[str, Any]) -> None:
         self._require_non_empty_str(response, "decision_point_id")
