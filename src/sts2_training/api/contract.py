@@ -302,8 +302,44 @@ class ApiContract:
 
     def _validate_decision_payload(self, response: Mapping[str, Any]) -> None:
         self._require_non_empty_str(response, "decision_point_id")
-        if not isinstance(response.get("masked_emulator_dto"), dict):
+        masked = response.get("masked_emulator_dto")
+        if not isinstance(masked, dict):
             raise ApiProtocolError("masked_emulator_dto must be a dictionary")
+
+        legal_actions = masked.get("legal_actions")
+        if legal_actions is None:
+            if masked.get("run_terminal") is True:
+                return
+            raise ApiProtocolError("masked_emulator_dto.legal_actions must be a list")
+        if not isinstance(legal_actions, list):
+            raise ApiProtocolError("masked_emulator_dto.legal_actions must be a list")
+
+        action_ids: set[str] = set()
+        for index, action in enumerate(legal_actions):
+            if not isinstance(action, Mapping):
+                raise ApiProtocolError(f"legal_actions[{index}] must be a dictionary")
+            action_id = action.get("action_id")
+            if not isinstance(action_id, str) or not action_id:
+                raise ApiProtocolError(
+                    f"legal_actions[{index}].action_id must be a non-empty string"
+                )
+            if action_id in action_ids:
+                raise ApiProtocolError(f"duplicate legal action_id {action_id!r}")
+            action_ids.add(action_id)
+
+            action_type = action.get("action_type")
+            if not isinstance(action_type, str) or not action_type:
+                raise ApiProtocolError(
+                    f"legal_actions[{index}].action_type must be a non-empty string"
+                )
+            if "is_available" in action and not isinstance(action["is_available"], bool):
+                raise ApiProtocolError(
+                    f"legal_actions[{index}].is_available must be a boolean"
+                )
+            if "parameters" in action and not isinstance(action["parameters"], Mapping):
+                raise ApiProtocolError(
+                    f"legal_actions[{index}].parameters must be a dictionary"
+                )
 
     def _normalize_branch_ids(self, branch_ids: Sequence[str]) -> list[str]:
         if isinstance(branch_ids, (str, bytes)):
