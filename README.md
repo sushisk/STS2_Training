@@ -35,8 +35,7 @@ Instanceを解釈しません。
 v0.5では1接続上のrequest/responseを直列化するため、TCP専用のinternal IDやresponse routerは
 持ちません。相関はDTO自身の`request_id`を`AsyncTrainingApiClient`が検証します。
 
-デフォルトの`request_id`はUUIDベースです。Training processを再起動したりclientを作り直したりしても
-`req-000001`のような短いcounterへ戻らないため、RL server-wideのrequest ledgerと衝突しません。
+デフォルトの`request_id`はUUIDベースです。
 
 ```python
 import asyncio
@@ -65,28 +64,17 @@ TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送
 `schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
 DTO契約と同一です。
 
-`TcpConnection(max_message_bytes=...)` の上限は**送信request frameだけ**に適用されます。
-API responseには同じ上限を適用せず、newlineまで1フレームを読み切ります。これは
-`commit_action` / `emulate_action`のようなnon-idempotent operationが成功した後に、大きいresponseを
-transport層で捨ててsame-ID retryでも永久に結果を回収できなくなる事態を避けるためです。
+`TcpConnection(max_message_bytes=...)` は送受信双方の1フレーム上限です。上限超過、timeout、
+task cancellation、stream error、API correlation failureでは現在のconnectionを破棄し、後続callが
+古いresponseを誤って消費しないようにします。
 
-### Timeout / cancellation / retry semantics
+### Timeout / cancellation semantics
 
-TCP timeoutは「RLが未実行」という意味ではなく、「Trainingが結果を観測できなかった」という
-ambiguous completionです。送信開始後にtimeoutまたはtask cancellationが起きた場合、
-`TcpConnection`はそのstreamを破棄します。request_id/operation mismatchなどAPI correlation failureを
-検出した場合も、次のcallの前にconnectionをinvalidateします。
-
-同一の論理requestをretryする場合は、**同じpayloadと同じ`request_id`**をfresh connection上で再送します。
-新しい`request_id`で`start_instance` / `commit_action` / `emulate_action`を呼び直すと別の論理requestになり、
-二重実行の可能性があります。raw DTOを保持しているrecovery codeでは`TcpConnection.exchange()`へ
-同じdictを再度渡すことでsame-ID retryできます。高レベルAPIはambiguous completionを自動的に
-「成功」または「未実行」と推測しません。
-
-`ApiContract`のactive instance / selection audit stateは、correlated API responseを正常に受理した時だけ
-更新されます。したがってtimeoutした`start_instance`ではローカルstateは未開始のまま、timeoutした
-`close_instance`ではローカルstateはactiveのままです。これはRL stateが確定したことを意味しないため、
-同一requestのretry/replayで結果をreconcileしてから次の論理操作へ進みます。
+送信開始後のtimeoutやcancellationは、RL側でoperationが実行されたかどうかをTraining側から確定できない
+ambiguous completionです。このPRではnon-idempotent operationのreplay/recovery protocolは定義しません。
+そのため`start_instance` / `commit_action` / `emulate_action` / `close_instance`が送信後に失敗した場合、
+同じ高レベルoperationを新しい`request_id`で自動再実行しないでください。safe retry / reconciliationは
+server-side idempotencyと合わせて別PRで定義します。
 
 transport-only response（例: oversized requestに対する
 `{"transport_error":"message_too_large","direction":"request", ...}`）はAPI DTOではなく
@@ -97,21 +85,6 @@ transport-only response（例: oversized requestに対する
 ```bash
 python -m pytest tests/api -m "not integration"
 ```
-
-### Cross-repository TCP contract tests
-
-`STS2_RL` checkoutを`PYTHONPATH`へ追加すると、Training側からreal
-`AsyncioTcpServer + RLApiServer`へ接続するcontract testも実行できます。RL checkoutが見つからない通常環境では
-このmoduleだけskipされます。
-
-```bash
-PYTHONPATH=src:../STS2_RL python -m pytest tests/api/test_rl_cross_repo_contract.py -vv
-```
-
-このtestは、client再生成後の`start_instance` request_id collision、fresh connection上のsame-ID replay、
-responseを観測できなかった`close_instance`のretry、およびrequest frame limitを超えるサイズの成功responseを
-返すnon-idempotent `commit_action`が実responseを受信・same-ID replayでき、処理自体は1回しか実行されないことを
-確認します。
 
 ## Selection audit logging
 
