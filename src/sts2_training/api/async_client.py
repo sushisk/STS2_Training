@@ -28,6 +28,7 @@ _STATE_CHANGING_OPERATIONS = frozenset(
         "close_instance",
     }
 )
+_UNKNOWN_INSTANCE_FAULT_KIND = "unknown_instance"
 
 
 class AsyncTrainingApiClient(ApiContract):
@@ -402,10 +403,17 @@ class AsyncTrainingApiClient(ApiContract):
 
         try:
             validated = self._validate_api_response(request, response)
-        except ApiOperationError:
-            # rejected/faulted is a definitive API response, so any transport
-            # uncertainty for this same request has been reconciled.
-            self._clear_pending_if_matches(request_token)
+        except ApiOperationError as exc:
+            if self._is_evicted_close_replay_rejection(request_token, exc):
+                # A bounded RL close tombstone can be evicted before a lost close
+                # response is replayed. In that case unknown_instance does not prove
+                # whether the original close succeeded, so keep the exact replay token
+                # and close uncertainty until explicit reconciliation.
+                self._remember_uncertain(request, request_token)
+            else:
+                # Other rejected/faulted responses are definitive for this logical
+                # request and reconcile any prior transport uncertainty.
+                self._clear_pending_if_matches(request_token)
             raise
         except ApiProtocolError:
             # A malformed/mismatched response means we can no longer trust that the
@@ -492,6 +500,18 @@ class AsyncTrainingApiClient(ApiContract):
             self._start_uncertain = True
         elif operation == "close_instance":
             self._close_uncertain = True
+
+    def _is_evicted_close_replay_rejection(
+        self,
+        retry_request: RetryRequest,
+        exc: ApiOperationError,
+    ) -> bool:
+        return (
+            self._pending_retry == retry_request
+            and retry_request.operation == "close_instance"
+            and exc.response.get("status") == "rejected"
+            and exc.response.get("fault_kind") == _UNKNOWN_INSTANCE_FAULT_KIND
+        )
 
     def _clear_pending_if_matches(self, retry_request: RetryRequest) -> None:
         if self._pending_retry == retry_request:
