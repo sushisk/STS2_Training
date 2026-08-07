@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import itertools
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -61,9 +61,8 @@ class ApiContract:
         *,
         selection_logger: SelectionEventLogger | None = None,
     ) -> None:
-        serial = itertools.count(1)
         self._request_id_factory = request_id_factory or (
-            lambda: f"req-{next(serial):06d}"
+            lambda: f"req-{uuid.uuid4()}"
         )
         self._audit = SelectionAudit(selection_logger)
         self._instance_id: str | None = None
