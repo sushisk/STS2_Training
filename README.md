@@ -48,9 +48,17 @@ asyncio.run(main())
 ```
 
 `AsyncTrainingApiClient`は現在、client-level lockでpublic operationを直列化します。
-デフォルト`request_id`はUUIDベースです。送信後のtimeout/cancellationやcorrelation failureでは
-connectionを破棄し、`start_instance`の結果が不明な場合は追加startを拒否します。
-自動retry/reconciliationや並列実行モデルはこの実装では定義しません。
+デフォルト`request_id`はUUIDベースです。
+
+各public APIの`timeout_s`はmethodを呼んだ時点からの総budgetです。client-level lock待ち、
+`TcpConnection`のlock待ち、connect、request write/drain、response readは同じabsolute deadlineを
+消費します。`connect_timeout_s`はconnect phaseだけの追加上限であり、APIのdeadlineを延長しません。
+
+`start_instance`で送信前と確定できる失敗（client/connection lock待ちのtimeout、connect失敗、
+request size超過など）は追加startを禁止しません。一方、requestがRLに到達した可能性がある状態で
+responseを確定できず終了した場合、またはcorrelation不一致でresponseを信頼できない場合は
+`start_uncertain`となり、同じclientからの追加`start_instance`を送信前に拒否します。
+自動retry/reconciliationやuncertain instanceのcleanupはこの実装では定義しません。
 
 `TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用し、
 transport-only errorはAPI DTO validationの前に`TransportError`として扱います。
