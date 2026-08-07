@@ -52,8 +52,7 @@ class AsyncTrainingApiClient(ApiContract):
     If a state-changing request loses a definitive result after it may have reached RL,
     the client stores the exact serialized request as ``pending_retry`` and fails closed:
     unrelated API requests are blocked until that same request is replayed with
-    ``retry_request()`` or an operation-specific reconciliation method explicitly clears
-    the uncertainty.
+    ``retry_request()`` or an explicit reconciliation method clears the uncertainty.
     """
 
     def __init__(
@@ -124,6 +123,27 @@ class AsyncTrainingApiClient(ApiContract):
             self._audit.clear()
         self._close_uncertain = False
         self._clear_pending_operation("close_instance")
+
+    def reconcile_pending_uncertainty(self) -> None:
+        """Abandon a non-lifecycle pending request after external reconciliation.
+
+        This is an explicit operator escape hatch for state-changing requests whose
+        exact replay cannot produce a usable API response. ``start_instance`` and
+        ``close_instance`` must use their dedicated reconciliation methods because they
+        also determine local instance lifecycle state. The selection audit is cleared so
+        callers must obtain fresh Decisions before relying on prior local audit state.
+        """
+        self._ensure_reconciliation_idle()
+        retry_request = self._pending_retry
+        if retry_request is None:
+            raise RuntimeError("there is no completion-uncertain request to reconcile")
+        operation = retry_request.operation
+        if operation == "start_instance":
+            raise RuntimeError("use reconcile_start_uncertainty() for start_instance")
+        if operation == "close_instance":
+            raise RuntimeError("use reconcile_close_uncertainty() for close_instance")
+        self._audit.clear()
+        self._clear_pending_if_matches(retry_request)
 
     async def retry_request(
         self,
