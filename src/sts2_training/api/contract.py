@@ -67,6 +67,7 @@ class ApiContract:
         self._validate_non_empty_str(self._client_session_id, "client_session_id")
         self._audit = SelectionAudit(selection_logger)
         self._instance_id: str | None = None
+        self._max_emulate_actions_items: int | None = None
 
     @property
     def client_session_id(self) -> str:
@@ -75,6 +76,11 @@ class ApiContract:
     @property
     def instance_id(self) -> str | None:
         return self._instance_id
+
+    @property
+    def max_emulate_actions_items(self) -> int | None:
+        """RL-published batch limit for the active instance, when supported."""
+        return self._max_emulate_actions_items
 
     def _new_request(self, request_seq: int, operation: str, **fields: Any) -> JsonObject:
         if not isinstance(request_seq, int) or isinstance(request_seq, bool) or request_seq <= 0:
@@ -94,7 +100,13 @@ class ApiContract:
     def _accept_start_instance(self, response: Mapping[str, Any]) -> str:
         self._require_status(response, {"completed"})
         instance_id = self._require_non_empty_str(response, "instance_id")
+        max_items = response.get("max_emulate_actions_items")
+        if max_items is not None and (
+            isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0
+        ):
+            raise ApiProtocolError("max_emulate_actions_items must be a positive integer")
         self._instance_id = instance_id
+        self._max_emulate_actions_items = max_items
         self._audit.clear()
         self._audit.remember(response)
         return instance_id
@@ -189,6 +201,15 @@ class ApiContract:
         items = list(items)
         if not items:
             raise ValueError("emulate_actions items must not be empty")
+        if (
+            self._max_emulate_actions_items is not None
+            and len(items) > self._max_emulate_actions_items
+        ):
+            raise ValueError(
+                f"emulate_actions item count {len(items)} exceeds RL "
+                f"max_emulate_actions_items={self._max_emulate_actions_items}; "
+                "chunk the frontier into multiple requests"
+            )
 
         seen_branch_ids: set[str] = set()
         normalized_items: list[JsonObject] = []
@@ -294,6 +315,7 @@ class ApiContract:
     def _accept_close_instance(self, response: JsonObject) -> JsonObject:
         self._require_status(response, {"completed"})
         self._instance_id = None
+        self._max_emulate_actions_items = None
         self._audit.clear()
         return response
 
