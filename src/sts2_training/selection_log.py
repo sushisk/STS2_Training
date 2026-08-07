@@ -30,9 +30,11 @@ class SelectionAudit:
     def __init__(self, logger: SelectionEventLogger | None) -> None:
         self._logger = logger
         self._decisions: dict[tuple[str, str], dict[str, Any]] = {}
+        self._last_selection_request_id: str | None = None
 
     def clear(self) -> None:
         self._decisions.clear()
+        self._last_selection_request_id = None
 
     def remember(self, response: Mapping[str, Any]) -> None:
         if self._logger is None:
@@ -64,24 +66,40 @@ class SelectionAudit:
         ):
             received = None
 
-        event: dict[str, Any] = {
-            "event": "selection",
-            "received": received,
-            "request": dict(request),
-            "result": dict(result) if result is not None else None,
-        }
-        if request["operation"] == "commit_action" and result is not None:
-            event.update(_root_outcomes(received, result))
-        if error is not None:
-            event["client_error"] = {
-                "type": type(error).__name__,
-                "message": str(error),
-            }
+        request_id = request.get("request_id")
+        is_retry_of_last_selection = (
+            isinstance(request_id, str)
+            and request_id
+            and request_id == self._last_selection_request_id
+        )
 
-        try:
-            self._logger(deepcopy(event))
-        except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
-            _LOG.exception("selection logger failed")
+        # A completion-uncertain action is recorded on its first attempt so external
+        # cancellation and transport failures remain auditable. Exact same-request-id
+        # replay is transport recovery for that logical selection, not a second
+        # selection. Suppress the duplicate event while still applying a successful
+        # replay result to the in-memory decision audit below.
+        if not is_retry_of_last_selection:
+            event: dict[str, Any] = {
+                "event": "selection",
+                "received": received,
+                "request": dict(request),
+                "result": dict(result) if result is not None else None,
+            }
+            if request["operation"] == "commit_action" and result is not None:
+                event.update(_root_outcomes(received, result))
+            if error is not None:
+                event["client_error"] = {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                }
+
+            try:
+                self._logger(deepcopy(event))
+            except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
+                _LOG.exception("selection logger failed")
+
+            if isinstance(request_id, str) and request_id:
+                self._last_selection_request_id = request_id
 
         successful = (
             error is None
