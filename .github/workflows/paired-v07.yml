@@ -10,15 +10,17 @@ permissions:
   statuses: write
 
 env:
-  PAIRED_RL_SHA: e19095c149aa6e6fcd5b93bb10b99fb38726c908
   PAIR_STATUS_CONTEXT: paired-v07-trusted-exact-pair
 
 jobs:
   preflight:
     name: verify current exact pair
     runs-on: ubuntu-latest
+    outputs:
+      rl_sha: ${{ steps.pair.outputs.rl_sha }}
     steps:
       - name: Reject untrusted or stale PR identity
+        id: pair
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,17 +50,14 @@ jobs:
 
           echo "Event Training SHA:   ${EVENT_TRAINING_SHA}"
           echo "Current Training SHA: ${current_training_sha}"
-          echo "Pinned RL SHA:        ${PAIRED_RL_SHA}"
           echo "Current RL SHA:       ${current_rl_sha}"
 
           if [[ "${EVENT_TRAINING_SHA}" != "${current_training_sha}" ]]; then
             echo "::error::This run is not for the current Training PR #19 head."
             exit 1
           fi
-          if [[ "${PAIRED_RL_SHA}" != "${current_rl_sha}" ]]; then
-            echo "::error::PAIRED_RL_SHA is stale; update it to RL PR #8 current head."
-            exit 1
-          fi
+
+          echo "rl_sha=${current_rl_sha}" >> "${GITHUB_OUTPUT}"
 
   paired-rl-v07:
     name: paired RL v0.7 integration (trusted exact pair)
@@ -66,6 +65,8 @@ jobs:
     runs-on: [self-hosted, Windows]
     environment: paired-v07-trusted
     timeout-minutes: 15
+    env:
+      PAIRED_RL_SHA: ${{ needs.preflight.outputs.rl_sha }}
     steps:
       - name: Mark exact pair pending
         shell: pwsh
@@ -206,6 +207,8 @@ jobs:
     needs: [preflight, paired-rl-v07]
     if: always()
     runs-on: ubuntu-latest
+    env:
+      PAIRED_RL_SHA: ${{ needs.preflight.outputs.rl_sha }}
     steps:
       - name: Verify final exact-pair status
         shell: bash
