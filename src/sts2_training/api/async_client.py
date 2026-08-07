@@ -25,12 +25,13 @@ from sts2_training.selection_log import SelectionEventLogger
 class AsyncTrainingApiClient(ApiContract):
     """Serialize one logical request stream over reconnectable asyncio TCP.
 
-    The client advances ``request_seq`` only after observing a definitive API response.
-    If a TCP failure happens after send, the exact request becomes ``pending_retry`` and
-    every fresh API operation fails closed until that same sequence is replayed.
+    ``request_seq`` advances only after the complete operation-specific DTO response has
+    been validated. If transport or protocol validation becomes completion-uncertain,
+    the exact current request is retained as ``pending_retry`` and fresh requests fail
+    closed.
 
-    RL process restart is not reconciled in-band; a changed ``server_epoch`` permanently
-    invalidates this client session and callers must create a new client/session.
+    A changed RL ``server_epoch`` permanently invalidates this logical session. v0.6
+    intentionally does not retry an unresolved command into another RL process epoch.
     """
 
     def __init__(
@@ -87,17 +88,32 @@ class AsyncTrainingApiClient(ApiContract):
         async with self._operation_deadline(timeout_s) as deadline:
             if operation == "start_instance":
                 response = await self._execute(request, deadline=deadline)
-                return self._accept_start_instance(response)
+                try:
+                    result = self._accept_start_instance(response)
+                except ApiProtocolError:
+                    await self._mark_protocol_uncertain(request)
+                    raise
+                self._consume_sequence(retry_request)
+                return result
+
             if operation == "get_decision":
                 branch_id = request.get("branch_id")
                 if not isinstance(branch_id, str) or not branch_id:
                     raise ApiProtocolError("retry get_decision is missing branch_id")
                 response = await self._execute(request, deadline=deadline)
-                return self._accept_get_decision(response, branch_id)
+                try:
+                    result = self._accept_get_decision(response, branch_id)
+                except ApiProtocolError:
+                    await self._mark_protocol_uncertain(request)
+                    raise
+                self._consume_sequence(retry_request)
+                return result
+
             if operation == "commit_action":
                 return await self._execute_selected_action(
                     request, source_branch_id=ROOT_BRANCH_ID, deadline=deadline
                 )
+
             if operation == "emulate_action":
                 parent = request.get("parent_branch_id")
                 if not isinstance(parent, str) or not parent:
@@ -105,11 +121,22 @@ class AsyncTrainingApiClient(ApiContract):
                 return await self._execute_selected_action(
                     request, source_branch_id=parent, deadline=deadline
                 )
+
             if operation in {"cancel_branches", "release_branches", "get_branch_status"}:
-                return await self._execute(request, deadline=deadline)
+                response = await self._execute(request, deadline=deadline)
+                self._consume_sequence(retry_request)
+                return response
+
             if operation == "close_instance":
                 response = await self._execute(request, deadline=deadline)
-                return self._accept_close_instance(response)
+                try:
+                    result = self._accept_close_instance(response)
+                except ApiProtocolError:
+                    await self._mark_protocol_uncertain(request)
+                    raise
+                self._consume_sequence(retry_request)
+                return result
+
             raise ValueError(f"unsupported pending operation {operation!r}")
 
     async def start_instance(
@@ -124,7 +151,13 @@ class AsyncTrainingApiClient(ApiContract):
                 raise RuntimeError("client already has an active instance")
             request = self._build_start_instance(self._next_request_seq, instance_config)
             response = await self._execute(request, deadline=deadline)
-            return self._accept_start_instance(response)
+            try:
+                result = self._accept_start_instance(response)
+            except ApiProtocolError:
+                await self._mark_protocol_uncertain(request)
+                raise
+            self._consume_sequence(RetryRequest.from_message(request))
+            return result
 
     async def get_decision(
         self,
@@ -139,7 +172,13 @@ class AsyncTrainingApiClient(ApiContract):
                 self._next_request_seq, instance_id, branch_id
             )
             response = await self._execute(request, deadline=deadline)
-            return self._accept_get_decision(response, branch_id)
+            try:
+                result = self._accept_get_decision(response, branch_id)
+            except ApiProtocolError:
+                await self._mark_protocol_uncertain(request)
+                raise
+            self._consume_sequence(RetryRequest.from_message(request))
+            return result
 
     async def commit_action(
         self,
@@ -232,7 +271,13 @@ class AsyncTrainingApiClient(ApiContract):
             self._ensure_fresh_request_allowed()
             request = self._build_close_instance(self._next_request_seq, instance_id)
             response = await self._execute(request, deadline=deadline)
-            return self._accept_close_instance(response)
+            try:
+                result = self._accept_close_instance(response)
+            except ApiProtocolError:
+                await self._mark_protocol_uncertain(request)
+                raise
+            self._consume_sequence(RetryRequest.from_message(request))
+            return result
 
     async def close(self) -> None:
         async with self._operation_lock:
@@ -258,7 +303,9 @@ class AsyncTrainingApiClient(ApiContract):
             request = self._build_branch_batch_operation(
                 self._next_request_seq, operation, instance_id, branch_ids
             )
-            return await self._execute(request, deadline=deadline)
+            response = await self._execute(request, deadline=deadline)
+            self._consume_sequence(RetryRequest.from_message(request))
+            return response
 
     async def _execute(self, request: JsonObject, *, deadline: float) -> JsonObject:
         token = RetryRequest.from_message(request)
@@ -268,6 +315,7 @@ class AsyncTrainingApiClient(ApiContract):
             raise RuntimeError(
                 "an unresolved request is pending; retry the exact request before continuing"
             )
+
         try:
             response = await self._connection.exchange(request, deadline=deadline)
         except ServerEpochChangedError:
@@ -286,20 +334,18 @@ class AsyncTrainingApiClient(ApiContract):
             raise
 
         try:
-            validated = self._validate_api_response(request, response)
+            return self._validate_api_response(request, response)
         except ApiOperationError as exc:
+            # rejected/faulted are correlated terminal API responses. They consume the
+            # current sequence even though the public method raises an exception.
             self._consume_sequence(token)
             if token.operation == "close_instance" and exc.response.get("status") == "faulted":
                 self._instance_id = None
                 self._audit.clear()
             raise
         except ApiProtocolError:
-            await self._connection.invalidate()
-            self._remember_pending(token)
+            await self._mark_protocol_uncertain(request)
             raise
-
-        self._consume_sequence(token)
-        return validated
 
     async def _execute_selected_action(
         self,
@@ -309,9 +355,15 @@ class AsyncTrainingApiClient(ApiContract):
         deadline: float,
     ) -> JsonObject:
         response: JsonObject | None = None
+        token = RetryRequest.from_message(request)
         try:
             response = await self._execute(request, deadline=deadline)
-            self._validate_selected_action_response(request, response)
+            try:
+                self._validate_selected_action_response(request, response)
+            except ApiProtocolError:
+                await self._mark_protocol_uncertain(request)
+                raise
+            self._consume_sequence(token)
         except asyncio.CancelledError as exc:
             self._record_selected_action(
                 request,
@@ -335,10 +387,15 @@ class AsyncTrainingApiClient(ApiContract):
                 error=exc,
             )
             raise
+
         self._record_selected_action(
             request, source_branch_id=source_branch_id, result=response
         )
         return response
+
+    async def _mark_protocol_uncertain(self, request: Mapping[str, object]) -> None:
+        await self._connection.invalidate()
+        self._remember_pending(RetryRequest.from_message(request))
 
     def _ensure_fresh_request_allowed(self) -> None:
         if self._session_invalid:
