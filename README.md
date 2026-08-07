@@ -1,81 +1,93 @@
 # STS2_Training API connection
 
-Training-side implementation for the `sushisk/STS2_RL` API v0.5.
+Training-side implementation for the `sushisk/STS2_RL` async TCP / DTO v0.6 contract.
 
-## Asyncio TCP smoke test
+The supported path is now deliberately **async + TCP only**. The legacy synchronous
+`TrainingApiClient` / `LocalProcessTransport` path is retired for v0.6 because it cannot
+participate in the session handshake and `server_epoch` safety model.
 
-RLとTrainingを別プロセスとして起動し、UTF-8 newline-delimited JSONで疎通します。
-まず`STS2_RL`側を起動します。
+## TCP smoke test
 
-```bash
-python -m API.tcp_server --host 127.0.0.1 --port 8765
-```
-
-別のプロセスでTraining側のpingを実行します。
+Start RL separately, then run:
 
 ```bash
 python -m sts2_training.api.tcp_smoke --host 127.0.0.1 --port 8765
 ```
 
-成功時は `{"transport_operation": "pong"}` が表示されます。
-`AsyncioTcpTransport.call()`には既存API v0.5のrequest dictをそのまま渡せます。
+A new TCP stream first sends an exact transport hello containing a stable
+`client_session_id`. RL returns its `server_epoch`. The smoke test then sends ping and
+prints a response similar to:
 
-## Unit tests
-
-```bash
-python -m pytest tests/api -m "not integration"
+```json
+{"server_epoch":"...","transport_operation":"pong"}
 ```
 
-## Selection audit logging
-
-Pass a `JsonlSelectionLogger` to `TrainingApiClient` to append one flushed UTF-8 JSON
-record for each `commit_action` or `emulate_action` call.
+## Async DTO API client
 
 ```python
-from sts2_training.api.client import TrainingApiClient
-from sts2_training.selection_log import JsonlSelectionLogger
+import asyncio
 
-with JsonlSelectionLogger("logs/selection.jsonl") as selection_log:
-    client = TrainingApiClient(
-        transport,
-        selection_logger=selection_log,
-    )
+from sts2_training.api import AsyncTrainingApiClient, TcpConnection
+
+
+async def main() -> None:
+    connection = TcpConnection(host="127.0.0.1", port=8765)
+    async with AsyncTrainingApiClient(connection) as client:
+        instance_id = await client.start_instance(
+            {"instance_type": "combat"},
+            timeout_s=30.0,
+        )
+        decision = await client.get_decision(instance_id, timeout_s=30.0)
+        print(decision)
+
+
+asyncio.run(main())
 ```
 
-Each record contains the public Decision received from RL, the selection request, and the
-correlated result. A successful root selection also includes `room_result` when it ends a
-room and `run_result` when it ends a Whole Run. Rejected and faulted selections are logged
-before their exception is raised.
+## Session sequencing
 
-Only the already-masked DTO received from RL is written. Training does not reconstruct or
-add hidden state, and speculative Branch results are never counted as root room/run
-results.
+Each client owns one `client_session_id` and sends strictly increasing `request_seq`
+values. `request_id` is deterministic: `<client_session_id>:<request_seq>`.
 
-## Real Emulator integration test (Windows cmd.exe)
+The client advances its sequence only after receiving a definitive API response. If a
+request may have reached RL but no valid response was observed, the exact serialized DTO
+is exposed as `client.pending_retry` and all fresh operations fail closed.
 
-```bat
-set STS2_RL_ROOT=C:\path\to\STS2_RL
-python -m pytest tests/api/test_api_smoke.py -m integration -vv
+Recovery is explicit:
+
+```python
+pending = client.pending_retry
+if pending is not None:
+    result = await client.retry_request(pending, timeout_s=30.0)
 ```
 
-The combat smoke test covers the complete runtime path without a separate connection
-test: Training starts the spawned RL process, `start_instance` loads CoreCLR and the
-Emulator and returns a real decision, a Branch Worker executes one speculative action,
-and the root action is committed and closed.
+RL keeps the most recent executable request/response for every logical session. Exact
+same-sequence retry is therefore replayed rather than executed again. A different payload
+with the same sequence or a sequence gap is rejected.
 
-## Random root progression integration tests
+## RL restart semantics
 
-```bat
-set STS2_RL_ROOT=C:\path\to\STS2_RL
-python -m pytest tests/api/test_api_random_progression.py -m integration -vv
-```
+Every API response and transport hello/pong contains `server_epoch`. A reconnect must see
+the same epoch. If RL restarted, `TcpConnection` raises `ServerEpochChangedError` and the
+`AsyncTrainingApiClient` becomes permanently invalid. Create a new client/session; do not
+retry the unresolved request into the new RL process.
 
-These tests start a fixed independent Combat and a fixed Whole Run, never call
-`emulate_action`, and select directly from each published root `legal_actions` list with
-a locally seeded PRNG. They verify the configured Combat state, renewed decision IDs,
-contiguous root branch logs, at least one non-first random choice, and several distinct
-public board states after removing `legal_actions` and DTO-version metadata from the
-progress fingerprint.
+This is intentional: v0.6 guarantees at-most-once execution within one RL process epoch,
+not durable exactly-once execution across emulator process restarts.
 
-`LocalProcessTransport` imports `API.api_runtime.RLApiServerProcess` from
-`STS2_RL_ROOT`. CLR initialization remains inside the spawned RL child process.
+## Timeouts, cancellation, and response limits
+
+A public API `timeout_s` covers waiting for the client operation lock and the TCP
+exchange. Cancellation/timeout after send invalidates the stream and preserves the exact
+pending request.
+
+`TcpConnection(max_response_bytes=...)` bounds response buffering independently from the
+request frame limit. If a valid cached response is larger than the local receiver bound,
+raise the bound with `await connection.set_max_response_bytes(...)` and replay the exact
+`pending_retry`; changing the local receiver limit does not change request identity.
+
+## Selection audit
+
+`AsyncTrainingApiClient` still accepts a `SelectionEventLogger`. A completion-uncertain
+selection is logged on the first attempt; replay of the same `request_id` is recorded as
+selection recovery rather than a second logical selection.

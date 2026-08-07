@@ -30,9 +30,11 @@ class SelectionAudit:
     def __init__(self, logger: SelectionEventLogger | None) -> None:
         self._logger = logger
         self._decisions: dict[tuple[str, str], dict[str, Any]] = {}
+        self._last_selection_request_id: str | None = None
 
     def clear(self) -> None:
         self._decisions.clear()
+        self._last_selection_request_id = None
 
     def remember(self, response: Mapping[str, Any]) -> None:
         if self._logger is None:
@@ -64,8 +66,20 @@ class SelectionAudit:
         ):
             received = None
 
+        request_id = request.get("request_id")
+        is_retry_of_last_selection = (
+            isinstance(request_id, str)
+            and request_id
+            and request_id == self._last_selection_request_id
+        )
+
+        # A completion-uncertain action is recorded on its first attempt so external
+        # cancellation and transport failures remain auditable. Exact same-request-id
+        # replay is transport recovery for that logical selection, so keep the original
+        # `selection` record and append a distinct recovery record with the definitive
+        # replay outcome instead of emitting a second logical selection.
         event: dict[str, Any] = {
-            "event": "selection",
+            "event": "selection_recovery" if is_retry_of_last_selection else "selection",
             "received": received,
             "request": dict(request),
             "result": dict(result) if result is not None else None,
@@ -82,6 +96,9 @@ class SelectionAudit:
             self._logger(deepcopy(event))
         except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
             _LOG.exception("selection logger failed")
+
+        if not is_retry_of_last_selection and isinstance(request_id, str) and request_id:
+            self._last_selection_request_id = request_id
 
         successful = (
             error is None
