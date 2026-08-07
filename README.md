@@ -56,12 +56,19 @@ asyncio.run(main())
 
 `start_instance`で送信前と確定できる失敗（client/connection lock待ちのtimeout、connect失敗、
 request size超過など）は追加startを禁止しません。一方、requestがRLに到達した可能性がある状態で
-responseを確定できず終了した場合、またはcorrelation不一致でresponseを信頼できない場合は
-`start_uncertain`となり、同じclientからの追加`start_instance`を送信前に拒否します。
-自動retry/reconciliationやuncertain instanceのcleanupはこの実装では定義しません。
+responseを確定できず終了した場合、correlation不一致、またはoperation固有のstart response検証に
+失敗した場合は`start_uncertain`となり、同じclientからの追加`start_instance`を送信前に拒否します。
 
-`TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用し、
-transport-only errorはAPI DTO validationの前に`TransportError`として扱います。
+`close_instance`で送信後に結果を確定できなかった場合は`close_uncertain`となり、それ以降のAPI
+trafficを停止します。外部確認やoperator判断でRL側の状態を確定した後、
+`client.reconcile_close_uncertainty(assume_closed=True|False)`でlocal stateを明示的に解消します。
+このmethod自体はRLへ通信しません。自動retry/reconciliationやuncertain instanceのcleanupは
+この実装では定義しません。
+
+`TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用します。responseは
+別の `max_response_bytes`（default 64 MiB）でbufferingをboundedにします。response上限超過は
+request送信後に起こり得るため`completion_uncertain=True`の`TransportError`となり、connectionを
+破棄します。transport-only errorはAPI DTO validationの前に`TransportError`として扱います。
 
 同期版`TrainingApiClient`は既存の`RlTransport` / `LocalProcessTransport`用として残し、
 両clientは`ApiContract`を共有します。
