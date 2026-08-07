@@ -1,9 +1,10 @@
-"""Thin asyncio TCP connection for the separately started STS2_RL process."""
+"""Async TCP connection for the RL/Training session-sequenced DTO contract v0.6."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
@@ -11,6 +12,7 @@ from sts2_training.api.transport import (
     JsonObject,
     RetryRequest,
     RuntimeExitedError,
+    ServerEpochChangedError,
     TransportClosedError,
     TransportError,
 )
@@ -23,36 +25,14 @@ _RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 
 
 class TcpConnection:
-    """Persistent newline-delimited JSON connection.
-
-    This class deliberately knows nothing about API operations, instance routing, or
-    request/response correlation. It serializes one JSON object, waits for one JSON
-    object in reply, and keeps the socket healthy across exchanges.
-
-    ``max_message_bytes`` bounds outbound request frames only, matching the RL TCP
-    framing contract. ``max_response_bytes`` is a separate receiver-side safety bound
-    so a peer that never sends a newline cannot make response buffering unbounded. The
-    response limit intentionally defaults much higher than the request limit. After a
-    response-size failure, callers may raise the receiver limit with
-    ``set_max_response_bytes()`` and replay the exact same ``RetryRequest``; changing
-    this local safety limit does not create a new logical API request.
-
-    Each exchange has one absolute deadline. Waiting for this connection's lock,
-    connecting, writing, draining, and reading the response all consume that same
-    budget. ``connect_timeout_s`` is an additional upper bound for only the connect
-    phase; it never extends the exchange deadline.
-
-    Once a request may have reached RL, timeout, cancellation, response-size overflow,
-    or stream/protocol failures mark the result as completion-uncertain, attach an
-    immutable ``RetryRequest`` containing the exact JSON payload, and invalidate the
-    connection.
-    """
+    """Persistent UTF-8 NDJSON connection with an epoch-checked session handshake."""
 
     def __init__(
         self,
         *,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
+        client_session_id: str | None = None,
         connect_timeout_s: float = 5.0,
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
@@ -63,13 +43,13 @@ class TcpConnection:
             raise ValueError("port must be between 1 and 65535")
         if connect_timeout_s <= 0:
             raise ValueError("connect_timeout_s must be positive")
-        if max_message_bytes <= 0:
-            raise ValueError("max_message_bytes must be positive")
-        if max_response_bytes <= 0:
-            raise ValueError("max_response_bytes must be positive")
-
+        if max_message_bytes <= 0 or max_response_bytes <= 0:
+            raise ValueError("message limits must be positive")
         self._host = host
         self._port = port
+        self._client_session_id = client_session_id or str(uuid.uuid4())
+        if not self._client_session_id:
+            raise ValueError("client_session_id must not be empty")
         self._connect_timeout_s = connect_timeout_s
         self._max_message_bytes = max_message_bytes
         self._max_response_bytes = max_response_bytes
@@ -77,19 +57,21 @@ class TcpConnection:
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self._server_epoch: str | None = None
+
+    @property
+    def client_session_id(self) -> str:
+        return self._client_session_id
+
+    @property
+    def server_epoch(self) -> str | None:
+        return self._server_epoch
 
     @property
     def max_response_bytes(self) -> int:
-        """Current receiver-side response frame limit."""
         return self._max_response_bytes
 
     async def set_max_response_bytes(self, max_response_bytes: int) -> None:
-        """Update the response limit without changing logical request identity.
-
-        The update is serialized with exchanges. In particular, after an oversized
-        completion-uncertain response invalidates the stream, a caller can raise this
-        limit and then replay the exact token exposed by ``pending_retry``.
-        """
         if max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
         async with self._lock:
@@ -110,6 +92,8 @@ class TcpConnection:
     ) -> JsonObject:
         deadline = self._resolve_deadline(timeout_s=timeout_s, deadline=deadline)
         retry_request = RetryRequest.from_message(message)
+        if message.get("client_session_id") != self._client_session_id:
+            raise ValueError("message client_session_id does not match connection session")
         encoded = retry_request.serialized_payload.encode("utf-8") + b"\n"
         if len(encoded) > self._max_message_bytes:
             raise TransportError(
@@ -123,13 +107,12 @@ class TcpConnection:
                     await self._connect(deadline=deadline)
                     assert self._reader is not None
                     assert self._writer is not None
-
-                    # From this point onward RL may observe the request even if the
-                    # local write/drain or response wait later fails.
                     sent = True
                     self._writer.write(encoded)
                     await self._writer.drain()
                     line = await self._read_response_frame(self._reader)
+        except ServerEpochChangedError:
+            raise
         except asyncio.CancelledError as exc:
             if sent:
                 await self._disconnect()
@@ -144,15 +127,8 @@ class TcpConnection:
                 completion_uncertain=sent,
                 retry_request=retry_request if sent else None,
             ) from exc
-        except RuntimeExitedError as exc:
-            if sent:
-                await self._disconnect()
-            exc.completion_uncertain = sent or exc.completion_uncertain
-            if exc.completion_uncertain:
-                exc.retry_request = retry_request
-            raise
         except TransportError as exc:
-            if sent:
+            if sent and not isinstance(exc, ServerEpochChangedError):
                 await self._disconnect()
                 exc.completion_uncertain = True
                 exc.retry_request = retry_request
@@ -166,42 +142,41 @@ class TcpConnection:
                 retry_request=retry_request if sent else None,
             ) from exc
 
-        try:
-            response: Any = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        response = await self._decode_response(line, retry_request=retry_request)
+        response_epoch = response.get("server_epoch")
+        if not isinstance(response_epoch, str) or not response_epoch:
             await self._disconnect()
             raise TransportError(
-                "RL TCP server returned invalid JSON",
-                completion_uncertain=True,
-                retry_request=retry_request,
-            ) from exc
-        if not isinstance(response, dict):
-            await self._disconnect()
-            raise TransportError(
-                "RL TCP response must be a JSON object",
+                "RL API response is missing server_epoch",
                 completion_uncertain=True,
                 retry_request=retry_request,
             )
-
-        transport_error = response.get("transport_error")
-        if transport_error is not None:
-            await self._disconnect()
-            detail = response.get("error")
-            suffix = f": {detail}" if isinstance(detail, str) and detail else ""
-            raise TransportError(
-                f"RL TCP transport error {transport_error!r}{suffix}",
-                completion_uncertain=False,
-            )
+        self._assert_epoch(
+            response_epoch,
+            completion_uncertain=True,
+            retry_request=retry_request,
+        )
         return response
 
     async def ping(self, *, timeout_s: float = 5.0) -> JsonObject:
-        response = await self.exchange(
-            {"transport_operation": "ping"},
-            timeout_s=timeout_s,
-        )
-        if response != {"transport_operation": "pong"}:
+        deadline = self._resolve_deadline(timeout_s=timeout_s, deadline=None)
+        async with asyncio.timeout_at(deadline):
+            async with self._lock:
+                await self._connect(deadline=deadline)
+                assert self._reader is not None
+                assert self._writer is not None
+                self._writer.write(b'{"transport_operation":"ping"}\n')
+                await self._writer.drain()
+                line = await self._read_response_frame(self._reader)
+        response = json.loads(line)
+        if not isinstance(response, dict) or response.get("transport_operation") != "pong":
             await self.invalidate()
             raise TransportError("RL TCP server returned an invalid ping response")
+        epoch = response.get("server_epoch")
+        if not isinstance(epoch, str) or not epoch:
+            await self.invalidate()
+            raise TransportError("RL ping response is missing server_epoch")
+        self._assert_epoch(epoch)
         return response
 
     def is_alive(self) -> bool:
@@ -214,7 +189,6 @@ class TcpConnection:
         )
 
     async def invalidate(self) -> None:
-        """Discard the current stream without permanently closing this connection."""
         async with self._lock:
             await self._disconnect()
 
@@ -232,11 +206,7 @@ class TcpConnection:
         await self.close()
 
     @staticmethod
-    def _resolve_deadline(
-        *,
-        timeout_s: float | None,
-        deadline: float | None,
-    ) -> float:
+    def _resolve_deadline(*, timeout_s: float | None, deadline: float | None) -> float:
         if (timeout_s is None) == (deadline is None):
             raise ValueError("provide exactly one of timeout_s or deadline")
         loop = asyncio.get_running_loop()
@@ -254,34 +224,111 @@ class TcpConnection:
             return
 
         loop = asyncio.get_running_loop()
-        now = loop.time()
-        connect_limit = now + self._connect_timeout_s
-        if deadline is None:
-            connect_deadline = connect_limit
-            limited_by_api_deadline = False
-        else:
-            connect_deadline = min(deadline, connect_limit)
-            limited_by_api_deadline = deadline <= connect_limit
-
+        connect_deadline = loop.time() + self._connect_timeout_s
+        if deadline is not None:
+            connect_deadline = min(connect_deadline, deadline)
         try:
             async with asyncio.timeout_at(connect_deadline):
-                self._reader, self._writer = await asyncio.open_connection(
+                reader, writer = await asyncio.open_connection(
                     self._host,
                     self._port,
                     limit=self._max_message_bytes + 1,
                 )
+                self._reader, self._writer = reader, writer
+                await self._hello(reader, writer)
+        except ServerEpochChangedError:
+            await self._disconnect()
+            raise
         except TimeoutError as exc:
-            if limited_by_api_deadline:
-                raise TransportError(
-                    "RL TCP request timed out before send"
-                ) from exc
+            await self._disconnect()
+            raise TransportError(
+                f"could not connect/handshake with RL TCP server at {self._host}:{self._port}"
+            ) from exc
+        except (OSError, ConnectionError) as exc:
+            await self._disconnect()
             raise TransportError(
                 f"could not connect to RL TCP server at {self._host}:{self._port}"
             ) from exc
-        except OSError as exc:
+        except TransportError:
+            await self._disconnect()
+            raise
+
+    async def _hello(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        hello = json.dumps(
+            {
+                "transport_operation": "hello",
+                "client_session_id": self._client_session_id,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+        writer.write(hello)
+        await writer.drain()
+        line = await self._read_response_frame(reader)
+        try:
+            response = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TransportError("RL hello response is not valid JSON") from exc
+        if (
+            not isinstance(response, dict)
+            or response.get("transport_operation") != "hello"
+            or response.get("client_session_id") != self._client_session_id
+        ):
+            raise TransportError("RL TCP server returned an invalid hello response")
+        epoch = response.get("server_epoch")
+        if not isinstance(epoch, str) or not epoch:
+            raise TransportError("RL hello response is missing server_epoch")
+        self._assert_epoch(epoch)
+
+    async def _decode_response(
+        self, line: bytes, *, retry_request: RetryRequest
+    ) -> JsonObject:
+        try:
+            response: Any = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            await self._disconnect()
             raise TransportError(
-                f"could not connect to RL TCP server at {self._host}:{self._port}"
+                "RL TCP server returned invalid JSON",
+                completion_uncertain=True,
+                retry_request=retry_request,
             ) from exc
+        if not isinstance(response, dict):
+            await self._disconnect()
+            raise TransportError(
+                "RL TCP response must be a JSON object",
+                completion_uncertain=True,
+                retry_request=retry_request,
+            )
+        transport_error = response.get("transport_error")
+        if transport_error is not None:
+            await self._disconnect()
+            detail = response.get("error")
+            suffix = f": {detail}" if isinstance(detail, str) and detail else ""
+            raise TransportError(
+                f"RL TCP transport error {transport_error!r}{suffix}",
+                completion_uncertain=False,
+            )
+        return response
+
+    def _assert_epoch(
+        self,
+        actual_epoch: str,
+        *,
+        completion_uncertain: bool = False,
+        retry_request: RetryRequest | None = None,
+    ) -> None:
+        expected = self._server_epoch
+        if expected is None:
+            self._server_epoch = actual_epoch
+            return
+        if actual_epoch != expected:
+            raise ServerEpochChangedError(
+                expected_epoch=expected,
+                actual_epoch=actual_epoch,
+                completion_uncertain=completion_uncertain,
+                retry_request=retry_request,
+            )
 
     async def _read_response_frame(self, reader: asyncio.StreamReader) -> bytes:
         chunks: list[bytes] = []
@@ -292,7 +339,6 @@ class TcpConnection:
                 raise TransportError(
                     f"response exceeds max_response_bytes={self._max_response_bytes}"
                 )
-
             chunk = await reader.read(min(_RESPONSE_READ_CHUNK_BYTES, remaining))
             if not chunk:
                 raise RuntimeExitedError(
@@ -302,15 +348,9 @@ class TcpConnection:
             if newline_index < 0:
                 chunks.append(chunk)
                 total_bytes += len(chunk)
-                if total_bytes >= self._max_response_bytes:
-                    raise TransportError(
-                        f"response exceeds max_response_bytes={self._max_response_bytes}"
-                    )
                 continue
-
             frame_chunk = chunk[: newline_index + 1]
             chunks.append(frame_chunk)
-            total_bytes += len(frame_chunk)
             if newline_index + 1 != len(chunk):
                 raise TransportError(
                     "RL TCP server returned data after the response frame delimiter"
