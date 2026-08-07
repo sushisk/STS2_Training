@@ -189,6 +189,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         connection = TcpConnection(
             port=self.port,
             max_message_bytes=128,
+            max_response_bytes=8192,
         )
         try:
             response = await connection.exchange(
@@ -197,6 +198,25 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response, {"payload": "x" * 4096})
             self.assertTrue(connection.is_alive())
+        finally:
+            await connection.close()
+
+    async def test_response_limit_bounds_buffering_and_is_completion_uncertain(self) -> None:
+        connection = TcpConnection(
+            port=self.port,
+            max_response_bytes=1024,
+        )
+        try:
+            with self.assertRaisesRegex(
+                TransportError,
+                "response exceeds max_response_bytes=1024",
+            ) as caught:
+                await connection.exchange(
+                    {"request_id": "large-response"},
+                    timeout_s=1.0,
+                )
+            self.assertTrue(caught.exception.completion_uncertain)
+            self.assertFalse(connection.is_alive())
         finally:
             await connection.close()
 
