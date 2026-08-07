@@ -50,20 +50,25 @@ asyncio.run(main())
 `AsyncTrainingApiClient`は現在、client-level lockでpublic operationを直列化します。
 デフォルト`request_id`はUUIDベースです。
 
-各public APIの`timeout_s`はmethodを呼んだ時点からの総budgetです。client-level lock待ち、
-`TcpConnection`のlock待ち、connect、request write/drain、response readは同じabsolute deadlineを
-消費します。`connect_timeout_s`はconnect phaseだけの追加上限であり、APIのdeadlineを延長しません。
+各public APIの`timeout_s`はmethodを呼んだ時点からresponse frame受信までのtransport budgetです。
+client-level lock待ち、`TcpConnection`のlock待ち、connect、request write/drain、response readは
+同じabsolute deadlineを消費します。response受信後のAPI validationとselection audit bookkeepingは
+transport timeout phaseには含めません。`connect_timeout_s`はconnect phaseだけの追加上限であり、
+APIのdeadlineを延長しません。
 
-`start_instance`で送信前と確定できる失敗（client/connection lock待ちのtimeout、connect失敗、
-request size超過など）は追加startを禁止しません。一方、requestがRLに到達した可能性がある状態で
-responseを確定できず終了した場合、correlation不一致、またはoperation固有のstart response検証に
-失敗した場合は`start_uncertain`となり、同じclientからの追加`start_instance`を送信前に拒否します。
+requestがRLに到達した可能性がある状態でstate-changing operationの結果を確定できなかった場合、
+`TransportError.completion_uncertain=True`となり、exact serialized requestを保持する
+`RetryRequest`が`TransportError.retry_request`と`client.pending_retry`から取得できます。
+この状態ではfresh requestをfail-closedで拒否します。同じ論理requestを再送する場合は
+`await client.retry_request(client.pending_retry, timeout_s=...)`を使い、same payload / same
+`request_id`を維持してください。
 
-`close_instance`で送信後に結果を確定できなかった場合は`close_uncertain`となり、それ以降のAPI
-trafficを停止します。外部確認やoperator判断でRL側の状態を確定した後、
-`client.reconcile_close_uncertainty(assume_closed=True|False)`でlocal stateを明示的に解消します。
-このmethod自体はRLへ通信しません。自動retry/reconciliationやuncertain instanceのcleanupは
-この実装では定義しません。
+`start_instance`の不確実性は`start_uncertain`、`close_instance`の不確実性は`close_uncertain`でも
+確認できます。same-ID replayで回復できない場合、外部確認やoperator判断の後に
+`reconcile_start_uncertainty(instance_id=...)`または
+`reconcile_close_uncertainty(assume_closed=True|False)`でlocal stateを明示的に解消できます。
+これらのreconciliation method自体はRLへ通信しません。自動retry、RL state discovery、
+uncertain instanceの自動cleanupはこの実装では定義しません。
 
 `TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用します。responseは
 別の `max_response_bytes`（default 64 MiB）でbufferingをboundedにします。response上限超過は
@@ -98,7 +103,8 @@ with JsonlSelectionLogger("logs/selection.jsonl") as selection_log:
 Each record contains the public Decision received from RL, the selection request, and the
 correlated result. A successful root selection also includes `room_result` when it ends a
 room and `run_result` when it ends a Whole Run. Rejected and faulted selections are logged
-before their exception is raised.
+before their exception is raised. Async selections cancelled after dispatch are also
+recorded with `client_error.type == "CancelledError"` before cancellation is re-raised.
 
 Only the already-masked DTO received from RL is written. Training does not reconstruct or
 add hidden state, and speculative Branch results are never counted as root room/run
