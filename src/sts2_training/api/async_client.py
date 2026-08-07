@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 from sts2_training.api.contract import (
@@ -14,7 +15,7 @@ from sts2_training.api.contract import (
     ROOT_BRANCH_ID,
 )
 from sts2_training.api.tcp_connection import TcpConnection
-from sts2_training.api.transport import RuntimeExitedError, TransportError
+from sts2_training.api.transport import TransportError
 from sts2_training.selection_log import SelectionEventLogger
 
 
@@ -30,11 +31,14 @@ class AsyncTrainingApiClient(ApiContract):
     Parallel API execution is intentionally deferred until its lifecycle semantics are
     defined explicitly.
 
-    If ``start_instance`` ends with a transport failure or cancellation, the client
-    enters a start-uncertain state. A start request may already have created an RL
-    instance even though Training did not receive the response, so later start attempts
-    are rejected instead of risking a second active instance. Recovery/reconciliation
-    is intentionally deferred to a separate contract change.
+    ``timeout_s`` is a total per-operation budget starting when the public API method is
+    called. Waiting for the client lock, waiting for the TCP connection lock, connecting,
+    writing, and reading the response all consume the same deadline.
+
+    If ``start_instance`` loses a definitive result after the request may have reached
+    RL, the client enters a start-uncertain state. Later start attempts are rejected
+    instead of risking a second active instance. Failures known to occur before the
+    request could reach RL do not enter that state.
     """
 
     def __init__(
@@ -63,7 +67,7 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> str:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             if self.instance_id is not None:
                 raise RuntimeError("client already has an active instance")
             if self._start_uncertain:
@@ -72,11 +76,16 @@ class AsyncTrainingApiClient(ApiContract):
                 )
             request = self._build_start_instance(instance_config)
             try:
-                response = await self._execute(request, timeout_s=timeout_s)
-            except asyncio.CancelledError:
-                self._start_uncertain = True
+                response = await self._execute(request, deadline=deadline)
+            except asyncio.CancelledError as exc:
+                if getattr(exc, "completion_uncertain", False):
+                    self._start_uncertain = True
                 raise
-            except (TransportError, RuntimeExitedError):
+            except TransportError as exc:
+                if exc.completion_uncertain:
+                    self._start_uncertain = True
+                raise
+            except ApiProtocolError:
                 self._start_uncertain = True
                 raise
             return self._accept_start_instance(response)
@@ -88,9 +97,9 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             request = self._build_get_decision(instance_id, branch_id)
-            response = await self._execute(request, timeout_s=timeout_s)
+            response = await self._execute(request, deadline=deadline)
             return self._accept_get_decision(response, branch_id)
 
     async def commit_action(
@@ -101,7 +110,7 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             request = self._build_commit_action(
                 instance_id,
                 decision_point_id,
@@ -110,7 +119,7 @@ class AsyncTrainingApiClient(ApiContract):
             return await self._execute_selected_action(
                 request,
                 source_branch_id=ROOT_BRANCH_ID,
-                timeout_s=timeout_s,
+                deadline=deadline,
             )
 
     async def emulate_action(
@@ -125,7 +134,7 @@ class AsyncTrainingApiClient(ApiContract):
         timeout_s: float,
         simulation_options: Mapping[str, Any] | None = None,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             request = self._build_emulate_action(
                 instance_id,
                 parent_branch_id,
@@ -138,7 +147,7 @@ class AsyncTrainingApiClient(ApiContract):
             return await self._execute_selected_action(
                 request,
                 source_branch_id=parent_branch_id,
-                timeout_s=timeout_s,
+                deadline=deadline,
             )
 
     async def cancel_branches(
@@ -148,9 +157,9 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             return await self._branch_batch_operation(
-                "cancel_branches", instance_id, branch_ids, timeout_s=timeout_s
+                "cancel_branches", instance_id, branch_ids, deadline=deadline
             )
 
     async def release_branches(
@@ -160,9 +169,9 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             return await self._branch_batch_operation(
-                "release_branches", instance_id, branch_ids, timeout_s=timeout_s
+                "release_branches", instance_id, branch_ids, deadline=deadline
             )
 
     async def get_branch_status(
@@ -172,9 +181,9 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             return await self._branch_batch_operation(
-                "get_branch_status", instance_id, branch_ids, timeout_s=timeout_s
+                "get_branch_status", instance_id, branch_ids, deadline=deadline
             )
 
     async def close_instance(
@@ -183,9 +192,9 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        async with self._operation_lock:
+        async with self._operation_deadline(timeout_s) as deadline:
             request = self._build_close_instance(instance_id)
-            response = await self._execute(request, timeout_s=timeout_s)
+            response = await self._execute(request, deadline=deadline)
             return self._accept_close_instance(response)
 
     async def close(self) -> None:
@@ -199,30 +208,47 @@ class AsyncTrainingApiClient(ApiContract):
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
+    @asynccontextmanager
+    async def _operation_deadline(self, timeout_s: float) -> AsyncIterator[float]:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._operation_lock.acquire()
+        except TimeoutError as exc:
+            raise TransportError("RL API call timed out before request started") from exc
+
+        try:
+            yield deadline
+        finally:
+            self._operation_lock.release()
+
     async def _branch_batch_operation(
         self,
         operation: str,
         instance_id: str,
         branch_ids: Sequence[str],
         *,
-        timeout_s: float,
+        deadline: float,
     ) -> JsonObject:
         request = self._build_branch_batch_operation(
             operation,
             instance_id,
             branch_ids,
         )
-        return await self._execute(request, timeout_s=timeout_s)
+        return await self._execute(request, deadline=deadline)
 
     async def _execute(
         self,
         request: JsonObject,
         *,
-        timeout_s: float,
+        deadline: float,
     ) -> JsonObject:
         response = await self._connection.exchange(
             request,
-            timeout_s=timeout_s,
+            deadline=deadline,
         )
         try:
             return self._validate_api_response(request, response)
@@ -238,11 +264,11 @@ class AsyncTrainingApiClient(ApiContract):
         request: JsonObject,
         *,
         source_branch_id: str,
-        timeout_s: float,
+        deadline: float,
     ) -> JsonObject:
         response: JsonObject | None = None
         try:
-            response = await self._execute(request, timeout_s=timeout_s)
+            response = await self._execute(request, deadline=deadline)
             self._validate_selected_action_response(request, response)
         except ApiOperationError as exc:
             self._record_selected_action(
