@@ -7,24 +7,25 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  statuses: read
 
 env:
   PAIRED_RL_SHA: ed927f9a6ea86d30910fedd1edcbb719715c97e2
+  PAIR_STATUS_CONTEXT: paired-v07-trusted-exact-pair
 
 jobs:
   paired-head-gate:
-    name: paired RL head matches pinned SHA
-    # This PR-triggered workflow never checks out or executes PR code and never targets
-    # a self-hosted runner. The emulator-backed integration lives in the separate,
-    # workflow_dispatch-only paired-v07-trusted.yml workflow.
+    name: exact Training/RL pair passed trusted integration
     runs-on: ubuntu-latest
     steps:
-      - name: Verify RL PR #8 current head
+      - name: Verify exact pair
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TRAINING_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+
           current_rl_sha="$({
             curl --fail --silent --show-error \
               -H "Accept: application/vnd.github+json" \
@@ -33,6 +34,7 @@ jobs:
               https://api.github.com/repos/sushisk/STS2_RL/pulls/8
           } | python -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')"
 
+          echo "Training SHA:   ${TRAINING_SHA}"
           echo "Pinned RL SHA:  ${PAIRED_RL_SHA}"
           echo "Current RL SHA: ${current_rl_sha}"
           if [[ "${current_rl_sha}" != "${PAIRED_RL_SHA}" ]]; then
@@ -40,8 +42,39 @@ jobs:
             exit 1
           fi
 
+          statuses_json="$({
+            curl --fail --silent --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${TRAINING_SHA}/statuses?per_page=100"
+          })"
+
+          python - "${PAIR_STATUS_CONTEXT}" "${PAIRED_RL_SHA}" <<'PY' <<<"${statuses_json}"
+          import json
+          import sys
+
+          context = sys.argv[1]
+          rl_sha = sys.argv[2]
+          statuses = json.load(sys.stdin)
+          expected_description = f"Passed with RL {rl_sha[:12]}"
+          matching = [s for s in statuses if s.get("context") == context]
+          if not matching:
+              raise SystemExit(f"missing trusted integration status {context!r} for this Training commit")
+          latest = matching[0]
+          if latest.get("state") != "success":
+              raise SystemExit(f"trusted integration status is {latest.get('state')!r}, not success")
+          if latest.get("description") != expected_description:
+              raise SystemExit(
+                  "trusted integration status was produced for a different RL commit: "
+                  f"{latest.get('description')!r} != {expected_description!r}"
+              )
+          print(f"Exact pair attested: Training current head + RL {rl_sha}")
+          PY
+
           {
-            echo "### Paired v0.7 head gate"
-            echo "- Pinned RL SHA: \`${PAIRED_RL_SHA}\`"
-            echo "- Current RL PR #8 SHA: \`${current_rl_sha}\`"
+            echo "### Paired v0.7 exact-pair gate"
+            echo "- Training SHA: \`${TRAINING_SHA}\`"
+            echo "- RL SHA: \`${PAIRED_RL_SHA}\`"
+            echo "- Trusted status: \`${PAIR_STATUS_CONTEXT}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
