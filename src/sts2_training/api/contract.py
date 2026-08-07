@@ -327,11 +327,12 @@ class ApiContract:
                 raise ApiProtocolError(f"duplicate legal action_id {action_id!r}")
             action_ids.add(action_id)
 
-            action_type = action.get("action_type")
-            if not isinstance(action_type, str) or not action_type:
-                raise ApiProtocolError(
-                    f"legal_actions[{index}].action_type must be a non-empty string"
-                )
+            if "action_type" in action:
+                action_type = action["action_type"]
+                if not isinstance(action_type, str) or not action_type:
+                    raise ApiProtocolError(
+                        f"legal_actions[{index}].action_type must be a non-empty string"
+                    )
             if "is_available" in action and not isinstance(action["is_available"], bool):
                 raise ApiProtocolError(
                     f"legal_actions[{index}].is_available must be a boolean"
