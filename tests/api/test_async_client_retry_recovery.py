@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import RequestRejectedError
 from sts2_training.api.transport import RetryRequest, TransportError
 
 
@@ -106,6 +107,54 @@ class _CancelledCommitConnection:
         pass
 
 
+class _EvictedCloseTombstoneConnection:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+        self.close_attempts = 0
+
+    async def exchange(self, message, *, deadline: float):
+        request = dict(message)
+        self.messages.append(request)
+        operation = request["operation"]
+
+        if operation == "start_instance":
+            return {
+                "schema_version": request["schema_version"],
+                "request_id": request["request_id"],
+                "operation": operation,
+                "status": "completed",
+                "instance_id": "inst-001",
+                "decision_point_id": "decision-1",
+                "masked_emulator_dto": {"state": "initial"},
+            }
+
+        if operation == "close_instance":
+            self.close_attempts += 1
+            if self.close_attempts == 1:
+                raise TransportError(
+                    "lost close response",
+                    completion_uncertain=True,
+                    retry_request=RetryRequest.from_message(request),
+                )
+            return {
+                "schema_version": request["schema_version"],
+                "request_id": request["request_id"],
+                "operation": operation,
+                "status": "rejected",
+                "instance_id": request["instance_id"],
+                "error": f"unknown instance_id {request['instance_id']!r}",
+                "fault_kind": "unknown_instance",
+            }
+
+        raise AssertionError(f"unexpected operation: {operation}")
+
+    async def invalidate(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
 class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_commit_exposes_same_id_retry_and_blocks_fresh_calls(self) -> None:
         connection = _RetryingConnection()
@@ -185,6 +234,30 @@ class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["request"]["operation"], "commit_action")
         self.assertEqual(event["client_error"]["type"], "CancelledError")
         self.assertIsNotNone(client.pending_retry)
+
+    async def test_evicted_close_tombstone_keeps_close_uncertain(self) -> None:
+        connection = _EvictedCloseTombstoneConnection()
+        client = AsyncTrainingApiClient(connection)
+        instance_id = await client.start_instance(
+            {"instance_type": "combat"},
+            timeout_s=1.0,
+        )
+
+        with self.assertRaisesRegex(TransportError, "lost close response"):
+            await client.close_instance(instance_id, timeout_s=1.0)
+
+        retry = client.pending_retry
+        self.assertIsNotNone(retry)
+        self.assertTrue(client.close_uncertain)
+        assert retry is not None
+
+        with self.assertRaises(RequestRejectedError):
+            await client.retry_request(retry, timeout_s=1.0)
+
+        self.assertEqual(client.pending_retry, retry)
+        self.assertTrue(client.close_uncertain)
+        self.assertEqual(client.instance_id, instance_id)
+        self.assertEqual(connection.messages[-1], connection.messages[-2])
 
 
 if __name__ == "__main__":
