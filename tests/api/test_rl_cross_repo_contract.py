@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.api.tcp_connection import TcpConnection
-from sts2_training.api.transport import TransportError
 
 try:
     from API.server import RLApiServer
@@ -20,6 +19,7 @@ except ModuleNotFoundError:
 
 class _FakeCombatInstance:
     created = 0
+    commit_calls = 0
 
     def __init__(self, instance_id: str, instance_config: dict, **kwargs) -> None:
         type(self).created += 1
@@ -44,6 +44,19 @@ class _FakeCombatInstance:
             },
         }
 
+    def commit_action(self, decision_point_id: str, action_id: str) -> dict:
+        type(self).commit_calls += 1
+        return {
+            "status": "completed",
+            "instance_id": self.instance_id,
+            "branch_id": "root",
+            "decision_point_id": "d-root-after-commit",
+            "masked_emulator_dto": {
+                "legal_actions": [],
+                "padding": "x" * 2048,
+            },
+        }
+
     def close(self) -> None:
         self.closed = True
 
@@ -55,6 +68,7 @@ class _FakeCombatInstance:
 class RealRlTcpContractTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _FakeCombatInstance.created = 0
+        _FakeCombatInstance.commit_calls = 0
         fake_module = types.ModuleType("API.instance_combat")
         fake_module.CombatInstance = _FakeCombatInstance
         self.module_patch = patch.dict(sys.modules, {"API.instance_combat": fake_module})
@@ -153,7 +167,7 @@ class RealRlTcpContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["request_id"], close_request["request_id"])
         self.assertEqual(self.dispatcher.instance_count(), 0)
 
-    async def test_real_rl_oversized_response_is_transport_error(self) -> None:
+    async def test_large_non_idempotent_response_is_delivered_and_replayed(self) -> None:
         await self.server.close()
         self.server = AsyncioTcpServer(
             self.dispatcher.handle_request,
@@ -162,21 +176,39 @@ class RealRlTcpContractTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.server.start()
 
-        client = AsyncTrainingApiClient(
-            TcpConnection(
-                port=self.server.bound_port,
-                max_message_bytes=512,
-            )
+        connection = TcpConnection(
+            port=self.server.bound_port,
+            max_message_bytes=512,
         )
         try:
-            instance_id = await client.start_instance(
-                {"instance_type": "combat"},
-                timeout_s=1.0,
-            )
-            with self.assertRaisesRegex(TransportError, "message_too_large"):
-                await client.get_decision(instance_id, timeout_s=1.0)
+            start_request = {
+                "schema_version": "0.5",
+                "request_id": "req-large-start",
+                "operation": "start_instance",
+                "instance_config": {"instance_type": "combat"},
+            }
+            started = await connection.exchange(start_request, timeout_s=1.0)
+            commit_request = {
+                "schema_version": "0.5",
+                "request_id": "req-large-commit",
+                "operation": "commit_action",
+                "instance_id": started["instance_id"],
+                "branch_id": "root",
+                "rng_id": 0,
+                "decision_point_id": "d-root-001",
+                "action_id": "a-001",
+            }
+
+            first = await connection.exchange(commit_request, timeout_s=1.0)
+            self.assertGreater(len(first["masked_emulator_dto"]["padding"]), 512)
+
+            await connection.invalidate()
+            replay = await connection.exchange(commit_request, timeout_s=1.0)
         finally:
-            await client.close()
+            await connection.close()
+
+        self.assertEqual(replay, first)
+        self.assertEqual(_FakeCombatInstance.commit_calls, 1)
 
 
 if __name__ == "__main__":
