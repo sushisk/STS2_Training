@@ -48,6 +48,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                 if request.get("transport_operation") == "hello":
                     response = {
                         "transport_operation": "hello",
+                        "schema_version": "0.6",
                         "client_session_id": request["client_session_id"],
                         "server_epoch": self.epoch,
                     }
