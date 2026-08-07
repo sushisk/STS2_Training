@@ -95,6 +95,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
             self.connection._lock.release()
 
         self.assertFalse(caught.exception.completion_uncertain)
+        self.assertIsNone(caught.exception.retry_request)
         self.assertEqual(self.requests, [])
 
     async def test_connect_consumes_exchange_timeout(self) -> None:
@@ -118,6 +119,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                         timeout_s=0.01,
                     )
             self.assertFalse(caught.exception.completion_uncertain)
+            self.assertIsNone(caught.exception.retry_request)
         finally:
             await connection.close()
 
@@ -128,6 +130,12 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_s=0.01,
             )
         self.assertTrue(caught.exception.completion_uncertain)
+        self.assertIsNotNone(caught.exception.retry_request)
+        assert caught.exception.retry_request is not None
+        self.assertEqual(
+            caught.exception.retry_request.to_message(),
+            {"request_id": "slow"},
+        )
         self.assertFalse(self.connection.is_alive())
 
         response = await self.connection.exchange(
@@ -149,6 +157,9 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError) as caught:
             await task
         self.assertTrue(getattr(caught.exception, "completion_uncertain", False))
+        retry_request = getattr(caught.exception, "retry_request", None)
+        self.assertIsNotNone(retry_request)
+        self.assertEqual(retry_request.to_message(), {"request_id": "cancel"})
         self.assertFalse(self.connection.is_alive())
 
         self.release_cancel.set()
@@ -172,6 +183,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                     timeout_s=1.0,
                 )
             self.assertFalse(caught.exception.completion_uncertain)
+            self.assertIsNone(caught.exception.retry_request)
             self.assertEqual(self.requests, [])
         finally:
             await connection.close()
@@ -183,6 +195,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_s=1.0,
             )
         self.assertFalse(caught.exception.completion_uncertain)
+        self.assertIsNone(caught.exception.retry_request)
         self.assertFalse(self.connection.is_alive())
 
     async def test_response_is_not_capped_by_request_frame_limit(self) -> None:
@@ -216,6 +229,12 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                     timeout_s=1.0,
                 )
             self.assertTrue(caught.exception.completion_uncertain)
+            self.assertIsNotNone(caught.exception.retry_request)
+            assert caught.exception.retry_request is not None
+            self.assertEqual(
+                caught.exception.retry_request.to_message(),
+                {"request_id": "large-response"},
+            )
             self.assertFalse(connection.is_alive())
         finally:
             await connection.close()
