@@ -1,9 +1,49 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 JsonObject = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RetryRequest:
+    """Immutable serialized API request that can be replayed with the same request id.
+
+    The serialized JSON excludes the NDJSON trailing newline. Reconstructing the mapping
+    preserves JSON key order, so ``TcpConnection`` will emit the same request bytes when
+    the token is retried.
+    """
+
+    serialized_payload: str
+
+    @classmethod
+    def from_message(cls, message: Mapping[str, Any]) -> "RetryRequest":
+        return cls(
+            json.dumps(
+                dict(message),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+
+    def to_message(self) -> JsonObject:
+        value = json.loads(self.serialized_payload)
+        if not isinstance(value, dict):
+            raise ValueError("retry request must contain a JSON object")
+        return value
+
+    @property
+    def request_id(self) -> str | None:
+        value = self.to_message().get("request_id")
+        return value if isinstance(value, str) else None
+
+    @property
+    def operation(self) -> str | None:
+        value = self.to_message().get("operation")
+        return value if isinstance(value, str) else None
 
 
 class TransportError(RuntimeError):
@@ -14,9 +54,11 @@ class TransportError(RuntimeError):
         message: str,
         *,
         completion_uncertain: bool = False,
+        retry_request: RetryRequest | None = None,
     ) -> None:
         super().__init__(message)
         self.completion_uncertain = completion_uncertain
+        self.retry_request = retry_request
 
 
 class TransportClosedError(TransportError):
