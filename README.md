@@ -24,14 +24,16 @@ python -m sts2_training.api.tcp_smoke --host 127.0.0.1 --port 8765
 TCP経路では、APIの意味とTCP接続の責務を分離します。
 
 - `ApiContract`: DTO生成、request/response相関、instance追跡、validation、selection audit
-- `AsyncTrainingApiClient`: async API操作の制御
+- `AsyncTrainingApiClient`: API v0.5操作をasyncで実行し、DTOの生成・検証を制御
 - `TcpConnection`: connect / NDJSON encode-decode / timeout / reconnect のみ
 - `RLApiServer`: `operation` と `instance_id` による実処理の振り分け
 
-`TcpConnection` はAPI operationやInstanceを解釈せず、1つのJSON objectを送って
-1つのJSON objectを受け取るだけです。v0.5では1接続上のrequest/responseを直列化するため、
-TCP専用のinternal IDやresponse routerは持ちません。相関はDTO自身の`request_id`を
-`AsyncTrainingApiClient`が検証します。
+`AsyncTrainingApiClient`は「何を送るか・返答が正しいか」を担当し、`TcpConnection`は
+「JSON objectをどうTCPで1往復させるか」だけを担当します。`TcpConnection`はAPI operationや
+Instanceを解釈しません。
+
+v0.5では1接続上のrequest/responseを直列化するため、TCP専用のinternal IDやresponse routerは
+持ちません。相関はDTO自身の`request_id`を`AsyncTrainingApiClient`が検証します。
 
 ```python
 import asyncio
@@ -55,8 +57,6 @@ asyncio.run(main())
 
 同期版`TrainingApiClient`は既存の`RlTransport` / `LocalProcessTransport`用として残していますが、
 非同期TCP Clientとは継承関係にありません。両Clientは通信非依存の`ApiContract`だけを共有します。
-`AsyncioTcpTransport`は最小TCP実装との後方互換用adapterとして残し、新しいAPIコードでは
-`TcpConnection`を使用します。
 
 TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送ります。
 `schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
