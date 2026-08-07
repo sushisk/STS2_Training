@@ -6,19 +6,53 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+
+env:
+  PAIRED_RL_SHA: ed927f9a6ea86d30910fedd1edcbb719715c97e2
 
 jobs:
+  paired-head-gate:
+    name: paired RL head matches pinned SHA
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify RL PR #8 current head
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_rl_sha="$({
+            curl --fail --silent --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              https://api.github.com/repos/sushisk/STS2_RL/pulls/8
+          } | python -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')"
+
+          echo "Pinned RL SHA:  ${PAIRED_RL_SHA}"
+          echo "Current RL SHA: ${current_rl_sha}"
+          if [[ "${current_rl_sha}" != "${PAIRED_RL_SHA}" ]]; then
+            echo "::error::PAIRED_RL_SHA is stale; update it to RL PR #8 current head before merging."
+            exit 1
+          fi
+
+          {
+            echo "### Paired v0.7 head gate"
+            echo "- Pinned RL SHA: \`${PAIRED_RL_SHA}\`"
+            echo "- Current RL PR #8 SHA: \`${current_rl_sha}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   paired-rl-v07:
-    name: paired RL v0.7 integration
-    # Never execute untrusted fork PR code on the persistent self-hosted runner.
-    # workflow_dispatch remains available for explicitly trusted/manual runs.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: paired RL v0.7 integration (trusted manual run)
+    # Never execute PR code automatically on the persistent self-hosted runner.
+    # A maintainer must explicitly dispatch this workflow for the Training ref to test.
+    if: github.event_name == 'workflow_dispatch'
+    needs: paired-head-gate
     runs-on: [self-hosted, Windows]
     timeout-minutes: 15
-    env:
-      PAIRED_RL_SHA: f0e6209fcbe943d2bdb912ec1e424fa01d114e4f
     steps:
-      - name: Checkout Training PR
+      - name: Checkout selected Training ref
         uses: actions/checkout@v4
         with:
           path: training
