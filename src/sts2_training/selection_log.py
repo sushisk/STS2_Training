@@ -30,11 +30,15 @@ class SelectionAudit:
     def __init__(self, logger: SelectionEventLogger | None) -> None:
         self._logger = logger
         self._decisions: dict[tuple[str, str], dict[str, Any]] = {}
-        self._last_selection_request_id: str | None = None
+        # Exact replay is tracked per logical selection, not merely per wire request.
+        # A v0.7 emulate_actions batch intentionally gives every item the same request_id,
+        # so branch_id is part of the identity to keep sibling items as independent
+        # selections while still recognizing each item on an exact batch replay.
+        self._selection_keys: set[tuple[str, str]] = set()
 
     def clear(self) -> None:
         self._decisions.clear()
-        self._last_selection_request_id = None
+        self._selection_keys.clear()
 
     def remember(self, response: Mapping[str, Any]) -> None:
         if self._logger is None:
@@ -59,32 +63,49 @@ class SelectionAudit:
     ) -> None:
         if self._logger is None:
             return
-        received = self._decisions.get((str(request["instance_id"]), source_branch_id))
+
+        # Batch item audit records are normalized by the client, but keep this fallback
+        # here so SelectionAudit itself is robust to an item-shaped request created by an
+        # older v0.7 caller that omitted the operation field.
+        event_request = dict(request)
+        operation = event_request.get("operation")
+        if not isinstance(operation, str) or not operation:
+            operation = "emulate_actions"
+            event_request["operation"] = operation
+
+        received = self._decisions.get((str(event_request["instance_id"]), source_branch_id))
         if (
             received is not None
-            and received.get("decision_point_id") != request["decision_point_id"]
+            and received.get("decision_point_id") != event_request["decision_point_id"]
         ):
             received = None
 
-        request_id = request.get("request_id")
-        is_retry_of_last_selection = (
-            isinstance(request_id, str)
-            and request_id
-            and request_id == self._last_selection_request_id
+        request_id = event_request.get("request_id")
+        branch_id = event_request.get("branch_id")
+        logical_branch_id = (
+            branch_id if isinstance(branch_id, str) and branch_id else source_branch_id
+        )
+        selection_key = (
+            (request_id, logical_branch_id)
+            if isinstance(request_id, str) and request_id and logical_branch_id
+            else None
+        )
+        is_retry_of_selection = (
+            selection_key is not None and selection_key in self._selection_keys
         )
 
         # A completion-uncertain action is recorded on its first attempt so external
-        # cancellation and transport failures remain auditable. Exact same-request-id
-        # replay is transport recovery for that logical selection, so keep the original
-        # `selection` record and append a distinct recovery record with the definitive
-        # replay outcome instead of emitting a second logical selection.
+        # cancellation and transport failures remain auditable. Exact replay is transport
+        # recovery for the same logical selection. For emulate_actions the wire request_id
+        # is shared by the whole batch, so the branch_id component above prevents sibling
+        # items from being mistaken for recoveries of one another.
         event: dict[str, Any] = {
-            "event": "selection_recovery" if is_retry_of_last_selection else "selection",
+            "event": "selection_recovery" if is_retry_of_selection else "selection",
             "received": received,
-            "request": dict(request),
+            "request": event_request,
             "result": dict(result) if result is not None else None,
         }
-        if request["operation"] == "commit_action" and result is not None:
+        if operation == "commit_action" and result is not None:
             event.update(_root_outcomes(received, result))
         if error is not None:
             event["client_error"] = {
@@ -97,8 +118,8 @@ class SelectionAudit:
         except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
             _LOG.exception("selection logger failed")
 
-        if not is_retry_of_last_selection and isinstance(request_id, str) and request_id:
-            self._last_selection_request_id = request_id
+        if not is_retry_of_selection and selection_key is not None:
+            self._selection_keys.add(selection_key)
 
         successful = (
             error is None
@@ -107,7 +128,7 @@ class SelectionAudit:
         )
         if successful:
             root_committed = (
-                request["operation"] == "commit_action"
+                operation == "commit_action"
                 and result.get("status") == "completed"
             )
             if root_committed:
