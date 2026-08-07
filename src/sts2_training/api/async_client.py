@@ -14,6 +14,7 @@ from sts2_training.api.contract import (
     ROOT_BRANCH_ID,
 )
 from sts2_training.api.tcp_connection import TcpConnection
+from sts2_training.api.transport import RuntimeExitedError, TransportError
 from sts2_training.selection_log import SelectionEventLogger
 
 
@@ -28,6 +29,12 @@ class AsyncTrainingApiClient(ApiContract):
     single-active-instance and selection-audit state cannot race across tasks.
     Parallel API execution is intentionally deferred until its lifecycle semantics are
     defined explicitly.
+
+    If ``start_instance`` ends with a transport failure or cancellation, the client
+    enters a start-uncertain state. A start request may already have created an RL
+    instance even though Training did not receive the response, so later start attempts
+    are rejected instead of risking a second active instance. Recovery/reconciliation
+    is intentionally deferred to a separate contract change.
     """
 
     def __init__(
@@ -43,6 +50,12 @@ class AsyncTrainingApiClient(ApiContract):
         )
         self._connection = connection
         self._operation_lock = asyncio.Lock()
+        self._start_uncertain = False
+
+    @property
+    def start_uncertain(self) -> bool:
+        """Whether a previous start may have completed without a known response."""
+        return self._start_uncertain
 
     async def start_instance(
         self,
@@ -53,8 +66,19 @@ class AsyncTrainingApiClient(ApiContract):
         async with self._operation_lock:
             if self.instance_id is not None:
                 raise RuntimeError("client already has an active instance")
+            if self._start_uncertain:
+                raise RuntimeError(
+                    "previous start_instance result is unknown; reconciliation required"
+                )
             request = self._build_start_instance(instance_config)
-            response = await self._execute(request, timeout_s=timeout_s)
+            try:
+                response = await self._execute(request, timeout_s=timeout_s)
+            except asyncio.CancelledError:
+                self._start_uncertain = True
+                raise
+            except (TransportError, RuntimeExitedError):
+                self._start_uncertain = True
+                raise
             return self._accept_start_instance(response)
 
     async def get_decision(
