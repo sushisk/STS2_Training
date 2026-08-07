@@ -7,7 +7,7 @@ import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.api.client import RequestRejectedError, TrainingApiClient
-from sts2_training.api.contract import ApiContract
+from sts2_training.api.contract import ApiContract, ApiProtocolError
 from sts2_training.api.tcp_connection import TcpConnection
 
 
@@ -22,10 +22,18 @@ class ApiClientArchitectureTest(unittest.TestCase):
         self.assertTrue(issubclass(AsyncTrainingApiClient, ApiContract))
         self.assertFalse(issubclass(AsyncTrainingApiClient, TrainingApiClient))
 
+    def test_default_request_ids_do_not_restart_from_a_shared_serial(self) -> None:
+        first = ApiContract()._new_request("test")["request_id"]
+        second = ApiContract()._new_request("test")["request_id"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("req-"))
+        self.assertTrue(second.startswith("req-"))
+
 
 class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.requests: list[dict] = []
+        self.connection_count = 0
         self.server = await asyncio.start_server(
             self._handle_client,
             "127.0.0.1",
@@ -48,6 +56,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        self.connection_count += 1
         try:
             while line := await reader.readline():
                 request = json.loads(line)
@@ -74,11 +83,19 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
         operation = request["operation"]
 
         if operation == "start_instance":
-            if request["instance_config"].get("instance_type") == "reject":
+            instance_type = request["instance_config"].get("instance_type")
+            if instance_type == "reject":
                 return {
                     **common,
                     "status": "rejected",
                     "error": "bad config",
+                }
+            if instance_type == "mismatch":
+                return {
+                    **common,
+                    "request_id": "wrong-request-id",
+                    "status": "completed",
+                    "instance_id": "inst-001",
                 }
             return {
                 **common,
@@ -190,6 +207,21 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 {"instance_type": "reject"},
                 timeout_s=1.0,
             )
+
+    async def test_protocol_mismatch_invalidates_connection_before_next_call(self) -> None:
+        with self.assertRaisesRegex(ApiProtocolError, "request_id does not match"):
+            await self.client.start_instance(
+                {"instance_type": "mismatch"},
+                timeout_s=1.0,
+            )
+        self.assertFalse(self.connection.is_alive())
+
+        instance_id = await self.client.start_instance(
+            {"instance_type": "combat"},
+            timeout_s=1.0,
+        )
+        self.assertEqual(instance_id, "inst-001")
+        self.assertEqual(self.connection_count, 2)
 
 
 if __name__ == "__main__":
