@@ -21,6 +21,21 @@ from sts2_training.api.transport import (
 )
 from sts2_training.selection_log import SelectionEventLogger
 
+_NON_CONSUMING_SESSION_REJECTIONS = frozenset(
+    {
+        "invalid_request",
+        "session_sequence_conflict",
+        "session_sequence_gap",
+        "session_capacity_exceeded",
+    }
+)
+_FATAL_CONSUMING_SESSION_REJECTIONS = frozenset(
+    {
+        "session_instance_conflict",
+        "unknown_instance",
+    }
+)
+
 
 class AsyncTrainingApiClient(ApiContract):
     """Serialize one logical request stream over reconnectable asyncio TCP.
@@ -30,8 +45,9 @@ class AsyncTrainingApiClient(ApiContract):
     the exact current request is retained as ``pending_retry`` and fresh requests fail
     closed.
 
-    A changed RL ``server_epoch`` permanently invalidates this logical session. v0.6
-    intentionally does not retry an unresolved command into another RL process epoch.
+    A changed RL ``server_epoch`` or a session-level sequencing/ownership rejection
+    permanently invalidates this logical client. v0.6 intentionally does not guess how
+    to continue from divergent client/server session state.
     """
 
     def __init__(
@@ -77,7 +93,7 @@ class AsyncTrainingApiClient(ApiContract):
         timeout_s: float,
     ) -> JsonObject | str:
         if self._session_invalid:
-            raise RuntimeError("RL server epoch changed; create a new client session")
+            raise RuntimeError("RL session is invalid; create a new client session")
         if self._pending_retry is None:
             raise RuntimeError("there is no unresolved request to retry")
         if retry_request != self._pending_retry:
@@ -320,6 +336,7 @@ class AsyncTrainingApiClient(ApiContract):
             response = await self._connection.exchange(request, deadline=deadline)
         except ServerEpochChangedError:
             self._session_invalid = True
+            self._pending_retry = None
             raise
         except asyncio.CancelledError as exc:
             if getattr(exc, "completion_uncertain", False):
@@ -336,12 +353,24 @@ class AsyncTrainingApiClient(ApiContract):
         try:
             return self._validate_api_response(request, response)
         except ApiOperationError as exc:
-            # rejected/faulted are correlated terminal API responses. They consume the
-            # current sequence even though the public method raises an exception.
+            fault_kind = exc.response.get("fault_kind")
+            if (
+                exc.response.get("status") == "rejected"
+                and fault_kind in _NON_CONSUMING_SESSION_REJECTIONS
+            ):
+                # RL rejected this before admitting it as the session's next executable
+                # sequence. Continuing by guessing another seq would desynchronize the
+                # state machine, so this logical client is permanently failed closed.
+                self._session_invalid = True
+                self._pending_retry = None
+                raise
+
             self._consume_sequence(token)
             if token.operation == "close_instance" and exc.response.get("status") == "faulted":
                 self._instance_id = None
                 self._audit.clear()
+            if fault_kind in _FATAL_CONSUMING_SESSION_REJECTIONS:
+                self._session_invalid = True
             raise
         except ApiProtocolError:
             await self._mark_protocol_uncertain(request)
@@ -399,7 +428,7 @@ class AsyncTrainingApiClient(ApiContract):
 
     def _ensure_fresh_request_allowed(self) -> None:
         if self._session_invalid:
-            raise RuntimeError("RL server epoch changed; create a new client session")
+            raise RuntimeError("RL session is invalid; create a new client session")
         if self._pending_retry is not None:
             raise RuntimeError(
                 "an unresolved request is pending; call retry_request() with pending_retry"
