@@ -15,6 +15,7 @@ from sts2_training.api import AsyncTrainingApiClient, TcpConnection, TransportEr
 pytestmark = pytest.mark.integration
 
 _HOST = "127.0.0.1"
+_SERVER_MAX_MESSAGE_BYTES = 4096
 _LARGE_RESPONSE_LIMIT = 64 * 1024 * 1024
 _SERVER_HELPER = Path(__file__).with_name("_paired_rl_server_v07.py")
 
@@ -96,7 +97,35 @@ def _stop_paired_rl(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=5)
 
 
+async def _assert_request_size_boundary(port: int) -> None:
+    session_id = "paired-size-boundary"
+    connection = TcpConnection(
+        host=_HOST,
+        port=port,
+        client_session_id=session_id,
+        connect_timeout_s=5.0,
+        max_message_bytes=_SERVER_MAX_MESSAGE_BYTES * 4,
+        max_response_bytes=_LARGE_RESPONSE_LIMIT,
+    )
+    oversized = {
+        "schema_version": "0.7",
+        "client_session_id": session_id,
+        "request_seq": 1,
+        "request_id": f"{session_id}:1",
+        "operation": "get_decision",
+        "instance_id": "not-reached",
+        "branch_id": "root",
+        "padding": "x" * (_SERVER_MAX_MESSAGE_BYTES * 2),
+    }
+    async with connection:
+        with pytest.raises(TransportError, match="message_too_large") as exc_info:
+            await connection.exchange(oversized, timeout_s=5.0)
+        assert exc_info.value.completion_uncertain is False
+
+
 async def _exercise_paired_v07(port: int) -> None:
+    await _assert_request_size_boundary(port)
+
     connection = TcpConnection(
         host=_HOST,
         port=port,
