@@ -74,7 +74,10 @@ class _Connection:
                 instance_id=request["instance_id"],
                 branch_id=request["branch_id"],
                 decision_point_id="decision-1",
-                masked_emulator_dto={"state": "decision"},
+                masked_emulator_dto={
+                    "state": "decision",
+                    "legal_actions": [{"action_id": "action-1"}],
+                },
             )
         if operation == "commit_action":
             return self._response(
@@ -83,7 +86,10 @@ class _Connection:
                 instance_id=request["instance_id"],
                 branch_id="root",
                 decision_point_id="decision-2",
-                masked_emulator_dto={"state": "after"},
+                masked_emulator_dto={
+                    "state": "after",
+                    "legal_actions": [{"action_id": "action-2"}],
+                },
             )
         if operation == "close_instance":
             return self._response(
