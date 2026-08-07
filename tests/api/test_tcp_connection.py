@@ -48,6 +48,8 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                         "transport_error": "message_too_large",
                         "max_message_bytes": 128,
                     }
+                elif request.get("request_id") == "large-response":
+                    response = {"payload": "x" * 4096}
                 else:
                     response = (
                         {"transport_operation": "pong"}
@@ -126,6 +128,21 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_s=1.0,
             )
         self.assertFalse(self.connection.is_alive())
+
+    async def test_response_can_exceed_request_frame_limit(self) -> None:
+        connection = TcpConnection(
+            port=self.port,
+            max_message_bytes=128,
+        )
+        try:
+            response = await connection.exchange(
+                {"request_id": "large-response"},
+                timeout_s=1.0,
+            )
+        finally:
+            await connection.close()
+
+        self.assertEqual(response, {"payload": "x" * 4096})
 
 
 if __name__ == "__main__":
