@@ -8,6 +8,7 @@ from typing import Any
 from sts2_training.api.contract import (
     ApiContract,
     ApiOperationError,
+    ApiProtocolError,
     JsonObject,
     ROOT_BRANCH_ID,
 )
@@ -181,7 +182,14 @@ class AsyncTrainingApiClient(ApiContract):
             request,
             timeout_s=timeout_s,
         )
-        return self._validate_api_response(request, response)
+        try:
+            return self._validate_api_response(request, response)
+        except ApiProtocolError:
+            # A malformed/mismatched response means we can no longer trust that the
+            # current stream is aligned with this request. Reconnect before any later
+            # API call rather than allowing a stale frame to cascade into more calls.
+            await self._connection.invalidate()
+            raise
 
     async def _execute_selected_action(
         self,
