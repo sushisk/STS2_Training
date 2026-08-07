@@ -70,9 +70,12 @@ TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送
 `schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
 DTO契約と同一です。
 
-`TcpConnection(max_message_bytes=...)` は送受信双方の1フレーム上限です。上限超過、timeout、
-task cancellation、stream error、API correlation failureでは現在のconnectionを破棄し、後続callが
-古いresponseを誤って消費しないようにします。
+`TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用します。
+responseはRL側のframing contractに合わせ、terminating newlineまで読み取ります。API operation成功後の
+responseをtransport側のsize上限で捨てるとnon-idempotent operationの結果を観測不能にし得るため、
+response size controlはこのTCP transportでは行いません。request上限超過、timeout、task cancellation、
+stream error、API correlation failureでは現在のconnectionを破棄し、後続callが古いresponseを誤って
+消費しないようにします。
 
 ### Timeout / cancellation semantics
 
