@@ -13,7 +13,7 @@ permissions:
   statuses: write
 
 env:
-  PAIRED_RL_SHA: ed927f9a6ea86d30910fedd1edcbb719715c97e2
+  PAIRED_RL_SHA: 654833238a8780a4c4374dcb1d7f574ed92dbbae
   PAIR_STATUS_CONTEXT: paired-v07-trusted-exact-pair
 
 jobs:
