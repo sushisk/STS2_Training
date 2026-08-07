@@ -162,6 +162,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
             await connection.close()
 
     async def test_timeout_after_send_is_completion_uncertain(self) -> None:
+        await self.connection.connect()
         with self.assertRaisesRegex(TransportError, "timed out") as caught:
             await self.connection.exchange(self._message("slow"), timeout_s=0.01)
         self.assertTrue(caught.exception.completion_uncertain)
