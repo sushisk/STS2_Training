@@ -29,12 +29,15 @@ class TcpConnection:
 
     ``max_message_bytes`` bounds outbound request frames only, matching the RL TCP
     framing contract. Response frames are read through their terminating newline rather
-    than being rejected at the request-frame limit, because a transport-side response
-    cap could hide the successful result of a non-idempotent API operation.
+    than being rejected at the request-frame limit.
 
-    Once a request has started writing, timeout, cancellation, or stream errors
-    invalidate the connection so a later exchange cannot consume a stale response from
-    the abandoned request.
+    Each exchange has one absolute deadline. Waiting for this connection's lock,
+    connecting, writing, draining, and reading the response all consume that same
+    budget. ``connect_timeout_s`` is an additional upper bound for only the connect
+    phase; it never extends the exchange deadline.
+
+    Once a request may have reached RL, timeout, cancellation, or stream/protocol
+    failures mark the result as completion-uncertain and invalidate the connection.
     """
 
     def __init__(
@@ -71,10 +74,10 @@ class TcpConnection:
         self,
         message: Mapping[str, Any],
         *,
-        timeout_s: float,
+        timeout_s: float | None = None,
+        deadline: float | None = None,
     ) -> JsonObject:
-        if timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
+        deadline = self._resolve_deadline(timeout_s=timeout_s, deadline=deadline)
         encoded = json.dumps(
             dict(message),
             ensure_ascii=False,
@@ -85,54 +88,75 @@ class TcpConnection:
                 f"request exceeds max_message_bytes={self._max_message_bytes}"
             )
 
-        async with self._lock:
-            await self._connect()
-            assert self._reader is not None
-            assert self._writer is not None
-            sent = False
-            try:
-                async with asyncio.timeout(timeout_s):
+        sent = False
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._lock:
+                    await self._connect(deadline=deadline)
+                    assert self._reader is not None
+                    assert self._writer is not None
+
+                    # From this point onward RL may observe the request even if the
+                    # local write/drain or response wait later fails.
                     sent = True
                     self._writer.write(encoded)
                     await self._writer.drain()
                     line = await self._read_response_frame(self._reader)
-            except asyncio.CancelledError:
-                if sent:
-                    await self._disconnect()
-                raise
-            except TimeoutError as exc:
+        except asyncio.CancelledError as exc:
+            if sent:
                 await self._disconnect()
-                raise TransportError("RL TCP request timed out") from exc
-            except RuntimeExitedError:
+            setattr(exc, "completion_uncertain", sent)
+            raise
+        except TimeoutError as exc:
+            if sent:
                 await self._disconnect()
-                raise
-            except TransportError:
+            raise TransportError(
+                "RL TCP request timed out",
+                completion_uncertain=sent,
+            ) from exc
+        except RuntimeExitedError as exc:
+            if sent:
                 await self._disconnect()
-                raise
-            except (ConnectionError, OSError) as exc:
+            exc.completion_uncertain = sent or exc.completion_uncertain
+            raise
+        except TransportError as exc:
+            if sent:
                 await self._disconnect()
-                raise RuntimeExitedError(
-                    "RL TCP connection closed during request"
-                ) from exc
+                exc.completion_uncertain = True
+            raise
+        except (ConnectionError, OSError) as exc:
+            if sent:
+                await self._disconnect()
+            raise RuntimeExitedError(
+                "RL TCP connection closed during request",
+                completion_uncertain=sent,
+            ) from exc
 
-            try:
-                response: Any = json.loads(line)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                await self._disconnect()
-                raise TransportError("RL TCP server returned invalid JSON") from exc
-            if not isinstance(response, dict):
-                await self._disconnect()
-                raise TransportError("RL TCP response must be a JSON object")
+        try:
+            response: Any = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            await self._disconnect()
+            raise TransportError(
+                "RL TCP server returned invalid JSON",
+                completion_uncertain=True,
+            ) from exc
+        if not isinstance(response, dict):
+            await self._disconnect()
+            raise TransportError(
+                "RL TCP response must be a JSON object",
+                completion_uncertain=True,
+            )
 
-            transport_error = response.get("transport_error")
-            if transport_error is not None:
-                await self._disconnect()
-                detail = response.get("error")
-                suffix = f": {detail}" if isinstance(detail, str) and detail else ""
-                raise TransportError(
-                    f"RL TCP transport error {transport_error!r}{suffix}"
-                )
-            return response
+        transport_error = response.get("transport_error")
+        if transport_error is not None:
+            await self._disconnect()
+            detail = response.get("error")
+            suffix = f": {detail}" if isinstance(detail, str) and detail else ""
+            raise TransportError(
+                f"RL TCP transport error {transport_error!r}{suffix}",
+                completion_uncertain=False,
+            )
+        return response
 
     async def ping(self, *, timeout_s: float = 5.0) -> JsonObject:
         response = await self.exchange(
@@ -171,21 +195,54 @@ class TcpConnection:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def _connect(self) -> None:
+    @staticmethod
+    def _resolve_deadline(
+        *,
+        timeout_s: float | None,
+        deadline: float | None,
+    ) -> float:
+        if (timeout_s is None) == (deadline is None):
+            raise ValueError("provide exactly one of timeout_s or deadline")
+        loop = asyncio.get_running_loop()
+        if deadline is not None:
+            return deadline
+        assert timeout_s is not None
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        return loop.time() + timeout_s
+
+    async def _connect(self, *, deadline: float | None = None) -> None:
         if self._closed:
             raise TransportClosedError("connection is closed")
         if self.is_alive():
             return
+
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        connect_limit = now + self._connect_timeout_s
+        if deadline is None:
+            connect_deadline = connect_limit
+            limited_by_api_deadline = False
+        else:
+            connect_deadline = min(deadline, connect_limit)
+            limited_by_api_deadline = deadline <= connect_limit
+
         try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(
+            async with asyncio.timeout_at(connect_deadline):
+                self._reader, self._writer = await asyncio.open_connection(
                     self._host,
                     self._port,
                     limit=self._max_message_bytes + 1,
-                ),
-                timeout=self._connect_timeout_s,
-            )
-        except (TimeoutError, OSError) as exc:
+                )
+        except TimeoutError as exc:
+            if limited_by_api_deadline:
+                raise TransportError(
+                    "RL TCP request timed out before send"
+                ) from exc
+            raise TransportError(
+                f"could not connect to RL TCP server at {self._host}:{self._port}"
+            ) from exc
+        except OSError as exc:
             raise TransportError(
                 f"could not connect to RL TCP server at {self._host}:{self._port}"
             ) from exc
