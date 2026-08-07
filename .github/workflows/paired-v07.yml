@@ -7,30 +7,27 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  statuses: write
+  statuses: read
 
 env:
   PAIR_STATUS_CONTEXT: paired-v07-trusted-exact-pair
 
 jobs:
-  preflight:
-    name: verify current exact pair
+  paired-head-gate:
+    name: exact Training/RL pair passed trusted integration
     runs-on: ubuntu-latest
-    outputs:
-      rl_sha: ${{ steps.pair.outputs.rl_sha }}
     steps:
-      - name: Reject untrusted or stale PR identity
-        id: pair
+      - name: Verify external real-environment attestation
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
+          TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
 
           if [[ "${HEAD_REPO}" != "${GITHUB_REPOSITORY}" ]]; then
-            echo "::error::paired-v07 self-hosted integration is restricted to same-repository PR heads."
+            echo "::error::v0.7 exact-pair attestation is restricted to same-repository PR heads."
             exit 1
           fi
 
@@ -48,190 +45,12 @@ jobs:
             https://api.github.com/repos/sushisk/STS2_RL/pulls/8 \
             | python -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')"
 
-          echo "Event Training SHA:   ${EVENT_TRAINING_SHA}"
-          echo "Current Training SHA: ${current_training_sha}"
-          echo "Current RL SHA:       ${current_rl_sha}"
+          echo "Workflow Training SHA: ${TRAINING_SHA}"
+          echo "Current Training SHA:  ${current_training_sha}"
+          echo "Current RL SHA:        ${current_rl_sha}"
 
-          if [[ "${EVENT_TRAINING_SHA}" != "${current_training_sha}" ]]; then
-            echo "::error::This run is not for the current Training PR #19 head."
-            exit 1
-          fi
-
-          echo "rl_sha=${current_rl_sha}" >> "${GITHUB_OUTPUT}"
-
-  paired-rl-v07:
-    name: paired RL v0.7 integration (trusted exact pair)
-    needs: preflight
-    runs-on: [self-hosted, Windows]
-    environment: paired-v07-trusted
-    timeout-minutes: 15
-    env:
-      PAIRED_RL_SHA: ${{ needs.preflight.outputs.rl_sha }}
-    steps:
-      - name: Mark exact pair pending
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $body = @{
-            state = 'pending'
-            context = $env:PAIR_STATUS_CONTEXT
-            description = "Testing RL $($env:PAIRED_RL_SHA.Substring(0,12))"
-            target_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } | ConvertTo-Json
-          Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $body -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/$env:TRAINING_SHA"
-
-      - name: Checkout exact Training PR head
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: training
-
-      - name: Checkout paired RL commit
-        uses: actions/checkout@v4
-        with:
-          repository: sushisk/STS2_RL
-          ref: ${{ env.PAIRED_RL_SHA }}
-          path: rl
-
-      - name: Record paired commit identity
-        shell: pwsh
-        env:
-          EXPECTED_TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          $trainingSha = git -C training rev-parse HEAD
-          $rlSha = git -C rl rev-parse HEAD
-          if ($trainingSha -ne $env:EXPECTED_TRAINING_SHA) {
-            throw "Training checkout mismatch: expected $env:EXPECTED_TRAINING_SHA, got $trainingSha"
-          }
-          if ($rlSha -ne $env:PAIRED_RL_SHA) {
-            throw "paired RL checkout mismatch: expected $env:PAIRED_RL_SHA, got $rlSha"
-          }
-          "Training SHA: $trainingSha" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "RL SHA: $rlSha" | Add-Content $env:GITHUB_STEP_SUMMARY
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Verify real Emulator runtime
-        shell: pwsh
-        run: |
-          $dll = 'C:\STS2_Emulator\Sts2Emulator.Cli\bin\Debug\net8.0\Sts2Emulator.dll'
-          $runtime = 'C:\STS2_Emulator\Sts2Emulator.Cli\bin\Debug\net8.0\Sts2Emulator.Cli.runtimeconfig.json'
-          if (!(Test-Path $dll) -or !(Test-Path $runtime)) {
-            throw 'paired-v07 requires the protected paired-v07-trusted Windows environment with the real STS2 Emulator runtime'
-          }
-
-      - name: Install test dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".\training[test]" pythonnet
-
-      - name: Run paired v0.7 integration
-        working-directory: training
-        env:
-          STS2_RL_ROOT: ${{ github.workspace }}\rl
-        run: python -m pytest tests/integration/test_paired_rl_v07.py -q
-
-      - name: Re-verify both PR heads after integration
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $trainingPr = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/sushisk/STS2_Training/pulls/19'
-          $rlPr = Invoke-RestMethod -Headers @{ Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } -Uri 'https://api.github.com/repos/sushisk/STS2_RL/pulls/8'
-          if ($trainingPr.head.sha -ne $env:EXPECTED_TRAINING_SHA) {
-            throw "Training PR #19 moved during integration: $($trainingPr.head.sha)"
-          }
-          if ($rlPr.head.sha -ne $env:PAIRED_RL_SHA) {
-            throw "RL PR #8 moved during integration: $($rlPr.head.sha)"
-          }
-
-      - name: Mark exact pair success
-        if: success()
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $body = @{
-            state = 'success'
-            context = $env:PAIR_STATUS_CONTEXT
-            description = "Passed with RL $($env:PAIRED_RL_SHA.Substring(0,12))"
-            target_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } | ConvertTo-Json
-          Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $body -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/$env:TRAINING_SHA"
-
-      - name: Mark exact pair failure
-        if: failure()
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $body = @{
-            state = 'failure'
-            context = $env:PAIR_STATUS_CONTEXT
-            description = "Failed with RL $($env:PAIRED_RL_SHA.Substring(0,12))"
-            target_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          } | ConvertTo-Json
-          Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $body -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/$env:TRAINING_SHA"
-
-  paired-head-gate:
-    name: exact Training/RL pair passed trusted integration
-    needs: [preflight, paired-rl-v07]
-    if: always()
-    runs-on: ubuntu-latest
-    env:
-      PAIRED_RL_SHA: ${{ needs.preflight.outputs.rl_sha }}
-    steps:
-      - name: Verify final exact-pair status
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TRAINING_SHA: ${{ github.event.pull_request.head.sha }}
-          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
-          INTEGRATION_RESULT: ${{ needs.paired-rl-v07.result }}
-        run: |
-          set -euo pipefail
-
-          if [[ "${PREFLIGHT_RESULT}" != "success" || "${INTEGRATION_RESULT}" != "success" ]]; then
-            echo "::error::trusted exact-pair integration did not complete successfully."
-            exit 1
-          fi
-
-          current_rl_sha="$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            https://api.github.com/repos/sushisk/STS2_RL/pulls/8 \
-            | python -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')"
-          if [[ "${current_rl_sha}" != "${PAIRED_RL_SHA}" ]]; then
-            echo "::error::RL PR #8 moved after the trusted integration."
+          if [[ "${TRAINING_SHA}" != "${current_training_sha}" ]]; then
+            echo "::error::This workflow run is stale because Training PR #19 moved."
             exit 1
           fi
 
@@ -242,7 +61,7 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${TRAINING_SHA}/statuses?per_page=100" \
             > statuses.json
 
-          python - "${PAIR_STATUS_CONTEXT}" "${PAIRED_RL_SHA}" <<'PY'
+          python - "${PAIR_STATUS_CONTEXT}" "${current_rl_sha}" <<'PY'
           import json
           import sys
 
@@ -253,14 +72,17 @@ jobs:
               statuses = json.load(f)
           matching = [s for s in statuses if s.get("context") == context]
           if not matching:
-              raise SystemExit(f"missing trusted integration status {context!r}")
+              raise SystemExit(
+                  "missing real-environment exact-pair attestation; "
+                  "run scripts/attest_paired_v07.ps1 on the trusted Emulator machine"
+              )
           latest = matching[0]
           if latest.get("state") != "success":
-              raise SystemExit(f"trusted integration status is {latest.get('state')!r}")
+              raise SystemExit(f"real-environment attestation is {latest.get('state')!r}, not success")
           if latest.get("description") != expected_description:
               raise SystemExit(
-                  "trusted integration status belongs to a different RL head: "
+                  "real-environment attestation belongs to a different RL head: "
                   f"{latest.get('description')!r} != {expected_description!r}"
               )
-          print("Final exact-pair gate passed.")
+          print("Exact Training/RL pair is attested by the trusted real environment.")
           PY
