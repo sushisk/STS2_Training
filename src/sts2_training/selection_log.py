@@ -30,15 +30,18 @@ class SelectionAudit:
     def __init__(self, logger: SelectionEventLogger | None) -> None:
         self._logger = logger
         self._decisions: dict[tuple[str, str], dict[str, Any]] = {}
-        # Exact replay is tracked per logical selection, not merely per wire request.
-        # A v0.7 emulate_actions batch intentionally gives every item the same request_id,
-        # so branch_id is part of the identity to keep sibling items as independent
-        # selections while still recognizing each item on an exact batch replay.
-        self._selection_keys: set[tuple[str, str]] = set()
+        # Exact replay only needs identity for the immediately current/previous wire
+        # request. The protocol is single-in-flight, so once a different request_id is
+        # observed the old request can never be replayed again. Keeping only the branch
+        # IDs for one request bounds this bookkeeping by the batch size instead of total
+        # speculative selections over the whole search.
+        self._selection_request_id: str | None = None
+        self._selection_branch_ids: set[str] = set()
 
     def clear(self) -> None:
         self._decisions.clear()
-        self._selection_keys.clear()
+        self._selection_request_id = None
+        self._selection_branch_ids.clear()
 
     def remember(self, response: Mapping[str, Any]) -> None:
         if self._logger is None:
@@ -85,20 +88,25 @@ class SelectionAudit:
         logical_branch_id = (
             branch_id if isinstance(branch_id, str) and branch_id else source_branch_id
         )
-        selection_key = (
-            (request_id, logical_branch_id)
-            if isinstance(request_id, str) and request_id and logical_branch_id
-            else None
+        has_selection_identity = (
+            isinstance(request_id, str)
+            and bool(request_id)
+            and isinstance(logical_branch_id, str)
+            and bool(logical_branch_id)
         )
+        if has_selection_identity and request_id != self._selection_request_id:
+            self._selection_request_id = request_id
+            self._selection_branch_ids.clear()
         is_retry_of_selection = (
-            selection_key is not None and selection_key in self._selection_keys
+            has_selection_identity and logical_branch_id in self._selection_branch_ids
         )
 
         # A completion-uncertain action is recorded on its first attempt so external
         # cancellation and transport failures remain auditable. Exact replay is transport
         # recovery for the same logical selection. For emulate_actions the wire request_id
-        # is shared by the whole batch, so the branch_id component above prevents sibling
-        # items from being mistaken for recoveries of one another.
+        # is shared by the whole batch, so branch_id keeps sibling items distinct. Because
+        # the wire protocol permits replay only for the current request, identities from
+        # older request_ids are discarded as soon as a new request is observed.
         event: dict[str, Any] = {
             "event": "selection_recovery" if is_retry_of_selection else "selection",
             "received": received,
@@ -118,8 +126,8 @@ class SelectionAudit:
         except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
             _LOG.exception("selection logger failed")
 
-        if not is_retry_of_selection and selection_key is not None:
-            self._selection_keys.add(selection_key)
+        if not is_retry_of_selection and has_selection_identity:
+            self._selection_branch_ids.add(logical_branch_id)
 
         successful = (
             error is None
