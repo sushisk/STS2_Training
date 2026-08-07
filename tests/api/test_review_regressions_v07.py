@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from sts2_training.api.contract import ApiContract
+from sts2_training.api.contract import ApiContract, ApiProtocolError
 from sts2_training.selection_log import SelectionAudit
 
 
-def _contract() -> ApiContract:
+def _contract(*, max_emulate_actions_items: int | None = 64) -> ApiContract:
     contract = ApiContract(client_session_id="session-a")
-    contract._accept_start_instance(  # noqa: SLF001
-        {"status": "completed", "instance_id": "inst-001"}
-    )
+    response = {"status": "completed", "instance_id": "inst-001"}
+    if max_emulate_actions_items is not None:
+        response["max_emulate_actions_items"] = max_emulate_actions_items
+    contract._accept_start_instance(response)  # noqa: SLF001
     return contract
 
 
@@ -39,6 +40,41 @@ def test_same_batch_parent_dependency_is_rejected_in_any_order(items: list[dict]
         contract._build_emulate_actions(  # noqa: SLF001
             1, "inst-001", items, simulation_options=None
         )
+
+
+def test_published_batch_capacity_is_cached_and_enforced_before_send() -> None:
+    contract = _contract(max_emulate_actions_items=2)
+    assert contract.max_emulate_actions_items == 2
+
+    request = contract._build_emulate_actions(  # noqa: SLF001
+        1,
+        "inst-001",
+        [_item("root", "b1"), _item("root", "b2")],
+        simulation_options=None,
+    )
+    assert len(request["items"]) == 2
+
+    with pytest.raises(ValueError, match="max_emulate_actions_items=2"):
+        contract._build_emulate_actions(  # noqa: SLF001
+            2,
+            "inst-001",
+            [_item("root", "c1"), _item("root", "c2"), _item("root", "c3")],
+            simulation_options=None,
+        )
+
+
+def test_invalid_published_batch_capacity_is_protocol_error() -> None:
+    contract = ApiContract(client_session_id="session-a")
+    with pytest.raises(ApiProtocolError, match="max_emulate_actions_items"):
+        contract._accept_start_instance(  # noqa: SLF001
+            {
+                "status": "completed",
+                "instance_id": "inst-001",
+                "max_emulate_actions_items": 0,
+            }
+        )
+    assert contract.instance_id is None
+    assert contract.max_emulate_actions_items is None
 
 
 def test_selection_replay_identity_rolls_over_with_request_id() -> None:
