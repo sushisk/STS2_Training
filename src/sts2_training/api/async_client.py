@@ -95,6 +95,7 @@ class AsyncTrainingApiClient(ApiContract):
         ``None`` only when external reconciliation establishes that no instance was
         created. This method does not contact RL.
         """
+        self._ensure_reconciliation_idle()
         if not self._start_uncertain:
             raise RuntimeError("there is no start_instance uncertainty to reconcile")
         if instance_id is not None:
@@ -113,6 +114,7 @@ class AsyncTrainingApiClient(ApiContract):
         not contact RL; the caller must choose the value only after external
         reconciliation or an explicit operator decision.
         """
+        self._ensure_reconciliation_idle()
         if not self._close_uncertain:
             raise RuntimeError("there is no close_instance uncertainty to reconcile")
         if not isinstance(assume_closed, bool):
@@ -206,10 +208,6 @@ class AsyncTrainingApiClient(ApiContract):
                 response = await self._execute(request, deadline=deadline)
                 return self._accept_start_instance(response)
             except ApiProtocolError:
-                # This includes both envelope/correlation failures from _execute() and
-                # operation-specific validation failures from _accept_start_instance().
-                # In either case a correlated start may already have created an RL
-                # instance, so another start must not be sent blindly.
                 self._remember_uncertain(request)
                 raise
 
@@ -321,9 +319,6 @@ class AsyncTrainingApiClient(ApiContract):
                 response = await self._execute(request, deadline=deadline)
                 return self._accept_close_instance(response)
             except ApiProtocolError:
-                # A correlated-but-invalid close response does not prove whether the
-                # instance was closed. Block later traffic until the caller reconciles
-                # or replays the exact same request.
                 self._remember_uncertain(request)
                 raise
 
@@ -404,21 +399,23 @@ class AsyncTrainingApiClient(ApiContract):
         try:
             validated = self._validate_api_response(request, response)
         except ApiOperationError as exc:
-            if self._is_evicted_close_replay_rejection(request_token, exc):
-                # A bounded RL close tombstone can be evicted before a lost close
-                # response is replayed. In that case unknown_instance does not prove
-                # whether the original close succeeded, so keep the exact replay token
-                # and close uncertainty until explicit reconciliation.
+            if (
+                request_token.operation == "close_instance"
+                and exc.response.get("status") == "faulted"
+            ):
+                # RL quarantines/removes an instance when close() faults because the
+                # instance may already be partially torn down. The fault is terminal
+                # for this instance: discard local active state rather than allowing
+                # fresh requests to target a possibly broken object.
+                self._instance_id = None
+                self._audit.clear()
+                self._clear_pending_if_matches(request_token)
+            elif self._is_evicted_close_replay_rejection(request_token, exc):
                 self._remember_uncertain(request, request_token)
             else:
-                # Other rejected/faulted responses are definitive for this logical
-                # request and reconcile any prior transport uncertainty.
                 self._clear_pending_if_matches(request_token)
             raise
         except ApiProtocolError:
-            # A malformed/mismatched response means we can no longer trust that the
-            # current stream is aligned with this request. Reconnect before any later
-            # API call rather than allowing a stale frame to cascade into more calls.
             await self._connection.invalidate()
             self._remember_uncertain(request, request_token)
             raise
@@ -438,9 +435,6 @@ class AsyncTrainingApiClient(ApiContract):
             response = await self._execute(request, deadline=deadline)
             self._validate_selected_action_response(request, response)
         except asyncio.CancelledError as exc:
-            # CancelledError is a BaseException in modern Python and would bypass the
-            # generic Exception branch. Record the selection explicitly because RL may
-            # already have applied the action when cancellation reaches the client.
             self._record_selected_action(
                 request,
                 source_branch_id=source_branch_id,
@@ -491,9 +485,6 @@ class AsyncTrainingApiClient(ApiContract):
 
         token = retry_request or RetryRequest.from_message(request)
         if self._pending_retry is not None and self._pending_retry != token:
-            # Public calls are serialized and new requests are blocked while a token is
-            # pending, so this should be unreachable. Preserve the older uncertainty
-            # rather than overwriting the only safe replay handle.
             return
         self._pending_retry = token
         if operation == "start_instance":
@@ -512,6 +503,12 @@ class AsyncTrainingApiClient(ApiContract):
             and exc.response.get("status") == "rejected"
             and exc.response.get("fault_kind") == _UNKNOWN_INSTANCE_FAULT_KIND
         )
+
+    def _ensure_reconciliation_idle(self) -> None:
+        if self._operation_lock.locked():
+            raise RuntimeError(
+                "cannot reconcile uncertainty while an API operation is in flight"
+            )
 
     def _clear_pending_if_matches(self, retry_request: RetryRequest) -> None:
         if self._pending_retry == retry_request:
