@@ -21,27 +21,11 @@ python -m sts2_training.api.tcp_smoke --host 127.0.0.1 --port 8765
 
 ## Async DTO API client
 
-TCP経路では、APIの意味とTCP接続の責務を分離します。
+TCP経路は責務を3つに分けます。
 
-- `ApiContract`: DTO生成、request/response相関、instance追跡、validation、selection audit
-- `AsyncTrainingApiClient`: API v0.5操作をasyncで実行し、DTOの生成・検証を制御
-- `TcpConnection`: connect / NDJSON encode-decode / timeout / reconnect のみ
-- `RLApiServer`: `operation` と `instance_id` による実処理の振り分け
-
-`AsyncTrainingApiClient`は「何を送るか・返答が正しいか」を担当し、`TcpConnection`は
-「JSON objectをどうTCPで1往復させるか」だけを担当します。`TcpConnection`はAPI operationや
-Instanceを解釈しません。
-
-v0.5では1接続上のrequest/responseを直列化するため、TCP専用のinternal IDやresponse routerは
-持ちません。相関はDTO自身の`request_id`を`AsyncTrainingApiClient`が検証します。
-
-デフォルトの`request_id`はUUIDベースです。
-
-現在の`AsyncTrainingApiClient`は、single-active-instanceとselection auditの整合性を守るため、
-public API operation全体をclient-level lockで直列化します。同じclientでactive instanceが存在する間は
-2回目の`start_instance`をRLへ送信せず拒否し、`close_instance`完了後に再度startできます。
-これは並列実行の恒久仕様ではなく、same-instance concurrency、branch間並列性、closeとのordering等を
-別途契約化するまでのcorrectness boundaryです。parallel API executionは後続の設計変更で扱います。
+- `ApiContract`: DTO生成・validation・correlation・client state
+- `AsyncTrainingApiClient`: async API operationの実行制御
+- `TcpConnection`: connect / NDJSON / timeout / reconnect
 
 ```python
 import asyncio
@@ -63,31 +47,16 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-同期版`TrainingApiClient`は既存の`RlTransport` / `LocalProcessTransport`用として残していますが、
-非同期TCP Clientとは継承関係にありません。両Clientは通信非依存の`ApiContract`だけを共有します。
+`AsyncTrainingApiClient`は現在、client-level lockでpublic operationを直列化します。
+デフォルト`request_id`はUUIDベースです。送信後のtimeout/cancellationやcorrelation failureでは
+connectionを破棄し、`start_instance`の結果が不明な場合は追加startを拒否します。
+自動retry/reconciliationや並列実行モデルはこの実装では定義しません。
 
-TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送ります。
-`schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
-DTO契約と同一です。
+`TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用し、
+transport-only errorはAPI DTO validationの前に`TransportError`として扱います。
 
-`TcpConnection(max_message_bytes=...)` の上限は送信request frameにのみ適用します。
-responseはRL側のframing contractに合わせ、terminating newlineまで読み取ります。API operation成功後の
-responseをtransport側のsize上限で捨てるとnon-idempotent operationの結果を観測不能にし得るため、
-response size controlはこのTCP transportでは行いません。request上限超過、timeout、task cancellation、
-stream error、API correlation failureでは現在のconnectionを破棄し、後続callが古いresponseを誤って
-消費しないようにします。
-
-### Timeout / cancellation semantics
-
-送信開始後のtimeoutやcancellationは、RL側でoperationが実行されたかどうかをTraining側から確定できない
-ambiguous completionです。このPRではnon-idempotent operationのreplay/recovery protocolは定義しません。
-そのため`start_instance` / `commit_action` / `emulate_action` / `close_instance`が送信後に失敗した場合、
-同じ高レベルoperationを新しい`request_id`で自動再実行しないでください。safe retry / reconciliationは
-server-side idempotencyと合わせて別PRで定義します。
-
-transport-only response（例: oversized requestに対する
-`{"transport_error":"message_too_large","direction":"request", ...}`）はAPI DTOではなく
-`TransportError`として扱われ、API envelope validationには渡しません。
+同期版`TrainingApiClient`は既存の`RlTransport` / `LocalProcessTransport`用として残し、
+両clientは`ApiContract`を共有します。
 
 ## Unit tests
 
