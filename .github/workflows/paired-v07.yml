@@ -42,21 +42,21 @@ jobs:
             exit 1
           fi
 
-          statuses_json="$({
-            curl --fail --silent --show-error \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${TRAINING_SHA}/statuses?per_page=100"
-          })"
+          curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${TRAINING_SHA}/statuses?per_page=100" \
+            > statuses.json
 
-          python - "${PAIR_STATUS_CONTEXT}" "${PAIRED_RL_SHA}" <<'PY' <<<"${statuses_json}"
+          python - "${PAIR_STATUS_CONTEXT}" "${PAIRED_RL_SHA}" <<'PY'
           import json
           import sys
 
           context = sys.argv[1]
           rl_sha = sys.argv[2]
-          statuses = json.load(sys.stdin)
+          with open("statuses.json", "r", encoding="utf-8") as f:
+              statuses = json.load(f)
           expected_description = f"Passed with RL {rl_sha[:12]}"
           matching = [s for s in statuses if s.get("context") == context]
           if not matching:
