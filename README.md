@@ -37,6 +37,12 @@ v0.5では1接続上のrequest/responseを直列化するため、TCP専用のin
 
 デフォルトの`request_id`はUUIDベースです。
 
+現在の`AsyncTrainingApiClient`は、single-active-instanceとselection auditの整合性を守るため、
+public API operation全体をclient-level lockで直列化します。同じclientでactive instanceが存在する間は
+2回目の`start_instance`をRLへ送信せず拒否し、`close_instance`完了後に再度startできます。
+これは並列実行の恒久仕様ではなく、same-instance concurrency、branch間並列性、closeとのordering等を
+別途契約化するまでのcorrectness boundaryです。parallel API executionは後続の設計変更で扱います。
+
 ```python
 import asyncio
 
