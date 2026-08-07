@@ -200,7 +200,7 @@ class AsyncTrainingApiClientStartUncertainTest(unittest.IsolatedAsyncioTestCase)
         self.assertTrue(client.close_uncertain)
         self.assertEqual(client.instance_id, instance_id)
 
-        with self.assertRaisesRegex(RuntimeError, "reconcile_close_uncertainty"):
+        with self.assertRaisesRegex(RuntimeError, "completion-uncertain"):
             await client.get_decision(instance_id, timeout_s=1.0)
         self.assertEqual(len(connection.messages), 2)
 
