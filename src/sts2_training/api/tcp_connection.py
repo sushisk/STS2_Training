@@ -25,6 +25,10 @@ class TcpConnection:
     This class deliberately knows nothing about API operations, instance routing, or
     request/response correlation. It only serializes one JSON object, waits for one JSON
     object in reply, and keeps the socket healthy across exchanges.
+
+    Once a request has started writing, cancellation/timeout/stream errors invalidate the
+    connection. A later exchange therefore reconnects instead of consuming a late response
+    from the cancelled request.
     """
 
     def __init__(
@@ -82,11 +86,17 @@ class TcpConnection:
             await self._connect()
             assert self._reader is not None
             assert self._writer is not None
+            sent = False
             try:
                 async with asyncio.timeout(timeout_s):
+                    sent = True
                     self._writer.write(encoded)
                     await self._writer.drain()
                     line = await self._reader.readline()
+            except asyncio.CancelledError:
+                if sent:
+                    await self._disconnect()
+                raise
             except TimeoutError as exc:
                 await self._disconnect()
                 raise TransportError("RL TCP request timed out") from exc
@@ -115,6 +125,15 @@ class TcpConnection:
             if not isinstance(response, dict):
                 await self._disconnect()
                 raise TransportError("RL TCP response must be a JSON object")
+
+            transport_error = response.get("transport_error")
+            if transport_error is not None:
+                await self._disconnect()
+                detail = response.get("error")
+                suffix = f": {detail}" if isinstance(detail, str) and detail else ""
+                raise TransportError(
+                    f"RL TCP transport error {transport_error!r}{suffix}"
+                )
             return response
 
     async def ping(self, *, timeout_s: float = 5.0) -> JsonObject:
@@ -122,7 +141,8 @@ class TcpConnection:
             {"transport_operation": "ping"},
             timeout_s=timeout_s,
         )
-        if response.get("transport_operation") != "pong":
+        if response != {"transport_operation": "pong"}:
+            await self.invalidate()
             raise TransportError("RL TCP server returned an invalid ping response")
         return response
 
@@ -134,6 +154,11 @@ class TcpConnection:
             and not self._reader.at_eof()
             and not self._writer.is_closing()
         )
+
+    async def invalidate(self) -> None:
+        """Discard the current stream without permanently closing this connection."""
+        async with self._lock:
+            await self._disconnect()
 
     async def close(self) -> None:
         async with self._lock:
