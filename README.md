@@ -20,6 +20,39 @@ python -m sts2_training.api.tcp_smoke --host 127.0.0.1 --port 8765
 成功時は `{"transport_operation": "pong"}` が表示されます。
 `AsyncioTcpTransport.call()`には既存API v0.5のrequest dictをそのまま渡せます。
 
+## Async DTO API client
+
+実際のAPI v0.5 DTOをTCPで送る場合は、`AsyncioTcpTransport` と
+`AsyncTrainingApiClient` を組み合わせます。同期版 `TrainingApiClient` と同じ
+request生成・response相関検証・selection audit規則を利用します。
+
+```python
+import asyncio
+
+from sts2_training.api import AsyncTrainingApiClient, AsyncioTcpTransport
+
+
+async def main() -> None:
+    transport = AsyncioTcpTransport(host="127.0.0.1", port=8765)
+    client = AsyncTrainingApiClient(transport)
+    try:
+        instance_id = await client.start_instance(
+            {"instance_type": "combat"},
+            timeout_s=30.0,
+        )
+        decision = await client.get_decision(instance_id, timeout_s=30.0)
+        print(decision)
+    finally:
+        await client.close()
+
+
+asyncio.run(main())
+```
+
+TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送ります。
+`schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
+DTO契約と同一です。
+
 ## Unit tests
 
 ```bash
