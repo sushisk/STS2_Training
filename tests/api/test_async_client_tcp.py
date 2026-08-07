@@ -39,6 +39,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 if request.get("transport_operation") == "hello":
                     response = {
                         "transport_operation": "hello",
+                        "schema_version": "0.6",
                         "client_session_id": request["client_session_id"],
                         "server_epoch": "epoch-1",
                     }
@@ -87,6 +88,8 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                     "status": "completed",
                     "instance_id": "inst-001",
                 }
+            if instance_type == "missing-instance":
+                return {**common, "status": "completed"}
             return {
                 **common,
                 "status": "completed",
@@ -233,7 +236,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instance_id, "inst-001")
         self.assertEqual(self.requests[-1]["request_seq"], 2)
 
-    async def test_protocol_mismatch_invalidates_stream_and_keeps_sequence_pending(self) -> None:
+    async def test_envelope_mismatch_invalidates_stream_and_keeps_sequence_pending(self) -> None:
         with self.assertRaisesRegex(ApiProtocolError, "request_id"):
             await self.client.start_instance(
                 {"instance_type": "mismatch"}, timeout_s=1.0
@@ -243,6 +246,21 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.pending_retry.request_seq, 1)
         self.assertEqual(self.client.next_request_seq, 1)
 
+    async def test_operation_specific_validation_failure_does_not_advance_sequence(self) -> None:
+        with self.assertRaisesRegex(ApiProtocolError, "instance_id"):
+            await self.client.start_instance(
+                {"instance_type": "missing-instance"}, timeout_s=1.0
+            )
+        self.assertFalse(self.connection.is_alive())
+        self.assertTrue(self.client.start_uncertain)
+        self.assertEqual(self.client.pending_retry.request_seq, 1)
+        self.assertEqual(self.client.next_request_seq, 1)
+
+    async def test_pending_protocol_failure_blocks_fresh_request(self) -> None:
+        with self.assertRaises(ApiProtocolError):
+            await self.client.start_instance(
+                {"instance_type": "mismatch"}, timeout_s=1.0
+            )
         with self.assertRaisesRegex(RuntimeError, "unresolved request"):
             await self.client.start_instance(
                 {"instance_type": "combat"}, timeout_s=1.0
