@@ -32,7 +32,10 @@ class TcpConnection:
     ``max_message_bytes`` bounds outbound request frames only, matching the RL TCP
     framing contract. ``max_response_bytes`` is a separate receiver-side safety bound
     so a peer that never sends a newline cannot make response buffering unbounded. The
-    response limit intentionally defaults much higher than the request limit.
+    response limit intentionally defaults much higher than the request limit. After a
+    response-size failure, callers may raise the receiver limit with
+    ``set_max_response_bytes()`` and replay the exact same ``RetryRequest``; changing
+    this local safety limit does not create a new logical API request.
 
     Each exchange has one absolute deadline. Waiting for this connection's lock,
     connecting, writing, draining, and reading the response all consume that same
@@ -74,6 +77,25 @@ class TcpConnection:
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+
+    @property
+    def max_response_bytes(self) -> int:
+        """Current receiver-side response frame limit."""
+        return self._max_response_bytes
+
+    async def set_max_response_bytes(self, max_response_bytes: int) -> None:
+        """Update the response limit without changing logical request identity.
+
+        The update is serialized with exchanges. In particular, after an oversized
+        completion-uncertain response invalidates the stream, a caller can raise this
+        limit and then replay the exact token exposed by ``pending_retry``.
+        """
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
+        async with self._lock:
+            if self._closed:
+                raise TransportClosedError("connection is closed")
+            self._max_response_bytes = max_response_bytes
 
     async def connect(self) -> None:
         async with self._lock:
