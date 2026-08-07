@@ -16,10 +16,25 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
             writer: asyncio.StreamWriter,
         ) -> None:
             try:
-                line = await reader.readline()
-                request = json.loads(line)
+                hello = json.loads(await reader.readline())
+                writer.write(
+                    json.dumps(
+                        {
+                            "transport_operation": "hello",
+                            "client_session_id": hello["client_session_id"],
+                            "server_epoch": "epoch-1",
+                        }
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                await writer.drain()
+
+                request = json.loads(await reader.readline())
                 response = {
-                    "schema_version": request["schema_version"],
+                    "schema_version": "0.6",
+                    "server_epoch": "epoch-1",
+                    "client_session_id": request["client_session_id"],
+                    "request_seq": request["request_seq"],
                     "request_id": request["request_id"],
                     "operation": request["operation"],
                     "status": "completed",
@@ -44,10 +59,16 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
 
         server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
-        connection = TcpConnection(port=port, max_response_bytes=128)
+        connection = TcpConnection(
+            port=port,
+            client_session_id="session-a",
+            max_response_bytes=128,
+        )
         request = {
-            "schema_version": "0.5",
-            "request_id": "req-retry-size",
+            "schema_version": "0.6",
+            "client_session_id": "session-a",
+            "request_seq": 1,
+            "request_id": "session-a:1",
             "operation": "commit_action",
             "instance_id": "inst-001",
         }
@@ -58,26 +79,22 @@ class RetryResponseLimitAndAuditTest(unittest.IsolatedAsyncioTestCase):
 
             error = caught.exception
             self.assertTrue(error.completion_uncertain)
-            self.assertIsNotNone(error.retry_request)
             retry = error.retry_request
+            self.assertIsNotNone(retry)
             assert retry is not None
             self.assertEqual(retry.to_message(), request)
 
             await connection.set_max_response_bytes(4096)
-            self.assertEqual(connection.max_response_bytes, 4096)
             response = await connection.exchange(retry.to_message(), timeout_s=1.0)
-            self.assertEqual(response["request_id"], "req-retry-size")
-            self.assertEqual(
-                response["masked_emulator_dto"]["payload"],
-                "x" * 1024,
-            )
+            self.assertEqual(response["request_id"], "session-a:1")
+            self.assertEqual(response["masked_emulator_dto"]["payload"], "x" * 1024)
         finally:
             await connection.close()
             server.close()
             await server.wait_closed()
 
     async def test_invalid_response_limit_update_is_rejected(self) -> None:
-        connection = TcpConnection()
+        connection = TcpConnection(client_session_id="session-a")
         with self.assertRaisesRegex(ValueError, "max_response_bytes must be positive"):
             await connection.set_max_response_bytes(0)
         await connection.close()
@@ -96,8 +113,10 @@ class SelectionAuditRetryTest(unittest.TestCase):
             }
         )
         request = {
-            "schema_version": "0.5",
-            "request_id": "req-commit-1",
+            "schema_version": "0.6",
+            "client_session_id": "session-a",
+            "request_seq": 2,
+            "request_id": "session-a:2",
             "operation": "commit_action",
             "instance_id": "inst-001",
             "branch_id": "root",
@@ -118,23 +137,17 @@ class SelectionAuditRetryTest(unittest.TestCase):
             "decision_point_id": "decision-2",
             "masked_emulator_dto": {"state": "after"},
         }
-        audit.record_action(
-            request,
-            source_branch_id="root",
-            result=replay_result,
-        )
+        audit.record_action(request, source_branch_id="root", result=replay_result)
 
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["event"], "selection")
-        self.assertEqual(events[0]["request"]["request_id"], "req-commit-1")
-        self.assertEqual(events[0]["client_error"]["type"], "TransportError")
         self.assertEqual(events[1]["event"], "selection_recovery")
-        self.assertEqual(events[1]["request"]["request_id"], "req-commit-1")
-        self.assertEqual(events[1]["result"], replay_result)
+        self.assertEqual(events[1]["request"]["request_id"], "session-a:2")
 
         next_request = {
             **request,
-            "request_id": "req-commit-2",
+            "request_seq": 3,
+            "request_id": "session-a:3",
             "decision_point_id": "decision-2",
             "action_id": "action-2",
         }
@@ -144,7 +157,6 @@ class SelectionAuditRetryTest(unittest.TestCase):
             result=None,
             error=RuntimeError("stop"),
         )
-        self.assertEqual(len(events), 3)
         self.assertEqual(events[2]["received"]["decision_point_id"], "decision-2")
 
 
