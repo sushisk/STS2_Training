@@ -3,26 +3,34 @@ name: paired-v07-trusted
 on:
   workflow_dispatch:
     inputs:
-      training_ref:
-        description: Training branch, tag, or commit to test
+      training_sha:
+        description: Exact Training commit SHA to test
         required: true
-        default: agent/emulate-actions-batch
+
+authorization: {}
 
 permissions:
   contents: read
   pull-requests: read
+  statuses: write
 
 env:
   PAIRED_RL_SHA: ed927f9a6ea86d30910fedd1edcbb719715c97e2
+  PAIR_STATUS_CONTEXT: paired-v07-trusted-exact-pair
 
 jobs:
   paired-rl-v07:
     name: paired RL v0.7 integration (trusted manual run)
-    # This workflow is intentionally manual-only. Configure the repository/runner so
-    # this workflow is the only workflow allowed to target the persistent paired runner.
     runs-on: [self-hosted, Windows]
     timeout-minutes: 15
     steps:
+      - name: Validate requested Training SHA
+        shell: pwsh
+        run: |
+          if ('${{ inputs.training_sha }}' -notmatch '^[0-9a-fA-F]{40}$') {
+            throw 'training_sha must be an exact 40-character commit SHA'
+          }
+
       - name: Verify RL PR #8 current head
         shell: pwsh
         env:
@@ -41,10 +49,28 @@ jobs:
             throw "PAIRED_RL_SHA is stale; expected current RL PR #8 head $currentRlSha"
           }
 
-      - name: Checkout selected Training ref
+      - name: Mark exact pair pending
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $body = @{
+            state = 'pending'
+            context = $env:PAIR_STATUS_CONTEXT
+            description = "Testing RL $($env:PAIRED_RL_SHA.Substring(0,12))"
+            target_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $body -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/${{ inputs.training_sha }}"
+
+      - name: Checkout exact Training commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.training_ref }}
+          ref: ${{ inputs.training_sha }}
           path: training
 
       - name: Checkout paired RL commit
@@ -59,10 +85,12 @@ jobs:
         run: |
           $trainingSha = git -C training rev-parse HEAD
           $rlSha = git -C rl rev-parse HEAD
+          if ($trainingSha -ne '${{ inputs.training_sha }}') {
+            throw "Training checkout mismatch: expected ${{ inputs.training_sha }}, got $trainingSha"
+          }
           if ($rlSha -ne $env:PAIRED_RL_SHA) {
             throw "paired RL checkout mismatch: expected $env:PAIRED_RL_SHA, got $rlSha"
           }
-          "Training ref: ${{ inputs.training_ref }}" | Add-Content $env:GITHUB_STEP_SUMMARY
           "Training SHA: $trainingSha" | Add-Content $env:GITHUB_STEP_SUMMARY
           "RL SHA: $rlSha" | Add-Content $env:GITHUB_STEP_SUMMARY
           Write-Host "Training SHA: $trainingSha"
@@ -93,3 +121,41 @@ jobs:
         env:
           STS2_RL_ROOT: ${{ github.workspace }}\rl
         run: python -m pytest tests/integration/test_paired_rl_v07.py -q
+
+      - name: Mark exact pair success
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $body = @{
+            state = 'success'
+            context = $env:PAIR_STATUS_CONTEXT
+            description = "Passed with RL $($env:PAIRED_RL_SHA.Substring(0,12))"
+            target_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $body -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/${{ inputs.training_sha }}"
+
+      - name: Mark exact pair failure
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $body = @{
+            state = 'failure'
+            context = $env:PAIR_STATUS_CONTEXT
+            description = "Failed with RL $($env:PAIRED_RL_SHA.Substring(0,12))"
+            target_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $body -Uri "https://api.github.com/repos/${{ github.repository }}/statuses/${{ inputs.training_sha }}"
