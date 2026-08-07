@@ -4,23 +4,44 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   paired-rl-v07:
     name: paired RL v0.7 integration
+    # Never execute untrusted fork PR code on the persistent self-hosted runner.
+    # workflow_dispatch remains available for explicitly trusted/manual runs.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows]
     timeout-minutes: 15
+    env:
+      PAIRED_RL_SHA: b320a6f7b9e4058011833f88b223503642309bd8
     steps:
       - name: Checkout Training PR
         uses: actions/checkout@v4
         with:
           path: training
 
-      - name: Checkout paired RL PR 8 head
+      - name: Checkout paired RL commit
         uses: actions/checkout@v4
         with:
           repository: sushisk/STS2_RL
-          ref: refs/pull/8/head
+          ref: ${{ env.PAIRED_RL_SHA }}
           path: rl
+
+      - name: Record paired commit identity
+        shell: pwsh
+        run: |
+          $trainingSha = git -C training rev-parse HEAD
+          $rlSha = git -C rl rev-parse HEAD
+          if ($rlSha -ne $env:PAIRED_RL_SHA) {
+            throw "paired RL checkout mismatch: expected $env:PAIRED_RL_SHA, got $rlSha"
+          }
+          "Training SHA: $trainingSha" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "RL SHA: $rlSha" | Add-Content $env:GITHUB_STEP_SUMMARY
+          Write-Host "Training SHA: $trainingSha"
+          Write-Host "RL SHA: $rlSha"
 
       - name: Set up Python
         uses: actions/setup-python@v5
