@@ -180,8 +180,8 @@ class ApiContract:
 
         The wire contract requires every ``parent_branch_id`` to refer to a Branch that
         already exists when this batch request starts. Training cannot prove RL-side
-        existence locally, but it deliberately does not express same-batch parent/child
-        dependencies; Beam Search should send one frontier depth per batch.
+        existence locally, but it can reject any parent that is created by another item
+        in the same batch. Beam Search should send one frontier depth per batch.
         """
         self._validate_instance_id(instance_id)
         if isinstance(items, (str, bytes)):
@@ -223,6 +223,14 @@ class ApiContract:
                     "action_id": action_id,
                 }
             )
+
+        batch_branch_ids = {item["branch_id"] for item in normalized_items}
+        for item in normalized_items:
+            parent_branch_id = item["parent_branch_id"]
+            if parent_branch_id in batch_branch_ids:
+                raise ValueError(
+                    f"emulate_actions parent_branch_id {parent_branch_id!r} is created within the same batch"
+                )
 
         fields: JsonObject = {"instance_id": instance_id, "items": normalized_items}
         if simulation_options is not None:
