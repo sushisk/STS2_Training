@@ -17,6 +17,7 @@ from sts2_training.api.transport import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024
+_RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 
 
 class TcpConnection:
@@ -26,9 +27,14 @@ class TcpConnection:
     request/response correlation. It serializes one JSON object, waits for one JSON
     object in reply, and keeps the socket healthy across exchanges.
 
-    ``max_message_bytes`` bounds both request and response frames. Once a request has
-    started writing, timeout, cancellation, or stream errors invalidate the connection
-    so a later exchange cannot consume a stale response from the abandoned request.
+    ``max_message_bytes`` bounds outbound request frames only, matching the RL TCP
+    framing contract. Response frames are read through their terminating newline rather
+    than being rejected at the request-frame limit, because a transport-side response
+    cap could hide the successful result of a non-idempotent API operation.
+
+    Once a request has started writing, timeout, cancellation, or stream errors
+    invalidate the connection so a later exchange cannot consume a stale response from
+    the abandoned request.
     """
 
     def __init__(
@@ -89,7 +95,7 @@ class TcpConnection:
                     sent = True
                     self._writer.write(encoded)
                     await self._writer.drain()
-                    line = await self._reader.readline()
+                    line = await self._read_response_frame(self._reader)
             except asyncio.CancelledError:
                 if sent:
                     await self._disconnect()
@@ -97,25 +103,18 @@ class TcpConnection:
             except TimeoutError as exc:
                 await self._disconnect()
                 raise TransportError("RL TCP request timed out") from exc
+            except RuntimeExitedError:
+                await self._disconnect()
+                raise
+            except TransportError:
+                await self._disconnect()
+                raise
             except (ConnectionError, OSError) as exc:
                 await self._disconnect()
                 raise RuntimeExitedError(
                     "RL TCP connection closed during request"
                 ) from exc
-            except (ValueError, asyncio.LimitOverrunError) as exc:
-                await self._disconnect()
-                raise TransportError(
-                    f"RL TCP response exceeds max_message_bytes={self._max_message_bytes}"
-                ) from exc
 
-            if not line:
-                await self._disconnect()
-                raise RuntimeExitedError("RL TCP server closed the connection")
-            if len(line) > self._max_message_bytes:
-                await self._disconnect()
-                raise TransportError(
-                    f"RL TCP response exceeds max_message_bytes={self._max_message_bytes}"
-                )
             try:
                 response: Any = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -190,6 +189,27 @@ class TcpConnection:
             raise TransportError(
                 f"could not connect to RL TCP server at {self._host}:{self._port}"
             ) from exc
+
+    @staticmethod
+    async def _read_response_frame(reader: asyncio.StreamReader) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            chunk = await reader.read(_RESPONSE_READ_CHUNK_BYTES)
+            if not chunk:
+                raise RuntimeExitedError(
+                    "RL TCP server closed the connection before completing a response frame"
+                )
+            newline_index = chunk.find(b"\n")
+            if newline_index < 0:
+                chunks.append(chunk)
+                continue
+
+            chunks.append(chunk[: newline_index + 1])
+            if newline_index + 1 != len(chunk):
+                raise TransportError(
+                    "RL TCP server returned data after the response frame delimiter"
+                )
+            return b"".join(chunks)
 
     async def _disconnect(self) -> None:
         writer = self._writer
