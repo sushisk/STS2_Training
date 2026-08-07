@@ -17,24 +17,18 @@ from sts2_training.api.transport import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024
-_RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 
 
 class TcpConnection:
     """Persistent newline-delimited JSON connection.
 
     This class deliberately knows nothing about API operations, instance routing, or
-    request/response correlation. It only serializes one JSON object, waits for one JSON
+    request/response correlation. It serializes one JSON object, waits for one JSON
     object in reply, and keeps the socket healthy across exchanges.
 
-    ``max_message_bytes`` limits outbound request frames only. Responses are read until
-    their newline without applying that request limit. This is important for ambiguous
-    completion: a completed non-idempotent API operation must not become permanently
-    unrecoverable merely because its response is larger than the request-frame limit.
-
-    Once a request has started writing, cancellation/timeout/stream errors invalidate the
-    connection. A later exchange therefore reconnects instead of consuming a late response
-    from the cancelled request.
+    ``max_message_bytes`` bounds both request and response frames. Once a request has
+    started writing, timeout, cancellation, or stream errors invalidate the connection
+    so a later exchange cannot consume a stale response from the abandoned request.
     """
 
     def __init__(
@@ -85,9 +79,6 @@ class TcpConnection:
                 f"request exceeds max_message_bytes={self._max_message_bytes}"
             )
 
-        # The v0.5 TCP contract is intentionally one request -> one response per
-        # connection at a time. No transport-level correlation ID or response router
-        # is needed; API request_id remains an API-level concern.
         async with self._lock:
             await self._connect()
             assert self._reader is not None
@@ -98,7 +89,7 @@ class TcpConnection:
                     sent = True
                     self._writer.write(encoded)
                     await self._writer.drain()
-                    line = await self._read_response_frame(self._reader)
+                    line = await self._reader.readline()
             except asyncio.CancelledError:
                 if sent:
                     await self._disconnect()
@@ -111,13 +102,20 @@ class TcpConnection:
                 raise RuntimeExitedError(
                     "RL TCP connection closed during request"
                 ) from exc
-            except TransportError:
+            except (ValueError, asyncio.LimitOverrunError) as exc:
                 await self._disconnect()
-                raise
+                raise TransportError(
+                    f"RL TCP response exceeds max_message_bytes={self._max_message_bytes}"
+                ) from exc
 
             if not line:
                 await self._disconnect()
                 raise RuntimeExitedError("RL TCP server closed the connection")
+            if len(line) > self._max_message_bytes:
+                await self._disconnect()
+                raise TransportError(
+                    f"RL TCP response exceeds max_message_bytes={self._max_message_bytes}"
+                )
             try:
                 response: Any = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -192,32 +190,6 @@ class TcpConnection:
             raise TransportError(
                 f"could not connect to RL TCP server at {self._host}:{self._port}"
             ) from exc
-
-    @staticmethod
-    async def _read_response_frame(reader: asyncio.StreamReader) -> bytes:
-        chunks: list[bytes] = []
-        while True:
-            chunk = await reader.read(_RESPONSE_READ_CHUNK_BYTES)
-            if not chunk:
-                if chunks:
-                    raise TransportError(
-                        "RL TCP server closed the connection before response newline"
-                    )
-                return b""
-
-            newline_index = chunk.find(b"\n")
-            if newline_index < 0:
-                chunks.append(chunk)
-                continue
-
-            chunks.append(chunk[: newline_index + 1])
-            if chunk[newline_index + 1 :]:
-                # With one outstanding request per connection, bytes after the first
-                # response newline mean the peer violated the v0.5 framing contract.
-                raise TransportError(
-                    "RL TCP server returned multiple response frames for one request"
-                )
-            return b"".join(chunks)
 
     async def _disconnect(self) -> None:
         writer = self._writer
