@@ -39,6 +39,10 @@ class AsyncTrainingApiClient(ApiContract):
     RL, the client enters a start-uncertain state. Later start attempts are rejected
     instead of risking a second active instance. Failures known to occur before the
     request could reach RL do not enter that state.
+
+    If ``close_instance`` loses a definitive result after send, the client enters a
+    close-uncertain state and blocks later API traffic until the caller explicitly
+    reconciles the local state with ``reconcile_close_uncertainty``.
     """
 
     def __init__(
@@ -55,11 +59,35 @@ class AsyncTrainingApiClient(ApiContract):
         self._connection = connection
         self._operation_lock = asyncio.Lock()
         self._start_uncertain = False
+        self._close_uncertain = False
 
     @property
     def start_uncertain(self) -> bool:
         """Whether a previous start may have completed without a known response."""
         return self._start_uncertain
+
+    @property
+    def close_uncertain(self) -> bool:
+        """Whether a previous close may have completed without a known response."""
+        return self._close_uncertain
+
+    def reconcile_close_uncertainty(self, *, assume_closed: bool) -> None:
+        """Resolve an ambiguous close using knowledge obtained outside this client.
+
+        ``assume_closed=True`` discards the local active-instance and selection-audit
+        state so a later ``start_instance`` can proceed. ``assume_closed=False`` keeps
+        the current instance state and permits operations to resume. This method does
+        not contact RL; the caller must choose the value only after external
+        reconciliation or an explicit operator decision.
+        """
+        if not self._close_uncertain:
+            raise RuntimeError("there is no close_instance uncertainty to reconcile")
+        if not isinstance(assume_closed, bool):
+            raise TypeError("assume_closed must be a bool")
+        if assume_closed:
+            self._instance_id = None
+            self._audit.clear()
+        self._close_uncertain = False
 
     async def start_instance(
         self,
@@ -77,6 +105,7 @@ class AsyncTrainingApiClient(ApiContract):
             request = self._build_start_instance(instance_config)
             try:
                 response = await self._execute(request, deadline=deadline)
+                return self._accept_start_instance(response)
             except asyncio.CancelledError as exc:
                 if getattr(exc, "completion_uncertain", False):
                     self._start_uncertain = True
@@ -86,9 +115,12 @@ class AsyncTrainingApiClient(ApiContract):
                     self._start_uncertain = True
                 raise
             except ApiProtocolError:
+                # This includes both envelope/correlation failures from _execute() and
+                # operation-specific validation failures from _accept_start_instance().
+                # In either case a correlated start may already have created an RL
+                # instance, so another start must not be sent blindly.
                 self._start_uncertain = True
                 raise
-            return self._accept_start_instance(response)
 
     async def get_decision(
         self,
@@ -194,8 +226,22 @@ class AsyncTrainingApiClient(ApiContract):
     ) -> JsonObject:
         async with self._operation_deadline(timeout_s) as deadline:
             request = self._build_close_instance(instance_id)
-            response = await self._execute(request, deadline=deadline)
-            return self._accept_close_instance(response)
+            try:
+                response = await self._execute(request, deadline=deadline)
+                return self._accept_close_instance(response)
+            except asyncio.CancelledError as exc:
+                if getattr(exc, "completion_uncertain", False):
+                    self._close_uncertain = True
+                raise
+            except TransportError as exc:
+                if exc.completion_uncertain:
+                    self._close_uncertain = True
+                raise
+            except ApiProtocolError:
+                # A correlated-but-invalid close response does not prove whether the
+                # instance was closed. Block later traffic until the caller reconciles.
+                self._close_uncertain = True
+                raise
 
     async def close(self) -> None:
         async with self._operation_lock:
@@ -246,6 +292,11 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         deadline: float,
     ) -> JsonObject:
+        if self._close_uncertain:
+            raise RuntimeError(
+                "previous close_instance result is unknown; "
+                "reconcile_close_uncertainty() required"
+            )
         response = await self._connection.exchange(
             request,
             deadline=deadline,
