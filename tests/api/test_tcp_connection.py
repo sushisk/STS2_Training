@@ -127,18 +127,18 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(self.connection.is_alive())
 
-    async def test_response_frame_limit_is_enforced(self) -> None:
+    async def test_response_is_not_capped_by_request_frame_limit(self) -> None:
         connection = TcpConnection(
             port=self.port,
             max_message_bytes=128,
         )
         try:
-            with self.assertRaisesRegex(TransportError, "response exceeds"):
-                await connection.exchange(
-                    {"request_id": "large-response"},
-                    timeout_s=1.0,
-                )
-            self.assertFalse(connection.is_alive())
+            response = await connection.exchange(
+                {"request_id": "large-response"},
+                timeout_s=1.0,
+            )
+            self.assertEqual(response, {"payload": "x" * 4096})
+            self.assertTrue(connection.is_alive())
         finally:
             await connection.close()
 
