@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -22,6 +23,11 @@ class AsyncTrainingApiClient(ApiContract):
     DTO construction, validation, correlation, instance tracking, and selection audit
     live in ``ApiContract``. This class owns only async request/response orchestration.
     It intentionally does not implement or depend on the legacy ``RlTransport``.
+
+    Public API operations are currently serialized at the client level so the
+    single-active-instance and selection-audit state cannot race across tasks.
+    Parallel API execution is intentionally deferred until its lifecycle semantics are
+    defined explicitly.
     """
 
     def __init__(
@@ -36,6 +42,7 @@ class AsyncTrainingApiClient(ApiContract):
             selection_logger=selection_logger,
         )
         self._connection = connection
+        self._operation_lock = asyncio.Lock()
 
     async def start_instance(
         self,
@@ -43,9 +50,12 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> str:
-        request = self._build_start_instance(instance_config)
-        response = await self._execute(request, timeout_s=timeout_s)
-        return self._accept_start_instance(response)
+        async with self._operation_lock:
+            if self.instance_id is not None:
+                raise RuntimeError("client already has an active instance")
+            request = self._build_start_instance(instance_config)
+            response = await self._execute(request, timeout_s=timeout_s)
+            return self._accept_start_instance(response)
 
     async def get_decision(
         self,
@@ -54,9 +64,10 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        request = self._build_get_decision(instance_id, branch_id)
-        response = await self._execute(request, timeout_s=timeout_s)
-        return self._accept_get_decision(response, branch_id)
+        async with self._operation_lock:
+            request = self._build_get_decision(instance_id, branch_id)
+            response = await self._execute(request, timeout_s=timeout_s)
+            return self._accept_get_decision(response, branch_id)
 
     async def commit_action(
         self,
@@ -66,16 +77,17 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        request = self._build_commit_action(
-            instance_id,
-            decision_point_id,
-            action_id,
-        )
-        return await self._execute_selected_action(
-            request,
-            source_branch_id=ROOT_BRANCH_ID,
-            timeout_s=timeout_s,
-        )
+        async with self._operation_lock:
+            request = self._build_commit_action(
+                instance_id,
+                decision_point_id,
+                action_id,
+            )
+            return await self._execute_selected_action(
+                request,
+                source_branch_id=ROOT_BRANCH_ID,
+                timeout_s=timeout_s,
+            )
 
     async def emulate_action(
         self,
@@ -89,20 +101,21 @@ class AsyncTrainingApiClient(ApiContract):
         timeout_s: float,
         simulation_options: Mapping[str, Any] | None = None,
     ) -> JsonObject:
-        request = self._build_emulate_action(
-            instance_id,
-            parent_branch_id,
-            branch_id,
-            rng_id,
-            decision_point_id,
-            action_id,
-            simulation_options,
-        )
-        return await self._execute_selected_action(
-            request,
-            source_branch_id=parent_branch_id,
-            timeout_s=timeout_s,
-        )
+        async with self._operation_lock:
+            request = self._build_emulate_action(
+                instance_id,
+                parent_branch_id,
+                branch_id,
+                rng_id,
+                decision_point_id,
+                action_id,
+                simulation_options,
+            )
+            return await self._execute_selected_action(
+                request,
+                source_branch_id=parent_branch_id,
+                timeout_s=timeout_s,
+            )
 
     async def cancel_branches(
         self,
@@ -111,9 +124,10 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        return await self._branch_batch_operation(
-            "cancel_branches", instance_id, branch_ids, timeout_s=timeout_s
-        )
+        async with self._operation_lock:
+            return await self._branch_batch_operation(
+                "cancel_branches", instance_id, branch_ids, timeout_s=timeout_s
+            )
 
     async def release_branches(
         self,
@@ -122,9 +136,10 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        return await self._branch_batch_operation(
-            "release_branches", instance_id, branch_ids, timeout_s=timeout_s
-        )
+        async with self._operation_lock:
+            return await self._branch_batch_operation(
+                "release_branches", instance_id, branch_ids, timeout_s=timeout_s
+            )
 
     async def get_branch_status(
         self,
@@ -133,9 +148,10 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        return await self._branch_batch_operation(
-            "get_branch_status", instance_id, branch_ids, timeout_s=timeout_s
-        )
+        async with self._operation_lock:
+            return await self._branch_batch_operation(
+                "get_branch_status", instance_id, branch_ids, timeout_s=timeout_s
+            )
 
     async def close_instance(
         self,
@@ -143,12 +159,14 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> JsonObject:
-        request = self._build_close_instance(instance_id)
-        response = await self._execute(request, timeout_s=timeout_s)
-        return self._accept_close_instance(response)
+        async with self._operation_lock:
+            request = self._build_close_instance(instance_id)
+            response = await self._execute(request, timeout_s=timeout_s)
+            return self._accept_close_instance(response)
 
     async def close(self) -> None:
-        await self._connection.close()
+        async with self._operation_lock:
+            await self._connection.close()
 
     async def __aenter__(self) -> "AsyncTrainingApiClient":
         await self._connection.connect()
