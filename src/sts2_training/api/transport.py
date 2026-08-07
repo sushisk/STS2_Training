@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 JsonObject = dict[str, Any]
 
@@ -84,16 +84,3 @@ class TransportClosedError(TransportError):
 
 class RuntimeExitedError(TransportError):
     pass
-
-
-class RlTransport(Protocol):
-    def call(
-        self,
-        request: Mapping[str, Any],
-        *,
-        timeout_s: float,
-    ) -> JsonObject: ...
-
-    def is_alive(self) -> bool: ...
-
-    def close(self) -> None: ...
