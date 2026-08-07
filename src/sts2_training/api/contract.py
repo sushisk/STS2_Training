@@ -278,7 +278,9 @@ class ApiContract:
 
     def _validate_instance_id(self, instance_id: str) -> None:
         self._validate_non_empty_str(instance_id, "instance_id")
-        if self._instance_id is not None and instance_id != self._instance_id:
+        if self._instance_id is None:
+            raise RuntimeError("client has no active instance")
+        if instance_id != self._instance_id:
             raise ValueError("instance_id does not match the active client instance")
 
     def _validate_decision_payload(self, response: Mapping[str, Any]) -> None:
