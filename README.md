@@ -65,6 +65,11 @@ TCP上ではDTO自体をUTF-8 newline-delimited JSONの1フレームとして送
 `schema_version` / `request_id` / `operation` / `instance_id` の相関規則はAPI v0.5の
 DTO契約と同一です。
 
+`TcpConnection(max_message_bytes=...)` の上限は**送信request frameだけ**に適用されます。
+API responseには同じ上限を適用せず、newlineまで1フレームを読み切ります。これは
+`commit_action` / `emulate_action`のようなnon-idempotent operationが成功した後に、大きいresponseを
+transport層で捨ててsame-ID retryでも永久に結果を回収できなくなる事態を避けるためです。
+
 ### Timeout / cancellation / retry semantics
 
 TCP timeoutは「RLが未実行」という意味ではなく、「Trainingが結果を観測できなかった」という
@@ -83,7 +88,8 @@ ambiguous completionです。送信開始後にtimeoutまたはtask cancellation
 `close_instance`ではローカルstateはactiveのままです。これはRL stateが確定したことを意味しないため、
 同一requestのretry/replayで結果をreconcileしてから次の論理操作へ進みます。
 
-transport-only response（例: `{"transport_error":"message_too_large", ...}`）はAPI DTOではなく
+transport-only response（例: oversized requestに対する
+`{"transport_error":"message_too_large","direction":"request", ...}`）はAPI DTOではなく
 `TransportError`として扱われ、API envelope validationには渡しません。
 
 ## Unit tests
@@ -103,8 +109,9 @@ PYTHONPATH=src:../STS2_RL python -m pytest tests/api/test_rl_cross_repo_contract
 ```
 
 このtestは、client再生成後の`start_instance` request_id collision、fresh connection上のsame-ID replay、
-responseを観測できなかった`close_instance`のretry、RL側response frame limitから返る`transport_error`の
-Training側分類を確認します。
+responseを観測できなかった`close_instance`のretry、およびrequest frame limitを超えるサイズの成功responseを
+返すnon-idempotent `commit_action`が実responseを受信・same-ID replayでき、処理自体は1回しか実行されないことを
+確認します。
 
 ## Selection audit logging
 
