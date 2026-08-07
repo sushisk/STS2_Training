@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sts2_training.selection_log import SelectionAudit, SelectionEventLogger
 
 JsonObject = dict[str, Any]
-
-SCHEMA_VERSION = "0.5"
+SCHEMA_VERSION = "0.6"
 ROOT_BRANCH_ID = "root"
 ROOT_RNG_ID = 0
-
 KNOWN_STATUSES = frozenset(
     {
         "completed",
@@ -27,58 +25,61 @@ KNOWN_STATUSES = frozenset(
 
 
 class ApiProtocolError(RuntimeError):
-    """The RL response violated the API contract or correlation rules."""
+    pass
 
 
 class ApiOperationError(RuntimeError):
     def __init__(self, response: Mapping[str, Any]) -> None:
         self.response = dict(response)
-        status = response.get("status")
-        operation = response.get("operation")
-        error = response.get("error")
-        super().__init__(f"{operation} returned {status}: {error}")
+        super().__init__(
+            f"{response.get('operation')} returned {response.get('status')}: {response.get('error')}"
+        )
 
 
 class RequestRejectedError(ApiOperationError):
-    """RL rejected the request before applying the requested operation."""
+    pass
 
 
 class RequestFaultedError(ApiOperationError):
-    """RL accepted the operation but execution faulted."""
+    pass
 
 
 class ApiContract:
-    """Transport-independent API v0.5 DTO construction and validation.
-
-    This class owns only API-level state and rules: request identifiers, active
-    instance tracking, request construction, response correlation, and selection
-    audit state. It deliberately has no socket/process/transport dependency.
-    """
+    """DTO v0.6 construction, correlation, active-instance state, and selection audit."""
 
     def __init__(
         self,
-        request_id_factory: Callable[[], str] | None = None,
         *,
+        client_session_id: str | None = None,
         selection_logger: SelectionEventLogger | None = None,
     ) -> None:
-        self._request_id_factory = request_id_factory or (
-            lambda: f"req-{uuid.uuid4()}"
-        )
+        self._client_session_id = client_session_id or str(uuid.uuid4())
+        self._validate_non_empty_str(self._client_session_id, "client_session_id")
         self._audit = SelectionAudit(selection_logger)
         self._instance_id: str | None = None
+
+    @property
+    def client_session_id(self) -> str:
+        return self._client_session_id
 
     @property
     def instance_id(self) -> str | None:
         return self._instance_id
 
-    def _build_start_instance(
-        self,
-        instance_config: Mapping[str, Any],
-    ) -> JsonObject:
-        return self._new_request(
-            "start_instance",
-            instance_config=dict(instance_config),
-        )
+    def _new_request(self, request_seq: int, operation: str, **fields: Any) -> JsonObject:
+        if not isinstance(request_seq, int) or isinstance(request_seq, bool) or request_seq <= 0:
+            raise ValueError("request_seq must be a positive integer")
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "client_session_id": self._client_session_id,
+            "request_seq": request_seq,
+            "request_id": f"{self._client_session_id}:{request_seq}",
+            "operation": operation,
+            **fields,
+        }
+
+    def _build_start_instance(self, request_seq: int, instance_config: Mapping[str, Any]) -> JsonObject:
+        return self._new_request(request_seq, "start_instance", instance_config=dict(instance_config))
 
     def _accept_start_instance(self, response: Mapping[str, Any]) -> str:
         self._require_status(response, {"completed"})
@@ -88,24 +89,14 @@ class ApiContract:
         self._audit.remember(response)
         return instance_id
 
-    def _build_get_decision(
-        self,
-        instance_id: str,
-        branch_id: str = ROOT_BRANCH_ID,
-    ) -> JsonObject:
+    def _build_get_decision(self, request_seq: int, instance_id: str, branch_id: str) -> JsonObject:
         self._validate_instance_id(instance_id)
         self._validate_non_empty_str(branch_id, "branch_id")
         return self._new_request(
-            "get_decision",
-            instance_id=instance_id,
-            branch_id=branch_id,
+            request_seq, "get_decision", instance_id=instance_id, branch_id=branch_id
         )
 
-    def _accept_get_decision(
-        self,
-        response: JsonObject,
-        branch_id: str,
-    ) -> JsonObject:
+    def _accept_get_decision(self, response: JsonObject, branch_id: str) -> JsonObject:
         if response["status"] == "completed":
             self._require_response_match(response, "branch_id", branch_id)
             self._validate_decision_payload(response)
@@ -114,6 +105,7 @@ class ApiContract:
 
     def _build_commit_action(
         self,
+        request_seq: int,
         instance_id: str,
         decision_point_id: str,
         action_id: str,
@@ -122,6 +114,7 @@ class ApiContract:
         self._validate_non_empty_str(decision_point_id, "decision_point_id")
         self._validate_non_empty_str(action_id, "action_id")
         return self._new_request(
+            request_seq,
             "commit_action",
             instance_id=instance_id,
             branch_id=ROOT_BRANCH_ID,
@@ -132,6 +125,7 @@ class ApiContract:
 
     def _build_emulate_action(
         self,
+        request_seq: int,
         instance_id: str,
         parent_branch_id: str,
         branch_id: str,
@@ -141,15 +135,17 @@ class ApiContract:
         simulation_options: Mapping[str, Any] | None,
     ) -> JsonObject:
         self._validate_instance_id(instance_id)
-        self._validate_non_empty_str(parent_branch_id, "parent_branch_id")
-        self._validate_non_empty_str(branch_id, "branch_id")
-        self._validate_non_empty_str(decision_point_id, "decision_point_id")
-        self._validate_non_empty_str(action_id, "action_id")
+        for value, name in (
+            (parent_branch_id, "parent_branch_id"),
+            (branch_id, "branch_id"),
+            (decision_point_id, "decision_point_id"),
+            (action_id, "action_id"),
+        ):
+            self._validate_non_empty_str(value, name)
         if branch_id == ROOT_BRANCH_ID:
             raise ValueError("emulate_action branch_id must not be 'root'")
         if not isinstance(rng_id, int) or isinstance(rng_id, bool) or rng_id <= 0:
             raise ValueError("emulate_action rng_id must be a positive integer")
-
         fields: JsonObject = {
             "instance_id": instance_id,
             "parent_branch_id": parent_branch_id,
@@ -159,27 +155,25 @@ class ApiContract:
             "action_id": action_id,
         }
         if simulation_options is not None:
-            self._validate_simulation_options(simulation_options)
             fields["simulation_options"] = dict(simulation_options)
-        return self._new_request("emulate_action", **fields)
+        return self._new_request(request_seq, "emulate_action", **fields)
 
     def _build_branch_batch_operation(
         self,
+        request_seq: int,
         operation: str,
         instance_id: str,
         branch_ids: Sequence[str],
     ) -> JsonObject:
         self._validate_instance_id(instance_id)
-        normalized_ids = self._normalize_branch_ids(branch_ids)
+        normalized = self._normalize_branch_ids(branch_ids)
         return self._new_request(
-            operation,
-            instance_id=instance_id,
-            branch_ids=normalized_ids,
+            request_seq, operation, instance_id=instance_id, branch_ids=normalized
         )
 
-    def _build_close_instance(self, instance_id: str) -> JsonObject:
+    def _build_close_instance(self, request_seq: int, instance_id: str) -> JsonObject:
         self._validate_instance_id(instance_id)
-        return self._new_request("close_instance", instance_id=instance_id)
+        return self._new_request(request_seq, "close_instance", instance_id=instance_id)
 
     def _accept_close_instance(self, response: JsonObject) -> JsonObject:
         self._require_status(response, {"completed"})
@@ -187,24 +181,30 @@ class ApiContract:
         self._audit.clear()
         return response
 
-    def _validate_api_response(
-        self,
-        request: Mapping[str, Any],
-        response: Any,
-    ) -> JsonObject:
+    def _validate_api_response(self, request: Mapping[str, Any], response: Any) -> JsonObject:
         if not isinstance(response, dict):
             raise ApiProtocolError("response must be a dictionary")
-        self._validate_envelope(request, response)
-        if response["status"] == "rejected":
+        if response.get("schema_version") != SCHEMA_VERSION:
+            raise ApiProtocolError("schema_version does not match")
+        for field in ("client_session_id", "request_seq", "request_id", "operation"):
+            if response.get(field) != request.get(field):
+                raise ApiProtocolError(f"response {field} does not match request")
+        self._require_non_empty_str(response, "server_epoch")
+        status = self._require_non_empty_str(response, "status")
+        if status not in KNOWN_STATUSES:
+            raise ApiProtocolError(f"unknown status: {status}")
+        if request.get("instance_id") is not None:
+            self._require_response_match(response, "instance_id", request["instance_id"])
+        if status in {"rejected", "faulted"}:
+            self._require_non_empty_str(response, "error")
+        if status == "rejected":
             raise RequestRejectedError(response)
-        if response["status"] == "faulted":
+        if status == "faulted":
             raise RequestFaultedError(response)
-        return response
+        return dict(response)
 
     def _validate_selected_action_response(
-        self,
-        request: Mapping[str, Any],
-        response: Mapping[str, Any],
+        self, request: Mapping[str, Any], response: Mapping[str, Any]
     ) -> None:
         status = response["status"]
         if request["operation"] == "commit_action":
@@ -212,13 +212,10 @@ class ApiContract:
                 self._require_response_match(response, "branch_id", ROOT_BRANCH_ID)
                 self._validate_decision_payload(response)
             return
-
         if status in {"completed", "partial", "queued", "running"}:
             self._require_response_match(response, "branch_id", request["branch_id"])
             if "parent_branch_id" in response:
-                self._require_response_match(
-                    response, "parent_branch_id", request["parent_branch_id"]
-                )
+                self._require_response_match(response, "parent_branch_id", request["parent_branch_id"])
             if "rng_id" in response:
                 self._require_response_match(response, "rng_id", request["rng_id"])
         if status in {"completed", "partial"}:
@@ -233,48 +230,8 @@ class ApiContract:
         error: BaseException | None = None,
     ) -> None:
         self._audit.record_action(
-            request,
-            source_branch_id=source_branch_id,
-            result=result,
-            error=error,
+            request, source_branch_id=source_branch_id, result=result, error=error
         )
-
-    def _new_request(self, operation: str, **fields: Any) -> JsonObject:
-        request_id = self._request_id_factory()
-        self._validate_non_empty_str(request_id, "request_id")
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "request_id": request_id,
-            "operation": operation,
-            **fields,
-        }
-
-    def _validate_envelope(
-        self,
-        request: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> None:
-        if response.get("schema_version") != SCHEMA_VERSION:
-            raise ApiProtocolError("schema_version does not match")
-        if response.get("request_id") != request.get("request_id"):
-            raise ApiProtocolError("request_id does not match")
-        if response.get("operation") != request.get("operation"):
-            raise ApiProtocolError("operation does not match")
-
-        status = self._require_non_empty_str(response, "status")
-        if status not in KNOWN_STATUSES:
-            raise ApiProtocolError(f"unknown status: {status}")
-
-        request_instance_id = request.get("instance_id")
-        if request_instance_id is not None:
-            self._require_response_match(
-                response, "instance_id", request_instance_id
-            )
-
-        if status in {"rejected", "faulted"}:
-            self._require_non_empty_str(response, "error")
-        if status == "faulted":
-            self._require_non_empty_str(response, "fault_kind")
 
     def _validate_instance_id(self, instance_id: str) -> None:
         self._validate_non_empty_str(instance_id, "instance_id")
@@ -285,28 +242,8 @@ class ApiContract:
 
     def _validate_decision_payload(self, response: Mapping[str, Any]) -> None:
         self._require_non_empty_str(response, "decision_point_id")
-        masked_emulator_dto = response.get("masked_emulator_dto")
-        if not isinstance(masked_emulator_dto, dict):
+        if not isinstance(response.get("masked_emulator_dto"), dict):
             raise ApiProtocolError("masked_emulator_dto must be a dictionary")
-
-    def _validate_simulation_options(
-        self,
-        options: Mapping[str, Any],
-    ) -> None:
-        positive_integer_fields = {
-            "max_depth",
-            "max_steps",
-            "max_time_ms",
-            "max_hypotheses",
-        }
-        for field in positive_integer_fields:
-            if field not in options:
-                continue
-            value = options[field]
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{field} must be a positive integer")
-        if "stop_condition" in options:
-            self._validate_non_empty_str(options["stop_condition"], "stop_condition")
 
     def _normalize_branch_ids(self, branch_ids: Sequence[str]) -> list[str]:
         if isinstance(branch_ids, (str, bytes)):
@@ -328,33 +265,20 @@ class ApiContract:
             raise ValueError(f"{field_name} must be a non-empty string")
 
     @staticmethod
-    def _require_non_empty_str(
-        source: Mapping[str, Any],
-        field_name: str,
-    ) -> str:
+    def _require_non_empty_str(source: Mapping[str, Any], field_name: str) -> str:
         value = source.get(field_name)
         if not isinstance(value, str) or not value:
             raise ApiProtocolError(f"invalid or missing {field_name}")
         return value
 
     @staticmethod
-    def _require_response_match(
-        response: Mapping[str, Any],
-        field_name: str,
-        expected: Any,
-    ) -> None:
+    def _require_response_match(response: Mapping[str, Any], field_name: str, expected: Any) -> None:
         if response.get(field_name) != expected:
-            raise ApiProtocolError(
-                f"response {field_name} does not match request"
-            )
+            raise ApiProtocolError(f"response {field_name} does not match request")
 
     @staticmethod
-    def _require_status(
-        response: Mapping[str, Any],
-        accepted: set[str],
-    ) -> None:
+    def _require_status(response: Mapping[str, Any], accepted: set[str]) -> None:
         if response.get("status") not in accepted:
             raise ApiProtocolError(
-                f"unexpected status: {response.get('status')!r}; "
-                f"expected one of {sorted(accepted)!r}"
+                f"unexpected status: {response.get('status')!r}; expected {sorted(accepted)!r}"
             )
