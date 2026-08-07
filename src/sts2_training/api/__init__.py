@@ -11,6 +11,7 @@ from sts2_training.api.local_process_transport import LocalProcessTransport
 from sts2_training.api.tcp_connection import TcpConnection
 from sts2_training.api.transport import (
     JsonObject,
+    RetryRequest,
     RlTransport,
     RuntimeExitedError,
     TransportClosedError,
@@ -26,6 +27,7 @@ __all__ = [
     "LocalProcessTransport",
     "RequestFaultedError",
     "RequestRejectedError",
+    "RetryRequest",
     "RlTransport",
     "RuntimeExitedError",
     "TcpConnection",
