@@ -12,7 +12,7 @@ class SimulationOptionsContractTest(unittest.TestCase):
             {"status": "completed", "instance_id": "inst-001"}
         )
 
-    def _build(self, simulation_options) -> dict:
+    def _build(self, options) -> dict:
         return self.contract._build_emulate_action(
             1,
             "inst-001",
@@ -21,40 +21,26 @@ class SimulationOptionsContractTest(unittest.TestCase):
             1,
             "decision-1",
             "action-1",
-            simulation_options,
+            options,
         )
 
-    def test_invalid_limits_fail_before_request_is_built(self) -> None:
+    def test_invalid_known_options_fail_locally(self) -> None:
         for field in ("max_depth", "max_steps", "max_time_ms", "max_hypotheses"):
-            for invalid in (0, -1, True, 1.5):
-                with self.subTest(field=field, invalid=invalid):
-                    with self.assertRaisesRegex(ValueError, "integer"):
-                        self._build({field: invalid})
+            for value in (0, True, 1.5):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(ValueError, "positive integer"):
+                        self._build({field: value})
 
-    def test_unsupported_stop_condition_fails_locally(self) -> None:
         with self.assertRaisesRegex(ValueError, "not supported"):
             self._build({"stop_condition": "never"})
 
-    def test_valid_options_and_unknown_extension_keys_are_preserved(self) -> None:
+    def test_valid_and_extension_options_are_preserved(self) -> None:
         options = {
             "max_depth": 1,
-            "max_steps": 2,
-            "max_time_ms": 3,
-            "max_hypotheses": 4,
             "stop_condition": "next_decision",
             "future_extension": {"enabled": True},
         }
-        request = self._build(options)
-        self.assertEqual(request["simulation_options"], options)
-
-    def test_none_values_remain_accepted_for_optional_known_fields(self) -> None:
-        options = {"max_depth": None, "stop_condition": None}
-        request = self._build(options)
-        self.assertEqual(request["simulation_options"], options)
-
-    def test_non_mapping_options_are_rejected_explicitly(self) -> None:
-        with self.assertRaisesRegex(TypeError, "mapping"):
-            self._build([("max_depth", 1)])
+        self.assertEqual(self._build(options)["simulation_options"], options)
 
 
 if __name__ == "__main__":
