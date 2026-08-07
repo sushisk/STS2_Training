@@ -161,15 +161,42 @@ class TcpConnection:
 
     async def ping(self, *, timeout_s: float = 5.0) -> JsonObject:
         deadline = self._resolve_deadline(timeout_s=timeout_s, deadline=None)
-        async with asyncio.timeout_at(deadline):
-            async with self._lock:
-                await self._connect(deadline=deadline)
-                assert self._reader is not None
-                assert self._writer is not None
-                self._writer.write(b'{"transport_operation":"ping"}\n')
-                await self._writer.drain()
-                line = await self._read_response_frame(self._reader)
-        response = json.loads(line)
+        sent = False
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._lock:
+                    await self._connect(deadline=deadline)
+                    assert self._reader is not None
+                    assert self._writer is not None
+                    sent = True
+                    self._writer.write(b'{"transport_operation":"ping"}\n')
+                    await self._writer.drain()
+                    line = await self._read_response_frame(self._reader)
+        except ServerEpochChangedError:
+            await self._disconnect()
+            raise
+        except asyncio.CancelledError:
+            if sent:
+                await self._disconnect()
+            raise
+        except TimeoutError as exc:
+            if sent:
+                await self._disconnect()
+            raise TransportError("RL TCP ping timed out") from exc
+        except TransportError:
+            if sent:
+                await self._disconnect()
+            raise
+        except (ConnectionError, OSError) as exc:
+            if sent:
+                await self._disconnect()
+            raise RuntimeExitedError("RL TCP connection closed during ping") from exc
+
+        try:
+            response: Any = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            await self.invalidate()
+            raise TransportError("RL TCP server returned invalid ping JSON") from exc
         if not isinstance(response, dict) or response.get("transport_operation") != "pong":
             await self.invalidate()
             raise TransportError("RL TCP server returned an invalid ping response")
@@ -177,7 +204,11 @@ class TcpConnection:
         if not isinstance(epoch, str) or not epoch:
             await self.invalidate()
             raise TransportError("RL ping response is missing server_epoch")
-        self._assert_epoch(epoch)
+        try:
+            self._assert_epoch(epoch)
+        except ServerEpochChangedError:
+            await self.invalidate()
+            raise
         return response
 
     def is_alive(self) -> bool:
