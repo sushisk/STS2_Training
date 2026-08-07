@@ -22,6 +22,12 @@ KNOWN_STATUSES = frozenset(
         "released",
     }
 )
+_BRANCH_BATCH_OPERATIONS = frozenset(
+    {"cancel_branches", "release_branches", "get_branch_status"}
+)
+_BRANCH_STATUS_VALUES = frozenset(
+    {"queued", "running", "completed", "cancelled", "faulted", "released"}
+)
 
 
 class ApiProtocolError(RuntimeError):
@@ -201,7 +207,39 @@ class ApiContract:
             raise RequestRejectedError(response)
         if status == "faulted":
             raise RequestFaultedError(response)
+        if request.get("operation") in _BRANCH_BATCH_OPERATIONS:
+            self._validate_branch_batch_response(request, response)
         return dict(response)
+
+    def _validate_branch_batch_response(
+        self,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> None:
+        self._require_status(response, {"completed"})
+        branch_statuses = response.get("branch_statuses")
+        if not isinstance(branch_statuses, dict):
+            raise ApiProtocolError("branch_statuses must be a dictionary")
+
+        branch_ids = request.get("branch_ids")
+        if not isinstance(branch_ids, list):
+            raise ApiProtocolError("branch batch request is missing branch_ids")
+        if set(branch_statuses) != set(branch_ids):
+            raise ApiProtocolError("response branch_statuses keys do not match request")
+
+        operation = request.get("operation")
+        if operation == "cancel_branches":
+            allowed_statuses = frozenset({"cancelled"})
+        elif operation == "release_branches":
+            allowed_statuses = frozenset({"released"})
+        else:
+            allowed_statuses = _BRANCH_STATUS_VALUES
+
+        for branch_id, branch_status in branch_statuses.items():
+            if not isinstance(branch_status, str) or branch_status not in allowed_statuses:
+                raise ApiProtocolError(
+                    f"invalid branch status for {branch_id!r}: {branch_status!r}"
+                )
 
     def _validate_selected_action_response(
         self, request: Mapping[str, Any], response: Mapping[str, Any]
