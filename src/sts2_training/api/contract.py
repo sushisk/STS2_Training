@@ -28,9 +28,10 @@ _BRANCH_BATCH_OPERATIONS = frozenset(
 _BRANCH_STATUS_VALUES = frozenset(
     {"queued", "running", "completed", "cancelled", "faulted", "released"}
 )
-_EMULATE_ACTIONS_BRANCH_STATUSES = frozenset(
-    {"completed", "partial", "queued", "running", "faulted"}
-)
+# emulate_actions is synchronous at the coordinator boundary: BranchManager.poll()
+# returns only after every Branch dispatched for the batch is terminal. queued/running
+# are therefore invalid per-item response states for this operation.
+_EMULATE_ACTIONS_BRANCH_STATUSES = frozenset({"completed", "partial", "faulted"})
 
 
 class ApiProtocolError(RuntimeError):
@@ -54,7 +55,7 @@ class RequestFaultedError(ApiOperationError):
 
 
 class ApiContract:
-    """DTO v0.6 construction, correlation, active-instance state, and selection audit."""
+    """DTO v0.7 construction, correlation, active-instance state, and selection audit."""
 
     def __init__(
         self,
@@ -175,10 +176,13 @@ class ApiContract:
         items: Sequence[Mapping[str, Any]],
         simulation_options: Mapping[str, Any] | None,
     ) -> JsonObject:
-        """Build DTO v0.7's ``emulate_actions`` batch request: many parent/action pairs
-        admitted and executed as one Branch batch (e.g. one Beam Search frontier) in a
-        single request/response round trip, over the SAME single in-flight
-        request/retry machinery used for every other operation."""
+        """Build DTO v0.7's ``emulate_actions`` batch request.
+
+        The wire contract requires every ``parent_branch_id`` to refer to a Branch that
+        already exists when this batch request starts. Training cannot prove RL-side
+        existence locally, but it deliberately does not express same-batch parent/child
+        dependencies; Beam Search should send one frontier depth per batch.
+        """
         self._validate_instance_id(instance_id)
         if isinstance(items, (str, bytes)):
             raise TypeError("items must be a sequence of item mappings")
@@ -239,8 +243,8 @@ class ApiContract:
         items = request.get("items")
         if not isinstance(items, list):
             raise ApiProtocolError("emulate_actions request is missing items")
-        expected_branch_ids = {item["branch_id"] for item in items}
-        if set(branch_results) != expected_branch_ids:
+        expected_items = {item["branch_id"]: item for item in items}
+        if set(branch_results) != set(expected_items):
             raise ApiProtocolError("response branch_results keys do not match request items")
 
         for branch_id, branch_result in branch_results.items():
@@ -249,8 +253,15 @@ class ApiContract:
             status = branch_result.get("status")
             if status not in _EMULATE_ACTIONS_BRANCH_STATUSES:
                 raise ApiProtocolError(f"invalid branch status for {branch_id!r}: {status!r}")
+
+            expected = expected_items[branch_id]
+            self._require_response_match(branch_result, "branch_id", branch_id)
+            self._require_response_match(
+                branch_result, "parent_branch_id", expected["parent_branch_id"]
+            )
+            self._require_response_match(branch_result, "rng_id", expected["rng_id"])
+
             if status in {"completed", "partial"}:
-                self._require_response_match(branch_result, "branch_id", branch_id)
                 self._validate_decision_payload(branch_result)
             elif status == "faulted":
                 self._require_non_empty_str(branch_result, "error")
