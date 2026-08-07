@@ -149,6 +149,47 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_concurrent_start_instance_creates_only_one_instance(self) -> None:
+        results = await asyncio.gather(
+            self.client.start_instance(
+                {"instance_type": "combat-a"},
+                timeout_s=1.0,
+            ),
+            self.client.start_instance(
+                {"instance_type": "combat-b"},
+                timeout_s=1.0,
+            ),
+            return_exceptions=True,
+        )
+
+        self.assertEqual(sum(result == "inst-001" for result in results), 1)
+        errors = [result for result in results if isinstance(result, RuntimeError)]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("already has an active instance", str(errors[0]))
+        start_requests = [
+            request for request in self.requests if request["operation"] == "start_instance"
+        ]
+        self.assertEqual(len(start_requests), 1)
+        self.assertEqual(self.client.instance_id, "inst-001")
+
+    async def test_close_instance_allows_a_later_start(self) -> None:
+        instance_id = await self.client.start_instance(
+            {"instance_type": "combat"},
+            timeout_s=1.0,
+        )
+        await self.client.close_instance(instance_id, timeout_s=1.0)
+
+        restarted = await self.client.start_instance(
+            {"instance_type": "combat"},
+            timeout_s=1.0,
+        )
+
+        self.assertEqual(restarted, "inst-001")
+        self.assertEqual(
+            [request["operation"] for request in self.requests],
+            ["start_instance", "close_instance", "start_instance"],
+        )
+
     async def test_decision_and_commit_round_trip_over_tcp(self) -> None:
         instance_id = await self.client.start_instance(
             {"instance_type": "combat"},
