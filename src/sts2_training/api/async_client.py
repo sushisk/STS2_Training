@@ -15,8 +15,19 @@ from sts2_training.api.contract import (
     ROOT_BRANCH_ID,
 )
 from sts2_training.api.tcp_connection import TcpConnection
-from sts2_training.api.transport import TransportError
+from sts2_training.api.transport import RetryRequest, TransportError
 from sts2_training.selection_log import SelectionEventLogger
+
+_STATE_CHANGING_OPERATIONS = frozenset(
+    {
+        "start_instance",
+        "commit_action",
+        "emulate_action",
+        "cancel_branches",
+        "release_branches",
+        "close_instance",
+    }
+)
 
 
 class AsyncTrainingApiClient(ApiContract):
@@ -31,18 +42,17 @@ class AsyncTrainingApiClient(ApiContract):
     Parallel API execution is intentionally deferred until its lifecycle semantics are
     defined explicitly.
 
-    ``timeout_s`` is a total per-operation budget starting when the public API method is
-    called. Waiting for the client lock, waiting for the TCP connection lock, connecting,
-    writing, and reading the response all consume the same deadline.
+    ``timeout_s`` starts when the public method is called and is the shared deadline for
+    waiting on the client lock and the TCP exchange (connection lock, connect, write,
+    drain, and response read). Once a response frame has been received, synchronous API
+    validation and selection-audit bookkeeping are not treated as transport timeout
+    phases; ``timeout_s`` is therefore not a hard wall-clock cap on post-response work.
 
-    If ``start_instance`` loses a definitive result after the request may have reached
-    RL, the client enters a start-uncertain state. Later start attempts are rejected
-    instead of risking a second active instance. Failures known to occur before the
-    request could reach RL do not enter that state.
-
-    If ``close_instance`` loses a definitive result after send, the client enters a
-    close-uncertain state and blocks later API traffic until the caller explicitly
-    reconciles the local state with ``reconcile_close_uncertainty``.
+    If a state-changing request loses a definitive result after it may have reached RL,
+    the client stores the exact serialized request as ``pending_retry`` and fails closed:
+    unrelated API requests are blocked until that same request is replayed with
+    ``retry_request()`` or an operation-specific reconciliation method explicitly clears
+    the uncertainty.
     """
 
     def __init__(
@@ -60,6 +70,7 @@ class AsyncTrainingApiClient(ApiContract):
         self._operation_lock = asyncio.Lock()
         self._start_uncertain = False
         self._close_uncertain = False
+        self._pending_retry: RetryRequest | None = None
 
     @property
     def start_uncertain(self) -> bool:
@@ -70,6 +81,27 @@ class AsyncTrainingApiClient(ApiContract):
     def close_uncertain(self) -> bool:
         """Whether a previous close may have completed without a known response."""
         return self._close_uncertain
+
+    @property
+    def pending_retry(self) -> RetryRequest | None:
+        """Exact state-changing request that must be replayed before new API traffic."""
+        return self._pending_retry
+
+    def reconcile_start_uncertainty(self, *, instance_id: str | None) -> None:
+        """Resolve an ambiguous start using knowledge obtained outside this client.
+
+        Pass the externally confirmed active ``instance_id`` to adopt it locally, or
+        ``None`` only when external reconciliation establishes that no instance was
+        created. This method does not contact RL.
+        """
+        if not self._start_uncertain:
+            raise RuntimeError("there is no start_instance uncertainty to reconcile")
+        if instance_id is not None:
+            self._validate_non_empty_str(instance_id, "instance_id")
+        self._instance_id = instance_id
+        self._audit.clear()
+        self._start_uncertain = False
+        self._clear_pending_operation("start_instance")
 
     def reconcile_close_uncertainty(self, *, assume_closed: bool) -> None:
         """Resolve an ambiguous close using knowledge obtained outside this client.
@@ -88,6 +120,71 @@ class AsyncTrainingApiClient(ApiContract):
             self._instance_id = None
             self._audit.clear()
         self._close_uncertain = False
+        self._clear_pending_operation("close_instance")
+
+    async def retry_request(
+        self,
+        retry_request: RetryRequest,
+        *,
+        timeout_s: float,
+    ) -> JsonObject | str:
+        """Replay the current completion-uncertain request with the same request id.
+
+        Only the exact token exposed by ``pending_retry`` is accepted. This prevents a
+        caller from accidentally creating a fresh logical request while RL may already
+        have applied the original state change.
+        """
+        if not isinstance(retry_request, RetryRequest):
+            raise TypeError("retry_request must be a RetryRequest")
+        if self._pending_retry is None:
+            raise RuntimeError("there is no completion-uncertain request to retry")
+        if retry_request != self._pending_retry:
+            raise ValueError("retry_request does not match the pending request")
+
+        request = retry_request.to_message()
+        operation = request.get("operation")
+        async with self._operation_deadline(timeout_s) as deadline:
+            if operation == "start_instance":
+                try:
+                    response = await self._execute(request, deadline=deadline)
+                    return self._accept_start_instance(response)
+                except ApiProtocolError:
+                    self._remember_uncertain(request, retry_request)
+                    raise
+
+            if operation == "close_instance":
+                try:
+                    response = await self._execute(request, deadline=deadline)
+                    return self._accept_close_instance(response)
+                except ApiProtocolError:
+                    self._remember_uncertain(request, retry_request)
+                    raise
+
+            if operation == "commit_action":
+                return await self._execute_selected_action(
+                    request,
+                    source_branch_id=ROOT_BRANCH_ID,
+                    deadline=deadline,
+                )
+
+            if operation == "emulate_action":
+                source_branch_id = request.get("parent_branch_id")
+                if not isinstance(source_branch_id, str) or not source_branch_id:
+                    raise ApiProtocolError(
+                        "retry emulate_action request is missing parent_branch_id"
+                    )
+                return await self._execute_selected_action(
+                    request,
+                    source_branch_id=source_branch_id,
+                    deadline=deadline,
+                )
+
+            if operation in {"cancel_branches", "release_branches"}:
+                return await self._execute(request, deadline=deadline)
+
+            raise ValueError(
+                f"pending retry operation {operation!r} is not state-changing"
+            )
 
     async def start_instance(
         self,
@@ -100,26 +197,19 @@ class AsyncTrainingApiClient(ApiContract):
                 raise RuntimeError("client already has an active instance")
             if self._start_uncertain:
                 raise RuntimeError(
-                    "previous start_instance result is unknown; reconciliation required"
+                    "previous start_instance result is unknown; "
+                    "retry_request() or reconciliation required"
                 )
             request = self._build_start_instance(instance_config)
             try:
                 response = await self._execute(request, deadline=deadline)
                 return self._accept_start_instance(response)
-            except asyncio.CancelledError as exc:
-                if getattr(exc, "completion_uncertain", False):
-                    self._start_uncertain = True
-                raise
-            except TransportError as exc:
-                if exc.completion_uncertain:
-                    self._start_uncertain = True
-                raise
             except ApiProtocolError:
                 # This includes both envelope/correlation failures from _execute() and
                 # operation-specific validation failures from _accept_start_instance().
                 # In either case a correlated start may already have created an RL
                 # instance, so another start must not be sent blindly.
-                self._start_uncertain = True
+                self._remember_uncertain(request)
                 raise
 
     async def get_decision(
@@ -229,18 +319,11 @@ class AsyncTrainingApiClient(ApiContract):
             try:
                 response = await self._execute(request, deadline=deadline)
                 return self._accept_close_instance(response)
-            except asyncio.CancelledError as exc:
-                if getattr(exc, "completion_uncertain", False):
-                    self._close_uncertain = True
-                raise
-            except TransportError as exc:
-                if exc.completion_uncertain:
-                    self._close_uncertain = True
-                raise
             except ApiProtocolError:
                 # A correlated-but-invalid close response does not prove whether the
-                # instance was closed. Block later traffic until the caller reconciles.
-                self._close_uncertain = True
+                # instance was closed. Block later traffic until the caller reconciles
+                # or replays the exact same request.
+                self._remember_uncertain(request)
                 raise
 
     async def close(self) -> None:
@@ -292,23 +375,48 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         deadline: float,
     ) -> JsonObject:
-        if self._close_uncertain:
+        request_token = RetryRequest.from_message(request)
+        if self._pending_retry is not None and request_token != self._pending_retry:
             raise RuntimeError(
-                "previous close_instance result is unknown; "
-                "reconcile_close_uncertainty() required"
+                "a completion-uncertain state-changing request is pending; "
+                "retry_request() or explicit reconciliation is required"
             )
-        response = await self._connection.exchange(
-            request,
-            deadline=deadline,
-        )
+
         try:
-            return self._validate_api_response(request, response)
+            response = await self._connection.exchange(
+                request,
+                deadline=deadline,
+            )
+        except asyncio.CancelledError as exc:
+            if getattr(exc, "completion_uncertain", False):
+                token = getattr(exc, "retry_request", None)
+                self._remember_uncertain(
+                    request,
+                    token if isinstance(token, RetryRequest) else None,
+                )
+            raise
+        except TransportError as exc:
+            if exc.completion_uncertain:
+                self._remember_uncertain(request, exc.retry_request)
+            raise
+
+        try:
+            validated = self._validate_api_response(request, response)
+        except ApiOperationError:
+            # rejected/faulted is a definitive API response, so any transport
+            # uncertainty for this same request has been reconciled.
+            self._clear_pending_if_matches(request_token)
+            raise
         except ApiProtocolError:
             # A malformed/mismatched response means we can no longer trust that the
             # current stream is aligned with this request. Reconnect before any later
             # API call rather than allowing a stale frame to cascade into more calls.
             await self._connection.invalidate()
+            self._remember_uncertain(request, request_token)
             raise
+
+        self._clear_pending_if_matches(request_token)
+        return validated
 
     async def _execute_selected_action(
         self,
@@ -321,11 +429,31 @@ class AsyncTrainingApiClient(ApiContract):
         try:
             response = await self._execute(request, deadline=deadline)
             self._validate_selected_action_response(request, response)
+        except asyncio.CancelledError as exc:
+            # CancelledError is a BaseException in modern Python and would bypass the
+            # generic Exception branch. Record the selection explicitly because RL may
+            # already have applied the action when cancellation reaches the client.
+            self._record_selected_action(
+                request,
+                source_branch_id=source_branch_id,
+                result=response,
+                error=exc,
+            )
+            raise
         except ApiOperationError as exc:
             self._record_selected_action(
                 request,
                 source_branch_id=source_branch_id,
                 result=exc.response,
+            )
+            raise
+        except ApiProtocolError as exc:
+            self._remember_uncertain(request)
+            self._record_selected_action(
+                request,
+                source_branch_id=source_branch_id,
+                result=response,
+                error=exc,
             )
             raise
         except Exception as exc:
@@ -343,3 +471,37 @@ class AsyncTrainingApiClient(ApiContract):
             result=response,
         )
         return response
+
+    def _remember_uncertain(
+        self,
+        request: Mapping[str, Any],
+        retry_request: RetryRequest | None = None,
+    ) -> None:
+        operation = request.get("operation")
+        if operation not in _STATE_CHANGING_OPERATIONS:
+            return
+
+        token = retry_request or RetryRequest.from_message(request)
+        if self._pending_retry is not None and self._pending_retry != token:
+            # Public calls are serialized and new requests are blocked while a token is
+            # pending, so this should be unreachable. Preserve the older uncertainty
+            # rather than overwriting the only safe replay handle.
+            return
+        self._pending_retry = token
+        if operation == "start_instance":
+            self._start_uncertain = True
+        elif operation == "close_instance":
+            self._close_uncertain = True
+
+    def _clear_pending_if_matches(self, retry_request: RetryRequest) -> None:
+        if self._pending_retry == retry_request:
+            operation = retry_request.operation
+            self._pending_retry = None
+            if operation == "start_instance":
+                self._start_uncertain = False
+            elif operation == "close_instance":
+                self._close_uncertain = False
+
+    def _clear_pending_operation(self, operation: str) -> None:
+        if self._pending_retry is not None and self._pending_retry.operation == operation:
+            self._pending_retry = None
