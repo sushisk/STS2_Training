@@ -9,6 +9,7 @@ from typing import Any
 
 from sts2_training.api.transport import (
     JsonObject,
+    RetryRequest,
     RuntimeExitedError,
     TransportClosedError,
     TransportError,
@@ -39,8 +40,9 @@ class TcpConnection:
     phase; it never extends the exchange deadline.
 
     Once a request may have reached RL, timeout, cancellation, response-size overflow,
-    or stream/protocol failures mark the result as completion-uncertain and invalidate
-    the connection.
+    or stream/protocol failures mark the result as completion-uncertain, attach an
+    immutable ``RetryRequest`` containing the exact JSON payload, and invalidate the
+    connection.
     """
 
     def __init__(
@@ -85,11 +87,8 @@ class TcpConnection:
         deadline: float | None = None,
     ) -> JsonObject:
         deadline = self._resolve_deadline(timeout_s=timeout_s, deadline=deadline)
-        encoded = json.dumps(
-            dict(message),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8") + b"\n"
+        retry_request = RetryRequest.from_message(message)
+        encoded = retry_request.serialized_payload.encode("utf-8") + b"\n"
         if len(encoded) > self._max_message_bytes:
             raise TransportError(
                 f"request exceeds max_message_bytes={self._max_message_bytes}"
@@ -113,6 +112,7 @@ class TcpConnection:
             if sent:
                 await self._disconnect()
             setattr(exc, "completion_uncertain", sent)
+            setattr(exc, "retry_request", retry_request if sent else None)
             raise
         except TimeoutError as exc:
             if sent:
@@ -120,16 +120,20 @@ class TcpConnection:
             raise TransportError(
                 "RL TCP request timed out",
                 completion_uncertain=sent,
+                retry_request=retry_request if sent else None,
             ) from exc
         except RuntimeExitedError as exc:
             if sent:
                 await self._disconnect()
             exc.completion_uncertain = sent or exc.completion_uncertain
+            if exc.completion_uncertain:
+                exc.retry_request = retry_request
             raise
         except TransportError as exc:
             if sent:
                 await self._disconnect()
                 exc.completion_uncertain = True
+                exc.retry_request = retry_request
             raise
         except (ConnectionError, OSError) as exc:
             if sent:
@@ -137,6 +141,7 @@ class TcpConnection:
             raise RuntimeExitedError(
                 "RL TCP connection closed during request",
                 completion_uncertain=sent,
+                retry_request=retry_request if sent else None,
             ) from exc
 
         try:
@@ -146,12 +151,14 @@ class TcpConnection:
             raise TransportError(
                 "RL TCP server returned invalid JSON",
                 completion_uncertain=True,
+                retry_request=retry_request,
             ) from exc
         if not isinstance(response, dict):
             await self._disconnect()
             raise TransportError(
                 "RL TCP response must be a JSON object",
                 completion_uncertain=True,
+                retry_request=retry_request,
             )
 
         transport_error = response.get("transport_error")
