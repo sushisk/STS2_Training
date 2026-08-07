@@ -16,74 +16,7 @@ pytestmark = pytest.mark.integration
 
 _HOST = "127.0.0.1"
 _LARGE_RESPONSE_LIMIT = 64 * 1024 * 1024
-
-# Run the real paired RL server, with one deliberately injected per-Branch public result
-# fault so this cross-repo test can exercise mixed terminal outcomes without depending on
-# an Emulator-specific accidental crash. All request admission, worker execution, session
-# replay, TCP framing, and the other Branch result still use the real RL implementation.
-_RL_SERVER_SCRIPT = r"""
-import asyncio
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve()
-host = sys.argv[2]
-port = int(sys.argv[3])
-for subdirectory in ("Combat", "Run"):
-    path = str(root / subdirectory)
-    if path not in sys.path:
-        sys.path.insert(0, path)
-root_text = str(root)
-if root_text not in sys.path:
-    sys.path.insert(0, root_text)
-
-from API.instance_combat import CombatInstance
-
-_original_finalize = CombatInstance._finalize_branch_result
-
-def _finalize_with_forced_fault(self, *, branch_id, parent_branch_id, rng_id, book, branch_log, result):
-    if branch_id == "forced-fault":
-        return {
-            "status": "faulted",
-            "branch_id": branch_id,
-            "parent_branch_id": parent_branch_id,
-            "rng_id": rng_id,
-            "error": "forced paired-integration fault",
-            "fault_kind": "integration_test",
-        }
-    return _original_finalize(
-        self,
-        branch_id=branch_id,
-        parent_branch_id=parent_branch_id,
-        rng_id=rng_id,
-        book=book,
-        branch_log=branch_log,
-        result=result,
-    )
-
-CombatInstance._finalize_branch_result = _finalize_with_forced_fault
-
-from API.server import RLApiServer
-from API.tcp_server import AsyncioTcpServer
-
-async def main():
-    dispatcher = RLApiServer()
-    server = AsyncioTcpServer(
-        dispatcher.handle_request,
-        server_epoch=dispatcher.server_epoch,
-        host=host,
-        port=port,
-    )
-    await server.start()
-    print("PAIRED_RL_READY", flush=True)
-    try:
-        await server.serve_forever()
-    finally:
-        await server.close()
-        dispatcher.close_all()
-
-asyncio.run(main())
-"""
+_SERVER_HELPER = Path(__file__).with_name("_paired_rl_server_v07.py")
 
 
 def _combat_config() -> dict:
@@ -129,7 +62,7 @@ def _start_paired_rl() -> tuple[subprocess.Popen[str], int]:
 
     port = _free_port()
     process = subprocess.Popen(
-        [sys.executable, "-c", _RL_SERVER_SCRIPT, str(root), _HOST, str(port)],
+        [sys.executable, str(_SERVER_HELPER), str(root), _HOST, str(port)],
         cwd=root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
