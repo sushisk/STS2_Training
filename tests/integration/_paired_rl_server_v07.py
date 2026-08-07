@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 _SERVER_MAX_MESSAGE_BYTES = 4096
+_PAIRED_MAX_EMULATE_ACTIONS_ITEMS = 16
 
 
 def _configure_rl_imports(root: Path) -> None:
@@ -61,7 +62,13 @@ async def _serve(root: Path, host: str, port: int) -> None:
     from API.server import RLApiServer
     from API.tcp_server import AsyncioTcpServer
 
-    dispatcher = RLApiServer()
+    # Use a non-default capacity so the paired test proves Training discovers the
+    # configured RL value instead of accidentally depending on Combat's default 64.
+    dispatcher = RLApiServer(
+        instance_factory_kwargs={
+            "combat": {"max_branches": _PAIRED_MAX_EMULATE_ACTIONS_ITEMS}
+        }
+    )
     server = AsyncioTcpServer(
         dispatcher.handle_request,
         server_epoch=dispatcher.server_epoch,
