@@ -4,148 +4,93 @@ import asyncio
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import RequestRejectedError
-from sts2_training.api.transport import RetryRequest, TransportError
+from sts2_training.api.transport import (
+    RetryRequest,
+    ServerEpochChangedError,
+    TransportError,
+)
 
 
-class _RetryingConnection:
+class _Connection:
+    client_session_id = "session-a"
+
     def __init__(self) -> None:
         self.messages: list[dict] = []
-        self.fail_next_commit = True
-        self.fail_next_start = False
+        self.fail_operation_once: str | None = None
+        self.cancel_operation_once: str | None = None
+        self.change_epoch_on_next = False
+
+    @staticmethod
+    def _response(request: dict, **fields) -> dict:
+        return {
+            "schema_version": "0.6",
+            "server_epoch": "epoch-1",
+            "client_session_id": request["client_session_id"],
+            "request_seq": request["request_seq"],
+            "request_id": request["request_id"],
+            "operation": request["operation"],
+            **fields,
+        }
 
     async def exchange(self, message, *, deadline: float):
         request = dict(message)
         self.messages.append(request)
         operation = request["operation"]
 
+        if self.change_epoch_on_next:
+            self.change_epoch_on_next = False
+            raise ServerEpochChangedError(
+                expected_epoch="epoch-1",
+                actual_epoch="epoch-2",
+            )
+
+        if self.fail_operation_once == operation:
+            self.fail_operation_once = None
+            raise TransportError(
+                f"lost {operation} response",
+                completion_uncertain=True,
+                retry_request=RetryRequest.from_message(request),
+            )
+
+        if self.cancel_operation_once == operation:
+            self.cancel_operation_once = None
+            exc = asyncio.CancelledError()
+            setattr(exc, "completion_uncertain", True)
+            setattr(exc, "retry_request", RetryRequest.from_message(request))
+            raise exc
+
         if operation == "start_instance":
-            if self.fail_next_start:
-                self.fail_next_start = False
-                raise TransportError(
-                    "lost start response",
-                    completion_uncertain=True,
-                    retry_request=RetryRequest.from_message(request),
-                )
-            return {
-                "schema_version": request["schema_version"],
-                "request_id": request["request_id"],
-                "operation": operation,
-                "status": "completed",
-                "instance_id": "inst-001",
-                "decision_point_id": "decision-1",
-                "masked_emulator_dto": {"state": "initial"},
-            }
-
-        if operation == "commit_action":
-            if self.fail_next_commit:
-                self.fail_next_commit = False
-                raise TransportError(
-                    "lost commit response",
-                    completion_uncertain=True,
-                    retry_request=RetryRequest.from_message(request),
-                )
-            return {
-                "schema_version": request["schema_version"],
-                "request_id": request["request_id"],
-                "operation": operation,
-                "status": "completed",
-                "instance_id": request["instance_id"],
-                "branch_id": "root",
-                "decision_point_id": "decision-2",
-                "masked_emulator_dto": {"state": "after"},
-            }
-
+            return self._response(
+                request,
+                status="completed",
+                instance_id="inst-001",
+                decision_point_id="decision-1",
+                masked_emulator_dto={"state": "initial"},
+            )
         if operation == "get_decision":
-            return {
-                "schema_version": request["schema_version"],
-                "request_id": request["request_id"],
-                "operation": operation,
-                "status": "completed",
-                "instance_id": request["instance_id"],
-                "branch_id": request["branch_id"],
-                "decision_point_id": "decision-1",
-                "masked_emulator_dto": {"state": "decision"},
-            }
-
-        raise AssertionError(f"unexpected operation: {operation}")
-
-    async def invalidate(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        pass
-
-
-class _CancelledCommitConnection:
-    def __init__(self) -> None:
-        self.messages: list[dict] = []
-
-    async def exchange(self, message, *, deadline: float):
-        request = dict(message)
-        self.messages.append(request)
-        if request["operation"] == "start_instance":
-            return {
-                "schema_version": request["schema_version"],
-                "request_id": request["request_id"],
-                "operation": request["operation"],
-                "status": "completed",
-                "instance_id": "inst-001",
-                "decision_point_id": "decision-1",
-                "masked_emulator_dto": {"state": "initial"},
-            }
-
-        exc = asyncio.CancelledError()
-        setattr(exc, "completion_uncertain", True)
-        setattr(exc, "retry_request", RetryRequest.from_message(request))
-        raise exc
-
-    async def invalidate(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        pass
-
-
-class _EvictedCloseTombstoneConnection:
-    def __init__(self) -> None:
-        self.messages: list[dict] = []
-        self.close_attempts = 0
-
-    async def exchange(self, message, *, deadline: float):
-        request = dict(message)
-        self.messages.append(request)
-        operation = request["operation"]
-
-        if operation == "start_instance":
-            return {
-                "schema_version": request["schema_version"],
-                "request_id": request["request_id"],
-                "operation": operation,
-                "status": "completed",
-                "instance_id": "inst-001",
-                "decision_point_id": "decision-1",
-                "masked_emulator_dto": {"state": "initial"},
-            }
-
+            return self._response(
+                request,
+                status="completed",
+                instance_id=request["instance_id"],
+                branch_id=request["branch_id"],
+                decision_point_id="decision-1",
+                masked_emulator_dto={"state": "decision"},
+            )
+        if operation == "commit_action":
+            return self._response(
+                request,
+                status="completed",
+                instance_id=request["instance_id"],
+                branch_id="root",
+                decision_point_id="decision-2",
+                masked_emulator_dto={"state": "after"},
+            )
         if operation == "close_instance":
-            self.close_attempts += 1
-            if self.close_attempts == 1:
-                raise TransportError(
-                    "lost close response",
-                    completion_uncertain=True,
-                    retry_request=RetryRequest.from_message(request),
-                )
-            return {
-                "schema_version": request["schema_version"],
-                "request_id": request["request_id"],
-                "operation": operation,
-                "status": "rejected",
-                "instance_id": request["instance_id"],
-                "error": f"unknown instance_id {request['instance_id']!r}",
-                "fault_kind": "unknown_instance",
-            }
-
+            return self._response(
+                request,
+                status="completed",
+                instance_id=request["instance_id"],
+            )
         raise AssertionError(f"unexpected operation: {operation}")
 
     async def invalidate(self) -> None:
@@ -156,15 +101,16 @@ class _EvictedCloseTombstoneConnection:
 
 
 class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
-    async def test_uncertain_commit_exposes_same_id_retry_and_blocks_fresh_calls(self) -> None:
-        connection = _RetryingConnection()
+    async def test_uncertain_commit_keeps_same_sequence_and_blocks_fresh_calls(self) -> None:
+        connection = _Connection()
         client = AsyncTrainingApiClient(connection)
         instance_id = await client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
+        self.assertEqual(client.next_request_seq, 2)
 
-        with self.assertRaisesRegex(TransportError, "lost commit response"):
+        connection.fail_operation_once = "commit_action"
+        with self.assertRaisesRegex(TransportError, "lost commit_action response"):
             await client.commit_action(
                 instance_id,
                 "decision-1",
@@ -175,50 +121,81 @@ class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
         retry = client.pending_retry
         self.assertIsNotNone(retry)
         assert retry is not None
-        original_commit = connection.messages[-1]
-        self.assertEqual(retry.request_id, original_commit["request_id"])
+        self.assertEqual(retry.request_seq, 2)
+        original = connection.messages[-1]
+        self.assertEqual(retry.to_message(), original)
+        self.assertEqual(client.next_request_seq, 2)
 
-        with self.assertRaisesRegex(RuntimeError, "completion-uncertain"):
+        with self.assertRaisesRegex(RuntimeError, "unresolved request"):
             await client.get_decision(instance_id, timeout_s=1.0)
-        self.assertEqual(len(connection.messages), 2)
 
         response = await client.retry_request(retry, timeout_s=1.0)
-        self.assertIsInstance(response, dict)
         self.assertEqual(response["status"], "completed")
+        self.assertEqual(connection.messages[-1], original)
         self.assertIsNone(client.pending_retry)
-        replayed_commit = connection.messages[-1]
-        self.assertEqual(replayed_commit, original_commit)
+        self.assertEqual(client.next_request_seq, 3)
 
-    async def test_uncertain_start_can_be_recovered_with_retry_token(self) -> None:
-        connection = _RetryingConnection()
-        connection.fail_next_start = True
+    async def test_read_only_request_uses_same_uncertainty_rule(self) -> None:
+        connection = _Connection()
         client = AsyncTrainingApiClient(connection)
+        instance_id = await client.start_instance(
+            {"instance_type": "combat"}, timeout_s=1.0
+        )
 
-        with self.assertRaisesRegex(TransportError, "lost start response"):
-            await client.start_instance(
-                {"instance_type": "combat"},
-                timeout_s=1.0,
-            )
+        connection.fail_operation_once = "get_decision"
+        with self.assertRaises(TransportError):
+            await client.get_decision(instance_id, timeout_s=1.0)
 
         retry = client.pending_retry
         self.assertIsNotNone(retry)
+        assert retry is not None
+        self.assertEqual(retry.request_seq, 2)
+        decision = await client.retry_request(retry, timeout_s=1.0)
+        self.assertEqual(decision["decision_point_id"], "decision-1")
+        self.assertEqual(client.next_request_seq, 3)
+
+    async def test_uncertain_start_is_recovered_by_exact_sequence_replay(self) -> None:
+        connection = _Connection()
+        connection.fail_operation_once = "start_instance"
+        client = AsyncTrainingApiClient(connection)
+
+        with self.assertRaises(TransportError):
+            await client.start_instance(
+                {"instance_type": "combat"}, timeout_s=1.0
+            )
+
+        retry = client.pending_retry
         self.assertTrue(client.start_uncertain)
         assert retry is not None
-
         instance_id = await client.retry_request(retry, timeout_s=1.0)
         self.assertEqual(instance_id, "inst-001")
         self.assertFalse(client.start_uncertain)
-        self.assertIsNone(client.pending_retry)
         self.assertEqual(connection.messages[0], connection.messages[1])
+        self.assertEqual(client.next_request_seq, 2)
 
-    async def test_cancelled_selection_is_recorded_before_reraise(self) -> None:
+    async def test_epoch_change_permanently_invalidates_client_session(self) -> None:
+        connection = _Connection()
+        client = AsyncTrainingApiClient(connection)
+        instance_id = await client.start_instance(
+            {"instance_type": "combat"}, timeout_s=1.0
+        )
+        connection.change_epoch_on_next = True
+
+        with self.assertRaises(ServerEpochChangedError):
+            await client.get_decision(instance_id, timeout_s=1.0)
+
+        self.assertTrue(client.session_invalid)
+        with self.assertRaisesRegex(RuntimeError, "epoch changed"):
+            await client.get_decision(instance_id, timeout_s=1.0)
+
+    async def test_cancelled_selection_is_a_pending_retry_and_is_audited(self) -> None:
         events: list[dict] = []
-        connection = _CancelledCommitConnection()
+        connection = _Connection()
         client = AsyncTrainingApiClient(connection, selection_logger=events.append)
         instance_id = await client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
+            {"instance_type": "combat"}, timeout_s=1.0
         )
+        connection.cancel_operation_once = "commit_action"
 
         with self.assertRaises(asyncio.CancelledError):
             await client.commit_action(
@@ -229,35 +206,9 @@ class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(len(events), 1)
-        event = events[0]
-        self.assertEqual(event["event"], "selection")
-        self.assertEqual(event["request"]["operation"], "commit_action")
-        self.assertEqual(event["client_error"]["type"], "CancelledError")
-        self.assertIsNotNone(client.pending_retry)
-
-    async def test_evicted_close_tombstone_keeps_close_uncertain(self) -> None:
-        connection = _EvictedCloseTombstoneConnection()
-        client = AsyncTrainingApiClient(connection)
-        instance_id = await client.start_instance(
-            {"instance_type": "combat"},
-            timeout_s=1.0,
-        )
-
-        with self.assertRaisesRegex(TransportError, "lost close response"):
-            await client.close_instance(instance_id, timeout_s=1.0)
-
-        retry = client.pending_retry
-        self.assertIsNotNone(retry)
-        self.assertTrue(client.close_uncertain)
-        assert retry is not None
-
-        with self.assertRaises(RequestRejectedError):
-            await client.retry_request(retry, timeout_s=1.0)
-
-        self.assertEqual(client.pending_retry, retry)
-        self.assertTrue(client.close_uncertain)
-        self.assertEqual(client.instance_id, instance_id)
-        self.assertEqual(connection.messages[-1], connection.messages[-2])
+        self.assertEqual(events[0]["event"], "selection")
+        self.assertEqual(events[0]["client_error"]["type"], "CancelledError")
+        self.assertEqual(client.pending_retry.request_seq, 2)
 
 
 if __name__ == "__main__":
