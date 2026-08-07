@@ -185,7 +185,8 @@ class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
             await client.get_decision(instance_id, timeout_s=1.0)
 
         self.assertTrue(client.session_invalid)
-        with self.assertRaisesRegex(RuntimeError, "epoch changed"):
+        self.assertIsNone(client.pending_retry)
+        with self.assertRaisesRegex(RuntimeError, "session is invalid"):
             await client.get_decision(instance_id, timeout_s=1.0)
 
     async def test_cancelled_selection_is_a_pending_retry_and_is_audited(self) -> None:
