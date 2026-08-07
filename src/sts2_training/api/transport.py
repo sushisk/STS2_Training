@@ -9,6 +9,15 @@ JsonObject = dict[str, Any]
 class TransportError(RuntimeError):
     """Base exception for failures before a valid API response is received."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        completion_uncertain: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.completion_uncertain = completion_uncertain
+
 
 class TransportClosedError(TransportError):
     """The transport has already been closed."""
