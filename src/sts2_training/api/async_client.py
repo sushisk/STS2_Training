@@ -46,7 +46,7 @@ class AsyncTrainingApiClient(ApiContract):
     closed.
 
     A changed RL ``server_epoch`` or a session-level sequencing/ownership rejection
-    permanently invalidates this logical client. v0.6 intentionally does not guess how
+    permanently invalidates this logical client. v0.7 intentionally does not guess how
     to continue from divergent client/server session state.
     """
 
@@ -258,10 +258,14 @@ class AsyncTrainingApiClient(ApiContract):
         timeout_s: float,
         simulation_options: Mapping[str, object] | None = None,
     ) -> JsonObject:
-        """DTO v0.7 batch counterpart of `emulate_action`: submit many parent/action
-        Branches (e.g. a whole Beam Search frontier) as ONE request over the same
-        single in-flight session-sequenced protocol - never as several concurrent
-        requests."""
+        """DTO v0.7 batch counterpart of ``emulate_action``.
+
+        Every item parent must already exist and be usable when the batch request starts;
+        a Branch created by another item in the same batch is not a valid parent. The
+        whole batch is sent as one request over the existing single in-flight,
+        session-sequenced protocol and exact-replayed as a whole if completion is
+        uncertain.
+        """
         async with self._operation_deadline(timeout_s) as deadline:
             self._ensure_fresh_request_allowed()
             request = self._build_emulate_actions(
@@ -275,38 +279,62 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         deadline: float,
     ) -> JsonObject:
+        response: JsonObject | None = None
         token = RetryRequest.from_message(request)
-        response = await self._execute(request, deadline=deadline)
+        try:
+            response = await self._execute(request, deadline=deadline)
+            self._consume_sequence(token)
+        except asyncio.CancelledError as exc:
+            self._record_emulate_actions_batch(request, response, error=exc)
+            raise
+        except ApiOperationError as exc:
+            self._record_emulate_actions_batch(request, exc.response)
+            raise
+        except Exception as exc:
+            self._record_emulate_actions_batch(request, response, error=exc)
+            raise
+
         self._record_emulate_actions_batch(request, response)
-        self._consume_sequence(token)
         return response
 
     def _record_emulate_actions_batch(
         self,
         request: Mapping[str, object],
-        response: Mapping[str, object],
+        response: Mapping[str, object] | None,
+        *,
+        error: BaseException | None = None,
     ) -> None:
-        branch_results = response.get("branch_results")
-        if not isinstance(branch_results, Mapping):
-            return
         items = request.get("items")
         if not isinstance(items, list):
             return
+        branch_results = response.get("branch_results") if response is not None else None
         for item in items:
+            if not isinstance(item, Mapping):
+                continue
             branch_id = item.get("branch_id")
-            branch_result = branch_results.get(branch_id)
+            branch_result = (
+                branch_results.get(branch_id)
+                if isinstance(branch_results, Mapping)
+                else response
+            )
             item_request = {
+                "schema_version": request.get("schema_version"),
+                "client_session_id": request.get("client_session_id"),
+                "request_seq": request.get("request_seq"),
+                "request_id": request.get("request_id"),
+                "operation": "emulate_actions",
                 "instance_id": request.get("instance_id"),
                 "parent_branch_id": item.get("parent_branch_id"),
                 "branch_id": branch_id,
+                "rng_id": item.get("rng_id"),
                 "decision_point_id": item.get("decision_point_id"),
                 "action_id": item.get("action_id"),
-                "request_id": request.get("request_id"),
             }
             self._record_selected_action(
                 item_request,
                 source_branch_id=item.get("parent_branch_id"),
-                result=branch_result,
+                result=branch_result if isinstance(branch_result, Mapping) else None,
+                error=error,
             )
 
     async def cancel_branches(
