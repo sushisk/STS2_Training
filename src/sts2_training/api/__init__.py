@@ -1,5 +1,4 @@
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.asyncio_tcp_transport import AsyncioTcpTransport
 from sts2_training.api.client import (
     ApiOperationError,
     ApiProtocolError,
@@ -23,7 +22,6 @@ __all__ = [
     "ApiOperationError",
     "ApiProtocolError",
     "AsyncTrainingApiClient",
-    "AsyncioTcpTransport",
     "JsonObject",
     "LocalProcessTransport",
     "RequestFaultedError",
