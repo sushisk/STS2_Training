@@ -17,6 +17,7 @@ from sts2_training.api.transport import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024
+DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 _RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 
 
@@ -28,16 +29,18 @@ class TcpConnection:
     object in reply, and keeps the socket healthy across exchanges.
 
     ``max_message_bytes`` bounds outbound request frames only, matching the RL TCP
-    framing contract. Response frames are read through their terminating newline rather
-    than being rejected at the request-frame limit.
+    framing contract. ``max_response_bytes`` is a separate receiver-side safety bound
+    so a peer that never sends a newline cannot make response buffering unbounded. The
+    response limit intentionally defaults much higher than the request limit.
 
     Each exchange has one absolute deadline. Waiting for this connection's lock,
     connecting, writing, draining, and reading the response all consume that same
     budget. ``connect_timeout_s`` is an additional upper bound for only the connect
     phase; it never extends the exchange deadline.
 
-    Once a request may have reached RL, timeout, cancellation, or stream/protocol
-    failures mark the result as completion-uncertain and invalidate the connection.
+    Once a request may have reached RL, timeout, cancellation, response-size overflow,
+    or stream/protocol failures mark the result as completion-uncertain and invalidate
+    the connection.
     """
 
     def __init__(
@@ -47,6 +50,7 @@ class TcpConnection:
         port: int = DEFAULT_PORT,
         connect_timeout_s: float = 5.0,
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         if not host:
             raise ValueError("host must not be empty")
@@ -56,11 +60,14 @@ class TcpConnection:
             raise ValueError("connect_timeout_s must be positive")
         if max_message_bytes <= 0:
             raise ValueError("max_message_bytes must be positive")
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
 
         self._host = host
         self._port = port
         self._connect_timeout_s = connect_timeout_s
         self._max_message_bytes = max_message_bytes
+        self._max_response_bytes = max_response_bytes
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
@@ -247,11 +254,17 @@ class TcpConnection:
                 f"could not connect to RL TCP server at {self._host}:{self._port}"
             ) from exc
 
-    @staticmethod
-    async def _read_response_frame(reader: asyncio.StreamReader) -> bytes:
+    async def _read_response_frame(self, reader: asyncio.StreamReader) -> bytes:
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
-            chunk = await reader.read(_RESPONSE_READ_CHUNK_BYTES)
+            remaining = self._max_response_bytes - total_bytes
+            if remaining <= 0:
+                raise TransportError(
+                    f"response exceeds max_response_bytes={self._max_response_bytes}"
+                )
+
+            chunk = await reader.read(min(_RESPONSE_READ_CHUNK_BYTES, remaining))
             if not chunk:
                 raise RuntimeExitedError(
                     "RL TCP server closed the connection before completing a response frame"
@@ -259,9 +272,16 @@ class TcpConnection:
             newline_index = chunk.find(b"\n")
             if newline_index < 0:
                 chunks.append(chunk)
+                total_bytes += len(chunk)
+                if total_bytes >= self._max_response_bytes:
+                    raise TransportError(
+                        f"response exceeds max_response_bytes={self._max_response_bytes}"
+                    )
                 continue
 
-            chunks.append(chunk[: newline_index + 1])
+            frame_chunk = chunk[: newline_index + 1]
+            chunks.append(frame_chunk)
+            total_bytes += len(frame_chunk)
             if newline_index + 1 != len(chunk):
                 raise TransportError(
                     "RL TCP server returned data after the response frame delimiter"
