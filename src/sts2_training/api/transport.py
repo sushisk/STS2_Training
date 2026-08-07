@@ -10,24 +10,13 @@ JsonObject = dict[str, Any]
 
 @dataclass(frozen=True)
 class RetryRequest:
-    """Immutable serialized API request that can be replayed with the same request id.
-
-    The serialized JSON excludes the NDJSON trailing newline. Reconstructing the mapping
-    preserves JSON key order, so ``TcpConnection`` will emit the same request bytes when
-    the token is retried.
-    """
+    """Exact serialized request for replaying one unresolved session sequence."""
 
     serialized_payload: str
 
     @classmethod
     def from_message(cls, message: Mapping[str, Any]) -> "RetryRequest":
-        return cls(
-            json.dumps(
-                dict(message),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
+        return cls(json.dumps(dict(message), ensure_ascii=False, separators=(",", ":")))
 
     def to_message(self) -> JsonObject:
         value = json.loads(self.serialized_payload)
@@ -45,10 +34,18 @@ class RetryRequest:
         value = self.to_message().get("operation")
         return value if isinstance(value, str) else None
 
+    @property
+    def request_seq(self) -> int | None:
+        value = self.to_message().get("request_seq")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @property
+    def client_session_id(self) -> str | None:
+        value = self.to_message().get("client_session_id")
+        return value if isinstance(value, str) else None
+
 
 class TransportError(RuntimeError):
-    """Base exception for failures before a valid API response is received."""
-
     def __init__(
         self,
         message: str,
@@ -61,12 +58,32 @@ class TransportError(RuntimeError):
         self.retry_request = retry_request
 
 
+class ServerEpochChangedError(TransportError):
+    """RL restarted; the logical client session cannot be continued safely."""
+
+    def __init__(
+        self,
+        *,
+        expected_epoch: str,
+        actual_epoch: str,
+        completion_uncertain: bool = False,
+        retry_request: RetryRequest | None = None,
+    ) -> None:
+        super().__init__(
+            f"RL server epoch changed from {expected_epoch!r} to {actual_epoch!r}",
+            completion_uncertain=completion_uncertain,
+            retry_request=retry_request,
+        )
+        self.expected_epoch = expected_epoch
+        self.actual_epoch = actual_epoch
+
+
 class TransportClosedError(TransportError):
-    """The transport has already been closed."""
+    pass
 
 
 class RuntimeExitedError(TransportError):
-    """The owned RL runtime process is no longer alive."""
+    pass
 
 
 class RlTransport(Protocol):
@@ -80,44 +97,3 @@ class RlTransport(Protocol):
     def is_alive(self) -> bool: ...
 
     def close(self) -> None: ...
-
-
-class FakeTransport:
-    """Deterministic in-memory transport used only by unit tests."""
-
-    def __init__(self, responses: list[JsonObject]) -> None:
-        self._responses = [dict(response) for response in responses]
-        self._alive = True
-        self._requests: list[JsonObject] = []
-        self._timeouts: list[float] = []
-
-    @property
-    def requests(self) -> list[JsonObject]:
-        return [dict(request) for request in self._requests]
-
-    @property
-    def timeouts(self) -> list[float]:
-        return list(self._timeouts)
-
-    def call(
-        self,
-        request: Mapping[str, Any],
-        *,
-        timeout_s: float,
-    ) -> JsonObject:
-        if not self._alive:
-            raise TransportClosedError("transport is closed")
-        if timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
-        if not self._responses:
-            raise RuntimeError("no prepared response remains")
-
-        self._requests.append(dict(request))
-        self._timeouts.append(timeout_s)
-        return self._responses.pop(0)
-
-    def close(self) -> None:
-        self._alive = False
-
-    def is_alive(self) -> bool:
-        return self._alive
