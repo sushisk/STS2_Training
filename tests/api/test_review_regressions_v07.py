@@ -29,6 +29,7 @@ def _item(parent_branch_id: str, branch_id: str) -> dict:
     [
         [_item("root", "b1"), _item("b1", "b2")],
         [_item("b1", "b2"), _item("root", "b1")],
+        [_item("self", "self")],
     ],
 )
 def test_same_batch_parent_dependency_is_rejected_in_any_order(items: list[dict]) -> None:
