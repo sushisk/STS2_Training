@@ -103,61 +103,70 @@ class TcpConnection:
 
         sent = False
         try:
-            async with asyncio.timeout_at(deadline):
-                async with self._lock:
-                    await self._connect(deadline=deadline)
-                    assert self._reader is not None
-                    assert self._writer is not None
-                    sent = True
-                    self._writer.write(encoded)
-                    await self._writer.drain()
-                    line = await self._read_response_frame(self._reader)
-        except ServerEpochChangedError:
-            raise
-        except asyncio.CancelledError as exc:
-            if sent:
-                await self._disconnect()
-            setattr(exc, "completion_uncertain", sent)
-            setattr(exc, "retry_request", retry_request if sent else None)
-            raise
-        except TimeoutError as exc:
-            if sent:
-                await self._disconnect()
-            raise TransportError(
-                "RL TCP request timed out",
-                completion_uncertain=sent,
-                retry_request=retry_request if sent else None,
-            ) from exc
-        except TransportError as exc:
-            if sent and not isinstance(exc, ServerEpochChangedError):
-                await self._disconnect()
-                exc.completion_uncertain = True
-                exc.retry_request = retry_request
-            raise
-        except (ConnectionError, OSError) as exc:
-            if sent:
-                await self._disconnect()
-            raise RuntimeExitedError(
-                "RL TCP connection closed during request",
-                completion_uncertain=sent,
-                retry_request=retry_request if sent else None,
-            ) from exc
+            try:
+                async with asyncio.timeout_at(deadline):
+                    async with self._lock:
+                        await self._connect(deadline=deadline)
+                        assert self._reader is not None
+                        assert self._writer is not None
+                        sent = True
+                        self._writer.write(encoded)
+                        await self._writer.drain()
+                        line = await self._read_response_frame(self._reader)
+            except ServerEpochChangedError:
+                raise
+            except TimeoutError as exc:
+                if sent:
+                    await self._disconnect()
+                raise TransportError(
+                    "RL TCP request timed out",
+                    completion_uncertain=sent,
+                    retry_request=retry_request if sent else None,
+                ) from exc
+            except TransportError as exc:
+                if sent and not isinstance(exc, ServerEpochChangedError):
+                    await self._disconnect()
+                    exc.completion_uncertain = True
+                    exc.retry_request = retry_request
+                raise
+            except (ConnectionError, OSError) as exc:
+                if sent:
+                    await self._disconnect()
+                raise RuntimeExitedError(
+                    "RL TCP connection closed during request",
+                    completion_uncertain=sent,
+                    retry_request=retry_request if sent else None,
+                ) from exc
 
-        response = await self._decode_response(line, retry_request=retry_request)
-        response_epoch = response.get("server_epoch")
-        if not isinstance(response_epoch, str) or not response_epoch:
-            await self._disconnect()
-            raise TransportError(
-                "RL API response is missing server_epoch",
+            response = await self._decode_response(line, retry_request=retry_request)
+            response_epoch = response.get("server_epoch")
+            if not isinstance(response_epoch, str) or not response_epoch:
+                await self._disconnect()
+                raise TransportError(
+                    "RL API response is missing server_epoch",
+                    completion_uncertain=True,
+                    retry_request=retry_request,
+                )
+            self._assert_epoch(
+                response_epoch,
                 completion_uncertain=True,
                 retry_request=retry_request,
             )
-        self._assert_epoch(
-            response_epoch,
-            completion_uncertain=True,
-            retry_request=retry_request,
-        )
-        return response
+            return response
+        except asyncio.CancelledError as exc:
+            # Once bytes may have reached RL, preserve the exact replay identity before
+            # any cleanup await. Cancellation can itself arrive while disconnecting a
+            # malformed/invalid response, and teardown must not erase recovery state.
+            setattr(exc, "completion_uncertain", sent)
+            setattr(exc, "retry_request", retry_request if sent else None)
+            if sent:
+                try:
+                    await self._disconnect()
+                except asyncio.CancelledError:
+                    # A second cancellation during best-effort teardown must not replace
+                    # the original sent-aware cancellation carrying the retry token.
+                    pass
+            raise
 
     async def ping(self, *, timeout_s: float = 5.0) -> JsonObject:
         deadline = self._resolve_deadline(timeout_s=timeout_s, deadline=None)
