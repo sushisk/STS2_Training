@@ -455,6 +455,10 @@ class ApiContract:
         combat_terminal = masked.get("terminal") is True
         run_terminal = masked.get("run_terminal") is True
         is_terminal = combat_terminal or run_terminal
+        if combat_terminal and run_terminal:
+            raise ApiProtocolError(
+                "masked_emulator_dto.terminal and run_terminal are mutually exclusive"
+            )
 
         if is_terminal:
             outcome = masked.get("outcome")
