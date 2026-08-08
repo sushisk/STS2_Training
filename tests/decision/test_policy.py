@@ -10,6 +10,17 @@ def _action(action_id: str, action_type: str, *, is_available: bool = True) -> d
     return {"action_id": action_id, "action_type": action_type, "is_available": is_available}
 
 
+class _CountingAction(dict):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.availability_reads = 0
+
+    def get(self, key, default=None):
+        if key == "is_available":
+            self.availability_reads += 1
+        return super().get(key, default)
+
+
 class PriorHeuristicPolicyTest(unittest.TestCase):
     def test_prioritizes_card_over_other_categories(self) -> None:
         legal_actions = [
@@ -43,6 +54,17 @@ class PriorHeuristicPolicyTest(unittest.TestCase):
         candidates = policy.propose(legal_actions, {}, top_k=5)
 
         self.assertEqual([c.action_id for c in candidates], ["a-card2"])
+
+    def test_availability_is_checked_once_per_action(self) -> None:
+        actions = [
+            _CountingAction(_action("a-card1", "card")),
+            _CountingAction(_action("a-card2", "card", is_available=False)),
+        ]
+        policy = PriorHeuristicPolicy()
+
+        policy.propose(actions, {}, top_k=5)
+
+        self.assertEqual([action.availability_reads for action in actions], [1, 1])
 
     def test_empty_when_no_available_actions(self) -> None:
         legal_actions = [_action("a-card1", "card", is_available=False)]
