@@ -477,6 +477,7 @@ class AsyncTrainingApiClient(ApiContract):
             self._consume_sequence(token)
             if token.operation == "close_instance" and exc.response.get("status") == "faulted":
                 self._instance_id = None
+                self._max_emulate_actions_items = None
                 self._audit.clear()
             if fault_kind in _FATAL_CONSUMING_SESSION_REJECTIONS:
                 self._session_invalid = True
