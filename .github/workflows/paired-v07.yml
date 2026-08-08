@@ -3,20 +3,69 @@ name: paired-v07-exact-pair
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
 
 permissions:
   contents: read
+  pull-requests: read
+  statuses: read
 
 jobs:
   paired-head-gate:
     name: exact Training/RL pair passed trusted integration
-    # The paired v0.7 integration requires the real STS2 Emulator/runtime.
-    # Do not turn absence of that environment into a red GitHub PR check: it
-    # makes infrastructure state indistinguishable from a product-code bug.
-    # Run scripts/attest_paired_v07.ps1 explicitly on the trusted Emulator
-    # machine when real-environment validation is required.
-    if: ${{ false }}
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ATTESTATION_CONTEXT: paired-v07-exact-pair
     steps:
-      - name: Real Emulator integration is external-only
-        run: echo "Environment-dependent paired v0.7 integration is intentionally skipped in GitHub Actions."
+      - name: Verify trusted exact-pair attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          training_repo='sushisk/STS2_Training'
+          rl_repo='sushisk/STS2_RL'
+          training_sha="$(gh api "repos/${training_repo}/pulls/19" --jq '.head.sha')"
+          rl_sha="$(gh api "repos/${rl_repo}/pulls/8" --jq '.head.sha')"
+          pair_description="Training=${training_sha} RL=${rl_sha}"
+
+          event_head="$(python - <<'PY'
+          import json, os
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as handle:
+              event = json.load(handle)
+          print(event.get('pull_request', {}).get('head', {}).get('sha', ''))
+          PY
+          )"
+          if [[ -n "${event_head}" && "${event_head}" != "${training_sha}" ]]; then
+            echo "Training PR head moved while this gate was queued: event=${event_head} current=${training_sha}" >&2
+            exit 1
+          fi
+
+          verify_status() {
+            local repo="$1"
+            local sha="$2"
+            local payload
+            payload="$(mktemp)"
+            gh api "repos/${repo}/commits/${sha}/statuses?per_page=100" >"${payload}"
+            python - "${payload}" "${ATTESTATION_CONTEXT}" "${pair_description}" <<'PY'
+          import json, sys
+          path, context, description = sys.argv[1:]
+          with open(path, encoding='utf-8') as handle:
+              statuses = json.load(handle)
+          ok = any(
+              item.get('state') == 'success'
+              and item.get('context') == context
+              and item.get('description') == description
+              for item in statuses
+          )
+          if not ok:
+              raise SystemExit(
+                  f"missing successful {context!r} status with description {description!r}"
+              )
+          PY
+            rm -f "${payload}"
+          }
+
+          verify_status "${training_repo}" "${training_sha}"
+          verify_status "${rl_repo}" "${rl_sha}"
+          echo "Verified trusted attestation for ${pair_description}"
