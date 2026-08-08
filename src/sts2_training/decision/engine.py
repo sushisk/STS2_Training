@@ -14,6 +14,7 @@ instead of being converted into heuristic decisions.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -75,9 +76,7 @@ class CombatDecisionEngine:
         *,
         timeout_s: float,
     ) -> DecisionOutcome:
-        if timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
-        deadline = time.monotonic() + timeout_s
+        deadline = _deadline_from_timeout(timeout_s)
 
         decision = await self._client.get_decision(
             instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
@@ -112,7 +111,17 @@ class CombatDecisionEngine:
             return DecisionOutcome(decision, result.best_root_action_id, "beam_search", result)
 
         chosen = self._fallback.select(legal_actions)
-        return DecisionOutcome(decision, chosen["action_id"], "heuristic_fallback", result)
+        if not isinstance(chosen, Mapping):
+            raise RuntimeError("fallback selector must return an available legal action mapping")
+        chosen_action_id = chosen.get("action_id")
+        available_ids = {action.get("action_id") for action in legal_actions}
+        if (
+            not isinstance(chosen_action_id, str)
+            or not chosen_action_id
+            or chosen_action_id not in available_ids
+        ):
+            raise RuntimeError("fallback selector must return an available legal action")
+        return DecisionOutcome(decision, chosen_action_id, "heuristic_fallback", result)
 
     async def decide_and_commit(
         self,
@@ -120,12 +129,13 @@ class CombatDecisionEngine:
         *,
         timeout_s: float,
     ) -> JsonObject:
-        if timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
-        deadline = time.monotonic() + timeout_s
+        deadline = _deadline_from_timeout(timeout_s)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TransportError("decision timeout elapsed before get_decision")
         outcome = await self.decide(
             instance_id,
-            timeout_s=deadline - time.monotonic(),
+            timeout_s=remaining,
         )
         if outcome.chosen_action_id is None:
             raise NoAvailableActionError("no available legal_actions to select from")
@@ -139,3 +149,14 @@ class CombatDecisionEngine:
             outcome.chosen_action_id,
             timeout_s=remaining,
         )
+
+
+def _deadline_from_timeout(timeout_s: float) -> float:
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or timeout_s <= 0
+    ):
+        raise ValueError("timeout_s must be a finite positive number")
+    return time.monotonic() + float(timeout_s)
