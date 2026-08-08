@@ -18,6 +18,7 @@ checkpoint exists - swap in a real model by implementing `ValueModel`.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -57,7 +58,18 @@ class HeuristicValueFunction(ValueModel):
     def __init__(self, weights: Mapping[str, float] | None = None) -> None:
         self._weights = dict(DEFAULT_WEIGHTS)
         if weights is not None:
-            self._weights.update(weights)
+            unknown = [name for name in weights if name not in DEFAULT_WEIGHTS]
+            if unknown:
+                names = ", ".join(sorted(repr(name) for name in unknown))
+                raise ValueError(f"unknown heuristic weight(s): {names}")
+            for name, raw_weight in weights.items():
+                if (
+                    isinstance(raw_weight, bool)
+                    or not isinstance(raw_weight, (int, float))
+                    or not math.isfinite(float(raw_weight))
+                ):
+                    raise ValueError(f"heuristic weight {name!r} must be a finite number")
+                self._weights[name] = float(raw_weight)
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
         outcome = _terminal_outcome(masked_emulator_dto)
@@ -128,5 +140,8 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
 
 def _num(value: Any, *, default: float = 0.0) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("heuristic input numbers must be finite")
+        return number
     return default
