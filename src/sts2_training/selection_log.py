@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +42,11 @@ class SelectionAudit:
         self._decisions.clear()
         self._selection_request_id = None
         self._selection_branch_ids.clear()
+
+    def forget(self, instance_id: str, branch_ids: Sequence[str]) -> None:
+        """Drop cached Decisions for Branches that can no longer be selected."""
+        for branch_id in branch_ids:
+            self._decisions.pop((instance_id, branch_id), None)
 
     def remember(self, response: Mapping[str, Any]) -> None:
         if self._logger is None:
