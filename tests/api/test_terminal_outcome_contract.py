@@ -58,6 +58,21 @@ def test_terminal_decision_rejects_non_empty_legal_actions(marker: str) -> None:
         contract._validate_decision_payload(_response(masked))  # noqa: SLF001
 
 
+def test_run_terminal_rejects_explicit_null_legal_actions() -> None:
+    contract = ApiContract(client_session_id="session-a")
+
+    with pytest.raises(ApiProtocolError, match="legal_actions.*list"):
+        contract._validate_decision_payload(  # noqa: SLF001
+            _response(
+                {
+                    "run_terminal": True,
+                    "outcome": "victory",
+                    "legal_actions": None,
+                }
+            )
+        )
+
+
 @pytest.mark.parametrize("marker", ["terminal", "run_terminal"])
 @pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
 def test_terminal_markers_must_be_boolean(marker: str, value: object) -> None:
