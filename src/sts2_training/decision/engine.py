@@ -7,9 +7,12 @@ and returns a no-candidate result when branching is unsupported, at which point
 this engine falls back to `HeuristicCombatSelector`.
 
 Expected search failures such as a safely rejected `emulate_actions` batch are
-encoded in `BeamSearchResult` and fall back cleanly. Protocol errors, faulted
-operations, invalid model outputs, and unexpected model exceptions are surfaced
-instead of being converted into heuristic decisions.
+encoded in `BeamSearchResult` and fall back cleanly. Results from an incomplete
+logical beam depth are never committed even if an earlier chunk happened to
+produce a high-scoring candidate, because doing so would make the decision
+depend on chunk ordering. Protocol errors, faulted operations, invalid model
+outputs, and unexpected model exceptions are surfaced instead of being
+converted into heuristic decisions.
 """
 
 from __future__ import annotations
@@ -107,7 +110,7 @@ class CombatDecisionEngine:
         remaining = deadline - time.monotonic()
         if remaining > 0:
             result = await self._beam.search(instance_id, decision, timeout_s=remaining)
-        if result is not None and result.best_root_action_id is not None:
+        if result is not None and _beam_result_is_actionable(result):
             return DecisionOutcome(decision, result.best_root_action_id, "beam_search", result)
 
         chosen = self._fallback.select(legal_actions)
@@ -149,6 +152,14 @@ class CombatDecisionEngine:
             outcome.chosen_action_id,
             timeout_s=remaining,
         )
+
+
+def _beam_result_is_actionable(result: BeamSearchResult) -> bool:
+    if result.best_root_action_id is None:
+        return False
+    if result.reason == "time_budget":
+        return False
+    return not result.reason.startswith("emulate_actions_rejected:")
 
 
 def _deadline_from_timeout(timeout_s: float) -> float:
