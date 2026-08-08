@@ -20,7 +20,7 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
-from sts2_training.runner._cli import add_common_arguments, print_result
+from sts2_training.runner._cli import add_common_arguments, configure_logging, print_result
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.scenario import RunSnapshot
 
@@ -82,7 +82,9 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    print_result(asyncio.run(_run(_parse_args(argv))))
+    args = _parse_args(argv)
+    configure_logging(args.log_level)
+    print_result(asyncio.run(_run(args)))
     return 0
 
 

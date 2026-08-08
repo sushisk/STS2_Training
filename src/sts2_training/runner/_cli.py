@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 
 from sts2_training.decision.search_modes import SEARCH_MODES
 from sts2_training.runner.episode import EpisodeResult
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -30,6 +33,20 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="override just the beam search depth of --search-mode",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=_LOG_LEVELS,
+        default="WARNING",
+        help="e.g. WARNING surfaces EpisodeRunner's best-effort close_instance "
+        "failures, which are otherwise silent from the CLI",
+    )
+
+
+def configure_logging(log_level: str) -> None:
+    # force=True: basicConfig() is a no-op if the root logger already has handlers
+    # (e.g. a host process, or pytest's own log capture) - a CLI entry point's
+    # main() calls this specifically to take ownership of its own output.
+    logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s", force=True)
 
 
 def print_result(result: EpisodeResult) -> None:
