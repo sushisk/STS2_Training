@@ -139,6 +139,7 @@ class HeuristicValueFunction(ValueModel):
 
 
 def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
+    """Return the terminal verdict exposed by RL, when present."""
     outcome = dto.get("outcome")
     if outcome in ("victory", "defeat"):
         return outcome
