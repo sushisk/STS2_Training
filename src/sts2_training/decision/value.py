@@ -88,8 +88,15 @@ class HeuristicValueFunction(ValueModel):
         max_hp = max(1.0, _num(dto.get("maxHp"), default=1.0))
         block = max(0.0, _num(dto.get("block")))
 
-        all_enemies = [enemy for enemy in (dto.get("enemies") or []) if isinstance(enemy, Mapping)]
-        enemies = [enemy for enemy in all_enemies if enemy.get("isAlive", True)]
+        all_enemies = _mapping_sequence(dto, "enemies")
+        enemies: list[tuple[int, Mapping[str, Any]]] = []
+        for index, enemy in enumerate(all_enemies):
+            is_alive = enemy.get("isAlive", True)
+            if not isinstance(is_alive, bool):
+                raise ValueError(f"heuristic input enemies[{index}].isAlive must be a boolean")
+            if is_alive:
+                enemies.append((index, enemy))
+
         # Keep dead enemies in the denominator so killing a nearly-dead enemy cannot
         # make aggregate enemy_hp_ratio look worse merely by shrinking max HP.
         enemy_hp = sum(max(0.0, _num(enemy.get("hp"))) for enemy in all_enemies)
@@ -98,10 +105,14 @@ class HeuristicValueFunction(ValueModel):
         )
 
         incoming_before_block = 0.0
-        for enemy in enemies:
-            intent = enemy.get("intent") or {}
-            if not isinstance(intent, Mapping):
+        for index, enemy in enemies:
+            intent = enemy.get("intent")
+            if intent is None:
                 continue
+            if not isinstance(intent, Mapping):
+                raise ValueError(
+                    f"heuristic input enemies[{index}].intent must be a mapping when provided"
+                )
             damage = intent.get("attackDamage")
             if damage is None:
                 continue
@@ -110,10 +121,10 @@ class HeuristicValueFunction(ValueModel):
         incoming = max(0.0, incoming_before_block - block)
 
         buff_debuff = 0.0
-        for power in dto.get("playerPowers") or []:
-            if not isinstance(power, Mapping):
-                continue
+        for index, power in enumerate(_mapping_sequence(dto, "playerPowers")):
             power_type = power.get("type")
+            if power_type is not None and not isinstance(power_type, str):
+                raise ValueError(f"heuristic input playerPowers[{index}].type must be a string")
             sign = 1.0 if power_type == "Buff" else -1.0 if power_type == "Debuff" else 0.0
             buff_debuff += sign * _num(power.get("amount"))
 
@@ -132,6 +143,8 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
     if outcome in ("victory", "defeat"):
         return outcome
     transition = dto.get("transition")
+    if transition is not None and not isinstance(transition, Mapping):
+        raise ValueError("heuristic input transition must be a mapping when provided")
     if isinstance(transition, Mapping) and transition.get("kind") == "combat_completed":
         victory = transition.get("victory")
         if victory is True:
@@ -139,6 +152,20 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
         if victory is False:
             return "defeat"
     return None
+
+
+def _mapping_sequence(dto: Mapping[str, Any], field_name: str) -> list[Mapping[str, Any]]:
+    value = dto.get(field_name)
+    if value is None:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"heuristic input {field_name} must be a sequence of mappings")
+    normalized: list[Mapping[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"heuristic input {field_name}[{index}] must be a mapping")
+        normalized.append(item)
+    return normalized
 
 
 def _num(value: Any, *, default: float = 0.0) -> float:
