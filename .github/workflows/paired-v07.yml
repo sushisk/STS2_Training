@@ -42,9 +42,7 @@ jobs:
           fi
 
           verify_status() {
-            local repo="$1"
-            local sha="$2"
-            local payload
+            local repo="$1" sha="$2" payload
             payload="$(mktemp)"
             gh api "repos/${repo}/commits/${sha}/statuses?per_page=100" >"${payload}"
             python - "${payload}" "${ATTESTATION_CONTEXT}" "${pair_description}" <<'PY'
@@ -52,15 +50,14 @@ jobs:
           path, context, description = sys.argv[1:]
           with open(path, encoding='utf-8') as handle:
               statuses = json.load(handle)
-          ok = any(
-              item.get('state') == 'success'
-              and item.get('context') == context
-              and item.get('description') == description
-              for item in statuses
-          )
-          if not ok:
+          matching = [item for item in statuses if item.get('context') == context]
+          if not matching:
+              raise SystemExit(f"missing status context {context!r}")
+          latest = matching[0]
+          if latest.get('state') != 'success' or latest.get('description') != description:
               raise SystemExit(
-                  f"missing successful {context!r} status with description {description!r}"
+                  f"latest {context!r} status does not attest current pair {description!r}: "
+                  f"state={latest.get('state')!r} description={latest.get('description')!r}"
               )
           PY
             rm -f "${payload}"
