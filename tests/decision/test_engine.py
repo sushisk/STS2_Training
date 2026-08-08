@@ -120,7 +120,14 @@ class _FakeConnection:
 
 
 def _victory_dto() -> dict:
-    return {"outcome": "victory", "hp": 40, "maxHp": 50, "enemies": [], "legal_actions": []}
+    return {
+        "terminal": True,
+        "outcome": "victory",
+        "hp": 40,
+        "maxHp": 50,
+        "enemies": [],
+        "legal_actions": [],
+    }
 
 
 def _alive_dto() -> dict:
