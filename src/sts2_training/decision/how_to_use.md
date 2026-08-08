@@ -22,6 +22,121 @@ policy候補をまとめて1つのbatchにして送るため、想定応答時�
 (`beam search ~= 5ms + 1ms/decision`、盤面をまとめて流した分だけ償却される)
 が成立します。
 
+## 4つのコンポーネントと責任範囲
+
+このパッケージは4つのファイルに分かれており、それぞれの責任は明確に分離されています。
+「提案する(Policy)」「評価する(Value)」「探索を組み立てる(BeamSearch)」
+「優先順位を決める(Engine)」という機能軸で切られていると考えると見通しが良いです。
+
+```text
+CombatDecisionEngine ──uses──> BeamSearchEngine ──uses──> PolicyModel (propose_batch)
+        │                              │            └──uses──> ValueModel (evaluate_batch)
+        │                              └──uses──> client (get_decision/emulate_actions/cancel_branches/release_branches)
+        └──fallback──> HeuristicCombatSelector (selection/heuristic_selector.py, 既存)
+```
+
+### `policy.py` — 「次に何を試すべきか」の提案責任
+
+- **`PolicyModel`(抽象基底)**: 1つの盤面(`legal_actions` + `masked_emulator_dto`)に
+  対して、有望そうな候補actionをbest-firstでtop_k個返すことだけが責任。勝率を
+  判断する責任は一切持たない(それは`ValueModel`の仕事)。
+  - `propose()`(抽象): 単一盤面用の最小契約。実装必須。
+  - `propose_batch()`(具象): 複数盤面を1回で捌く本命インターフェース。既定実装は
+    `propose()`をループするだけの素朴なものだが、**`BeamSearchEngine`は常に
+    `propose_batch`しか呼ばない**。学習済みモデルを繋ぐ側は、これを直接
+    オーバーライドしてバッチ推論に対応するのが本来の責任(~5ms/batchの
+    latency予算はこの前提で設計されている)。
+- **`ActionCandidate`(データクラス)**: `action_id`/`prior`/`action_type`の3つだけを
+  持つPolicy出力の型。探索は`prior`ではなく`ValueModel`のスコアで選抜するため、
+  `prior`はログ・デバッグ用の付随情報という位置づけ。
+- **`PriorHeuristicPolicy`(既定実装)**: 学習済みモデルが無くても動かすための
+  プレースホルダー。`HeuristicCombatSelector`と同じカテゴリ優先度
+  (`card > choice_card > choice_confirm > choice_skip > その他`)で`legal_actions`を
+  並べ替え、上位top_k件を返すだけで、強さ・勝率の予測は一切行わない。`rng`を渡すと
+  カテゴリ内シャッフルが有効になり、探索の多様性を出せる。
+
+### `value.py` — 「この盤面はどれだけ良いか」の評価責任
+
+- **`ValueModel`(抽象基底)**: 1つの`masked_emulator_dto`をスカラー値に変換する
+  ことだけが責任。actionを選ぶ責任は持たない(beam探索側がこの値でソート・剪定する)。
+  - `evaluate()`(抽象) / `evaluate_batch()`(具象、既定は`evaluate`のループ)。
+    `BeamSearchEngine`は常に`evaluate_batch`のみを呼ぶ。
+- **`HeuristicValueFunction`(既定実装)**: 戦闘DTOから即席の特徴量を抜き出し、
+  固定重みの線形和にするだけで、**デッキ構成やカード内容は一切見ない**
+  (デッキ/カード評価とは完全に別レイヤー)。
+  - `evaluate()`: まず勝敗が確定しているか(`_terminal_outcome`)を見て、
+    確定していれば`±100,000`(`victory_bonus`/`defeat_penalty`)を即返す。
+    **「勝敗が確定した状態は、他のどんな特徴量スコアよりも常に優先される」**
+    という不変条件をここで保証している。非終端なら`_extract_features()`の加重和。
+  - `_extract_features()`: HP比率・ブロック・敵HP比率・被弾予測ダメージ・
+    生存敵数・バフデバフ合計、の6特徴量を計算するだけの純粋関数的責任。
+    重み付けは`evaluate()`側の責任で、ここでは行わない。
+  - `DEFAULT_WEIGHTS`はモジュールレベル定数として外出しされており、`weights`引数で
+    上書き可能。「重みのチューニング」と「特徴量の定義」の責任を分けている。
+
+### `beam_search.py` — 探索そのものの責任(このパッケージの核)
+
+- **`BeamSearchConfig`**: 探索パラメータの束。妥当性検証込みで値を保持するだけ。
+  `beam_searchable_action_types`(既定`{system, card, potion}`)がRL側のRNG
+  Hypothesis対応範囲との整合性を握る唯一のフィールド。
+- **`BeamNode`**: 探索木の1ノードのイミュータブルなスナップショット。`branch_id`/
+  `parent_branch_id`/`rng_id`でRL側のBranch系譜を追跡し、`root_action_id`で
+  「このノードはroot直下のどのactionから派生したか」を保持する——これが最終的に
+  `decide()`が返す"root action"を特定する唯一の手がかり。
+- **`BranchIdAllocator`**: instance生存期間中ずっとユニークな`branch_id`/`rng_id`を
+  発行し続けることだけが責任(RL/Training契約上、branch_idはinstance内で生涯一意で
+  cancel/release後も再利用不可)。**`BeamSearchEngine`インスタンスにつき1個だけ生成し、
+  search()呼び出しをまたいで使い回す**という寿命管理が前提。
+- **`BeamSearchEngine`**: `search()`は4段階のヘルパーをdepthごとに順に呼ぶ
+  オーケストレーション責任のみを持ち、個々のロジックの詳細には立ち入らない。
+  1. `_propose_frontier()`: 現beamの全ノード分の`legal_actions`をまとめて
+     `PolicyModel.propose_batch`に渡し、各候補actionに新規`branch_id`/`rng_id`を
+     発行して`emulate_actions`用アイテムを組み立てる。`rng_id`の継承ルール
+     (root直下候補は新規発行、それより深いノードは親の`rng_id`を継承)もここに
+     埋め込まれている。
+  2. `_emulate_depth_batch()`: 1 depth分のアイテムを`max_batch_size`(既定64)ごとに
+     分割し、複数回の`emulate_actions`として送る。チャンクが拒否された場合、その
+     チャンクのbranch_idは「RL側に存在しないので後始末対象に含めない」判断も
+     ここにあり、それより前に成功したチャンクの結果は保持したまま打ち切る
+     (部分成功の扱い)。
+  3. `_score_frontier()`: `branch_results`から解決済み(`completed`/`partial`)のものだけ
+     抽出し、`ValueModel.evaluate_batch`で一括評価して新規`BeamNode`を構築する。
+     「beamに残すか`finished`に確定させるか」の判定(終端状態/最終depth到達/
+     `decision_point_id`が無い/`partial`かつ`expand_partial=False`)もここに集約。
+  4. `_cleanup()`: 探索中に作った非rootBranchを`cancel_branches`+`release_branches`
+     する後始末。`search()`本体の`try/finally`から**成功・失敗・タイムアウトいずれの
+     経路でも必ず呼ばれる**。`client.pending_retry`/`session_invalid`が立っている
+     場合はスキップする判断もここに閉じている。
+
+### `engine.py` — 最上位のオーケストレーションと安全性の責任
+
+- **`DecisionOutcome`**: 1回の意思決定の結果を表すイミュータブルな値オブジェクト。
+  `source`フィールド(`"beam_search" | "heuristic_fallback" | "forced_single_action" |
+  "none"`)が「どの経路で選ばれたか」を呼び出し側に必ず開示する責任を担う。
+- **`CombatDecisionEngine`**: 「beam探索を試み、ダメならheuristicにフォールバックする、
+  という意思決定の優先順位を管理すること」に責任が限定されており、探索アルゴリズムの
+  中身にもHTTP通信の中身にも立ち入らない(それぞれ`BeamSearchEngine`と`client`に委譲)。
+  - `__init__`: `policy`/`value_fn`が未指定ならデフォルト(`PriorHeuristicPolicy`/
+    `HeuristicValueFunction`)を使う。**clientごとに1個だけ構築し使い回す**という
+    寿命管理が前提(`BeamSearchEngine`が`BranchIdAllocator`を持つため)。
+  - `decide()`: `get_decision`で盤面取得 →`legal_actions`が0件なら`"none"`即返し
+    → 1件だけなら探索もfallbackも呼ばず`"forced_single_action"`即採用(無駄なAPI
+    呼び出しを避ける最適化)→ それ以外は`_try_beam_search()`を試し、成功すれば採用、
+    失敗すれば`HeuristicCombatSelector`にフォールバック。
+  - `_try_beam_search()`: 例外処理方針の核心。`TransportError`(セッション状態が
+    壊れた可能性がある通信エラー)は絶対に握りつぶさず再送出する(呼び出し元=
+    clientを所有する側しか`retry_request()`等の復旧判断ができないため)。それ以外の
+    例外(`PolicyModel`/`ValueModel`のバグ含む)はログを出して`None`を返し、意思決定
+    ループ自体は止めない。
+  - `decide_and_commit()`: `decide()`の結果を`commit_action`まで一気に進める薄い
+    ラッパー。`chosen_action_id`が`None`なら`NoAvailableActionError`を送出する
+    責任のみを追加。
+
+補足: `beam_searchable_action_types`のチェックは`CombatDecisionEngine.decide()`と
+`BeamSearchEngine.search()`の両方に存在する。これは安全性のための二重チェックでは
+なく、`decide()`側の早期リターンは「対象外と分かっている呼び出しで無駄な往復を
+避ける」ための最適化であり、実際の安全性は`search()`側の再チェックが担保している。
+
 ## 最小構成の使い方
 
 ```python

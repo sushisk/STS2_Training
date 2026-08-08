@@ -19,3 +19,6 @@ htmlcov/
 # (extract_card_effects.py, score_cards.py, and their output CSVs) - exploratory,
 # not part of the shipped package.
 tools/
+
+# Scratch/parked work-in-progress not (yet) part of the tracked source tree.
+.tmp/
