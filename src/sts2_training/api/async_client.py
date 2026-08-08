@@ -533,8 +533,11 @@ class AsyncTrainingApiClient(ApiContract):
         return response
 
     async def _mark_protocol_uncertain(self, request: Mapping[str, object]) -> None:
-        await self._connection.invalidate()
+        # Preserve the exact recovery token before the first cancellation point. RL may
+        # already have consumed this request, so connection teardown must not be able to
+        # erase the only exact-replay path.
         self._remember_pending(RetryRequest.from_message(request))
+        await self._connection.invalidate()
 
     def _ensure_fresh_request_allowed(self) -> None:
         if self._session_invalid:
