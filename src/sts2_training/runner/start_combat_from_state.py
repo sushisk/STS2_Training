@@ -22,7 +22,9 @@ from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
-from sts2_training.runner.episode import EpisodeResult, EpisodeRunner
+from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.decision.search_modes import SEARCH_MODES
+from sts2_training.runner.episode import EpisodeResult, EpisodeRunner, build_engine
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario
 
 __all__ = ["start_combat_from_state"]
@@ -36,13 +38,21 @@ async def start_combat_from_state(
     decision_timeout_s: float = 30.0,
     max_decisions: int | None = None,
     engine: CombatDecisionEngine | None = None,
+    search_mode: str | BeamSearchConfig | None = None,
+    beam_max_depth: int | None = None,
 ) -> EpisodeResult:
     """`client` must not already have an active instance (same precondition as
-    `AsyncTrainingApiClient.start_instance`)."""
+    `AsyncTrainingApiClient.start_instance`). `search_mode`/`beam_max_depth` select
+    the beam search config (see `decision.search_modes`) - pass `engine` instead for
+    full manual control (mutually exclusive with the other two, see `build_engine`).
+    """
+    resolved_engine = build_engine(
+        client, engine=engine, search_mode=search_mode, beam_max_depth=beam_max_depth
+    )
     instance_id = await client.start_instance(
         scenario.to_instance_config(), timeout_s=start_timeout_s
     )
-    runner = EpisodeRunner(client, engine)
+    runner = EpisodeRunner(client, resolved_engine)
     return await runner.run(
         instance_id, decision_timeout_s=decision_timeout_s, max_decisions=max_decisions
     )
@@ -61,6 +71,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--connect-timeout", type=float, default=5.0)
     parser.add_argument("--decision-timeout", type=float, default=30.0)
     parser.add_argument("--max-decisions", type=int, default=None)
+    parser.add_argument(
+        "--search-mode",
+        choices=sorted(SEARCH_MODES),
+        default=None,
+        help="beam search preset (see decision.search_modes); default: standard",
+    )
+    parser.add_argument(
+        "--beam-depth",
+        type=int,
+        default=None,
+        help="override just the beam search depth of --search-mode",
+    )
     parser.add_argument(
         "--scenario",
         type=Path,
@@ -81,6 +103,8 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
             scenario,
             decision_timeout_s=args.decision_timeout,
             max_decisions=args.max_decisions,
+            search_mode=args.search_mode,
+            beam_max_depth=args.beam_depth,
         )
 
 

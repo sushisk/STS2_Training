@@ -230,6 +230,38 @@ engine = CombatDecisionEngine(client, policy=MyPolicy(), value_fn=MyValue())
 | `max_batch_size` | 1回の`emulate_actions` requestに含める最大item数(既定64、RLの`BranchManager.max_branches`標準値に合わせている)。1 depthの候補数がこれを超える場合は同じdepthで複数requestに分割して送る |
 | `beam_searchable_action_types` | Beam Searchを許可する `action_type` の集合 |
 
+## 探索モード(`search_modes.py`)
+
+`BeamSearchConfig`を毎回手組みしなくても済むよう、いくつかの名前付きプリセットを
+`SEARCH_MODES`として用意しています。
+
+| モード名 | max_depth | beam_width | top_k_actions | 用途 |
+|---|---|---|---|---|
+| `shallow` | 1 | 4 | 3 | 先読み最小・データ収集のスループット優先 |
+| `standard`(既定) | 2 | 8 | 4 | `BeamSearchConfig`のデフォルトと同じ |
+| `deep` | 4 | 8 | 4 | 幅は変えずに先読みを深く(評価・デバッグ向け) |
+| `wide` | 2 | 16 | 6 | 深さは変えずbeam幅/候補数を広く |
+
+`resolve_search_mode(mode, *, max_depth=None)`が変換の窓口です。`mode`には
+モード名(str)/`BeamSearchConfig`インスタンス(手組み)/`None`(既定モード)の
+いずれも渡せます。`max_depth`を指定すると、選んだモードの`max_depth`だけを
+上書きします(`dataclasses.replace`、他のフィールドはプリセットのまま) -
+**これが「ビームサーチの深さをトップレベルから変更する」ための直接の窓口**です。
+
+```python
+from sts2_training.decision import resolve_search_mode, CombatDecisionEngine
+
+# モード名だけ
+engine = CombatDecisionEngine(client, beam_config=resolve_search_mode("deep"))
+
+# モードを選びつつ深さだけ上書き
+engine = CombatDecisionEngine(client, beam_config=resolve_search_mode("wide", max_depth=5))
+```
+
+`runner`パッケージの3つの入り口(`start_combat_from_state`等)は、`engine`を渡す
+代わりに`search_mode`/`beam_max_depth`をそのまま受け取れます(内部で
+`resolve_search_mode`を呼びます) - 詳細は`runner/how_to_use.md`。
+
 ## 後始末(Branch cleanup)
 
 `BeamSearchEngine.search()` は探索中に作成した非rootBranchを、成功・失敗・

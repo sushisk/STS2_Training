@@ -22,6 +22,8 @@ from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
+from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.decision.search_modes import SEARCH_MODES
 from sts2_training.runner.episode import EpisodeResult, EpisodeRunner
 from sts2_training.runner.scenario import RunSnapshot
 
@@ -42,7 +44,13 @@ async def start_run_from_state(
     decision_timeout_s: float = 30.0,
     max_decisions: int | None = None,
     engine: CombatDecisionEngine | None = None,
+    search_mode: str | BeamSearchConfig | None = None,
+    beam_max_depth: int | None = None,
 ) -> EpisodeResult:
+    """`search_mode`/`beam_max_depth` are accepted (not just `engine`) for signature
+    symmetry with the other two entry points, so callers/CLI scripts don't need to
+    special-case this one - unused until the guard below is lifted.
+    """
     raise RunSnapshotRestoreNotSupportedError(
         "STS2_RL's WholeRunInstance does not yet resume from RunSnapshot.snapshot_json "
         "(it always starts a fresh run) - see this module's docstring for the RL-side "
@@ -57,6 +65,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--connect-timeout", type=float, default=5.0)
     parser.add_argument("--decision-timeout", type=float, default=30.0)
     parser.add_argument("--max-decisions", type=int, default=None)
+    parser.add_argument(
+        "--search-mode",
+        choices=sorted(SEARCH_MODES),
+        default=None,
+        help="beam search preset (see decision.search_modes); default: standard",
+    )
+    parser.add_argument(
+        "--beam-depth",
+        type=int,
+        default=None,
+        help="override just the beam search depth of --search-mode",
+    )
     parser.add_argument(
         "--snapshot",
         type=Path,
@@ -77,6 +97,8 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
             snapshot,
             decision_timeout_s=args.decision_timeout,
             max_decisions=args.max_decisions,
+            search_mode=args.search_mode,
+            beam_max_depth=args.beam_depth,
         )
 
 
