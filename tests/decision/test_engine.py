@@ -120,7 +120,14 @@ class _FakeConnection:
 
 
 def _victory_dto() -> dict:
-    return {"outcome": "victory", "hp": 40, "maxHp": 50, "enemies": [], "legal_actions": []}
+    return {
+        "terminal": True,
+        "outcome": "victory",
+        "hp": 40,
+        "maxHp": 50,
+        "enemies": [],
+        "legal_actions": [],
+    }
 
 
 def _alive_dto() -> dict:
@@ -230,7 +237,7 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
         connection = _FakeConnection()
         connection.root_decision = {
             "decision_point_id": "d-root",
-            "masked_emulator_dto": {"run_terminal": True},
+            "masked_emulator_dto": {"run_terminal": True, "outcome": "victory"},
         }
         client = await self._client(connection)
         engine = CombatDecisionEngine(client)

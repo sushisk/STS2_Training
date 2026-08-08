@@ -148,7 +148,14 @@ def _root_decision(legal_actions: list[dict], *, decision_point_id: str = "d-roo
 
 
 def _victory_dto() -> dict:
-    return {"outcome": "victory", "hp": 40, "maxHp": 50, "enemies": [], "legal_actions": []}
+    return {
+        "terminal": True,
+        "outcome": "victory",
+        "hp": 40,
+        "maxHp": 50,
+        "enemies": [],
+        "legal_actions": [],
+    }
 
 
 def _alive_dto(legal_actions: list[dict] | None = None) -> dict:

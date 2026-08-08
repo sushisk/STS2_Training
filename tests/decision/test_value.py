@@ -34,6 +34,24 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertNotEqual(value_fn.evaluate(dto), DEFAULT_WEIGHTS["defeat_penalty"])
 
+    def test_combat_terminal_outcome_is_honored(self) -> None:
+        value_fn = HeuristicValueFunction()
+        victory = {"legal_actions": [], "terminal": True, "outcome": "victory", "hp": 4, "maxHp": 80}
+        defeat = {"legal_actions": [], "terminal": True, "outcome": "defeat", "hp": 0, "maxHp": 80}
+        healthy_nonterminal = {"hp": 80, "maxHp": 80, "enemies": []}
+
+        self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
+        self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
+        self.assertGreater(value_fn.evaluate(victory), value_fn.evaluate(healthy_nonterminal))
+
+    def test_whole_run_terminal_outcome_is_honored(self) -> None:
+        value_fn = HeuristicValueFunction()
+        victory = {"run_terminal": True, "outcome": "victory"}
+        defeat = {"run_terminal": True, "outcome": "defeat"}
+
+        self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
+        self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
+
     def test_higher_hp_ratio_scores_better(self) -> None:
         value_fn = HeuristicValueFunction()
         healthy = {"hp": 80, "maxHp": 100, "enemies": []}
