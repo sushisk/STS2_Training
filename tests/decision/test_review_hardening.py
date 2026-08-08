@@ -105,6 +105,43 @@ class _DecisionClient:
         }
 
 
+class _MissingDecisionPointClient(_DecisionClient):
+    async def get_decision(
+        self,
+        instance_id: str,
+        branch_id: str = "root",
+        *,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        decision = await super().get_decision(
+            instance_id, branch_id, timeout_s=timeout_s
+        )
+        decision.pop("decision_point_id")
+        return decision
+
+
+class _MalformedLegalActionClient(_DecisionClient):
+    async def get_decision(
+        self,
+        instance_id: str,
+        branch_id: str = "root",
+        *,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        decision = await super().get_decision(
+            instance_id, branch_id, timeout_s=timeout_s
+        )
+        decision["masked_emulator_dto"]["legal_actions"] = [
+            {
+                "action_id": "reward-a",
+                "action_type": "choice_reward_card",
+                "is_available": True,
+            },
+            42,
+        ]
+        return decision
+
+
 class _InvalidFallbackSelector:
     def select(self, legal_actions: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         return {"action_id": "not-legal"}
@@ -146,6 +183,18 @@ class CombatDecisionReviewTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "available legal action"):
+            await engine.decide("inst-001", timeout_s=1.0)
+
+    async def test_missing_decision_point_id_is_rejected_at_boundary(self) -> None:
+        engine = CombatDecisionEngine(_MissingDecisionPointClient())
+
+        with self.assertRaisesRegex(RuntimeError, "decision_point_id"):
+            await engine.decide("inst-001", timeout_s=1.0)
+
+    async def test_malformed_legal_action_is_rejected_at_boundary(self) -> None:
+        engine = CombatDecisionEngine(_MalformedLegalActionClient())
+
+        with self.assertRaisesRegex(RuntimeError, r"legal_actions\[1\]"):
             await engine.decide("inst-001", timeout_s=1.0)
 
     async def test_non_finite_and_boolean_timeouts_fail_before_api_call(self) -> None:
