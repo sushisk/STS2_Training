@@ -141,7 +141,14 @@ class SelectionAudit:
             )
             if root_committed:
                 self.clear()
-            self.remember(result)
+            remembered_result = dict(result)
+            # emulate_actions returns item results nested under the top-level response,
+            # so the item itself intentionally omits instance_id. Reattach the instance
+            # identity from the normalized request before caching the resulting Decision;
+            # otherwise the next-depth selection from this Branch loses its `received`
+            # observation in the audit log.
+            remembered_result.setdefault("instance_id", event_request.get("instance_id"))
+            self.remember(remembered_result)
 
 
 def _masked_dto(response: Mapping[str, Any] | None) -> Mapping[str, Any]:
