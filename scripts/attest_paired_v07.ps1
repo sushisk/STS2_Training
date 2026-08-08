@@ -86,6 +86,63 @@ function Assert-TrustedPullRequest {
     }
 }
 
+function Get-CurrentHeadWorkflowRun {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$HeadSha,
+        [Parameter(Mandatory = $true)][string]$WorkflowName
+    )
+    $deadline = (Get-Date).AddMinutes(2)
+    do {
+        $runs = Invoke-GhJson api "repos/$Repo/actions/runs?head_sha=$HeadSha&event=pull_request&per_page=100"
+        $matches = @(
+            $runs.workflow_runs |
+                Where-Object { [string]$_.name -eq $WorkflowName -and [string]$_.head_sha -eq $HeadSha } |
+                Sort-Object -Property created_at -Descending
+        )
+        if ($matches.Count -gt 0) {
+            return $matches[0]
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    throw "No pull_request workflow run named '$WorkflowName' found for $Repo@$HeadSha"
+}
+
+function Wait-WorkflowRunCompleted {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][int64]$RunId,
+        [Parameter(Mandatory = $true)][datetime]$Deadline
+    )
+    do {
+        $run = Invoke-GhJson api "repos/$Repo/actions/runs/$RunId"
+        if ([string]$run.status -eq 'completed') {
+            return $run
+        }
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $Deadline)
+    throw "Timed out waiting for GitHub Actions run $Repo#$RunId"
+}
+
+function Assert-PairGateGreen {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$HeadSha,
+        [Parameter(Mandatory = $true)][string]$WorkflowName
+    )
+    $run = Get-CurrentHeadWorkflowRun -Repo $Repo -HeadSha $HeadSha -WorkflowName $WorkflowName
+    $run = Wait-WorkflowRunCompleted -Repo $Repo -RunId ([int64]$run.id) -Deadline ((Get-Date).AddMinutes(5))
+    if ([string]$run.conclusion -ne 'success') {
+        Write-Host "Re-running $WorkflowName for $Repo@$HeadSha after publishing attestation..."
+        Invoke-Checked gh api --method POST "repos/$Repo/actions/runs/$($run.id)/rerun"
+        $run = Wait-WorkflowRunCompleted -Repo $Repo -RunId ([int64]$run.id) -Deadline ((Get-Date).AddMinutes(5))
+    }
+    if ([string]$run.conclusion -ne 'success') {
+        throw "$WorkflowName did not become green for $Repo@$HeadSha; conclusion=$($run.conclusion)"
+    }
+    Write-Host "Verified green GitHub check: $Repo / $WorkflowName / $HeadSha"
+}
+
 function Invoke-UncredentialedTestBody {
     param(
         [Parameter(Mandatory = $true)][string]$TrainingRoot,
@@ -200,3 +257,7 @@ foreach ($target in @(
 
 Write-Host "Real Emulator paired v0.7 integration passed for exact pair: $description"
 Write-Host "Published '$AttestationContext' success status as trusted issuer $TrustedStatusIssuer ($TrustedStatusIssuerId)."
+
+Assert-PairGateGreen -Repo $TrainingRepo -HeadSha $currentTrainingSha -WorkflowName 'paired-v07-exact-pair'
+Assert-PairGateGreen -Repo $RlRepo -HeadSha $currentRlSha -WorkflowName 'paired-v07-counterpart-gate'
+Write-Host 'Both exact-pair GitHub checks are green.'
