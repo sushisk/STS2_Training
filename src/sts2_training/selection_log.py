@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 SelectionEventLogger = Callable[[Mapping[str, Any]], None]
+SelectionIdentity = tuple[str, str]
 
 _LOG = logging.getLogger(__name__)
 _ROOM_END_BOUNDARIES = frozenset(
@@ -24,17 +25,31 @@ _ROOM_END_BOUNDARIES = frozenset(
 )
 
 
+def _selection_identity(
+    request: Mapping[str, Any],
+    source_branch_id: str,
+) -> SelectionIdentity | None:
+    request_id = request.get("request_id")
+    branch_id = request.get("branch_id")
+    logical_branch_id = (
+        branch_id if isinstance(branch_id, str) and branch_id else source_branch_id
+    )
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    if not isinstance(logical_branch_id, str) or not logical_branch_id:
+        return None
+    return request_id, logical_branch_id
+
+
 class SelectionAudit:
     """Keep the latest public Decision per Branch and emit one record per selection."""
 
     def __init__(self, logger: SelectionEventLogger | None) -> None:
         self._logger = logger
         self._decisions: dict[tuple[str, str], dict[str, Any]] = {}
-        # Exact replay only needs identity for the immediately current/previous wire
-        # request. The protocol is single-in-flight, so once a different request_id is
-        # observed the old request can never be replayed again. Keeping only the branch
-        # IDs for one request bounds this bookkeeping by the batch size instead of total
-        # speculative selections over the whole search.
+        # The protocol is single-in-flight, so replay identity is needed only for the
+        # current wire request. Keeping one request_id plus its Branch IDs bounds this
+        # state by batch size rather than total speculative selections.
         self._selection_request_id: str | None = None
         self._selection_branch_ids: set[str] = set()
 
@@ -61,6 +76,22 @@ class SelectionAudit:
             return
         self._decisions[(instance_id, branch_id)] = deepcopy(dict(response))
 
+    def _is_recovery(self, identity: SelectionIdentity | None) -> bool:
+        if identity is None:
+            return False
+
+        request_id, branch_id = identity
+        if request_id != self._selection_request_id:
+            self._selection_request_id = request_id
+            self._selection_branch_ids.clear()
+        return branch_id in self._selection_branch_ids
+
+    def _remember_selection(self, identity: SelectionIdentity | None) -> None:
+        if identity is None:
+            return
+        _, branch_id = identity
+        self._selection_branch_ids.add(branch_id)
+
     def record_action(
         self,
         request: Mapping[str, Any],
@@ -73,45 +104,28 @@ class SelectionAudit:
             return
 
         # Batch item audit records are normalized by the client, but keep this fallback
-        # here so SelectionAudit itself is robust to an item-shaped request created by an
-        # older v0.7 caller that omitted the operation field.
+        # so SelectionAudit also handles item-shaped v0.7 requests without an operation.
         event_request = dict(request)
         operation = event_request.get("operation")
         if not isinstance(operation, str) or not operation:
             operation = "emulate_actions"
             event_request["operation"] = operation
 
-        received = self._decisions.get((str(event_request["instance_id"]), source_branch_id))
+        received = self._decisions.get(
+            (str(event_request["instance_id"]), source_branch_id)
+        )
         if (
             received is not None
             and received.get("decision_point_id") != event_request["decision_point_id"]
         ):
             received = None
 
-        request_id = event_request.get("request_id")
-        branch_id = event_request.get("branch_id")
-        logical_branch_id = (
-            branch_id if isinstance(branch_id, str) and branch_id else source_branch_id
-        )
-        has_selection_identity = (
-            isinstance(request_id, str)
-            and bool(request_id)
-            and isinstance(logical_branch_id, str)
-            and bool(logical_branch_id)
-        )
-        if has_selection_identity and request_id != self._selection_request_id:
-            self._selection_request_id = request_id
-            self._selection_branch_ids.clear()
-        is_retry_of_selection = (
-            has_selection_identity and logical_branch_id in self._selection_branch_ids
-        )
+        identity = _selection_identity(event_request, source_branch_id)
+        is_retry_of_selection = self._is_recovery(identity)
 
-        # A completion-uncertain action is recorded on its first attempt so external
-        # cancellation and transport failures remain auditable. Exact replay is transport
-        # recovery for the same logical selection. For emulate_actions the wire request_id
-        # is shared by the whole batch, so branch_id keeps sibling items distinct. Because
-        # the wire protocol permits replay only for the current request, identities from
-        # older request_ids are discarded as soon as a new request is observed.
+        # Completion-uncertain first attempts remain auditable. Exact replay is recorded
+        # as recovery for the same logical selection; Branch ID distinguishes siblings
+        # that share one emulate_actions request_id.
         event: dict[str, Any] = {
             "event": "selection_recovery" if is_retry_of_selection else "selection",
             "received": received,
@@ -131,8 +145,8 @@ class SelectionAudit:
         except Exception:  # noqa: BLE001 - audit failure must not alter gameplay
             _LOG.exception("selection logger failed")
 
-        if not is_retry_of_selection and has_selection_identity:
-            self._selection_branch_ids.add(logical_branch_id)
+        if not is_retry_of_selection:
+            self._remember_selection(identity)
 
         successful = (
             error is None
@@ -147,11 +161,8 @@ class SelectionAudit:
             if root_committed:
                 self.clear()
             remembered_result = dict(result)
-            # emulate_actions returns item results nested under the top-level response,
-            # so the item itself intentionally omits instance_id. Reattach the instance
-            # identity from the normalized request before caching the resulting Decision;
-            # otherwise the next-depth selection from this Branch loses its `received`
-            # observation in the audit log.
+            # emulate_actions item results omit instance_id; restore it from the
+            # normalized request so next-depth audit lookup retains its observation.
             remembered_result.setdefault("instance_id", event_request.get("instance_id"))
             self.remember(remembered_result)
 
