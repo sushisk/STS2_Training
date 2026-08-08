@@ -24,10 +24,6 @@ from typing import Any
 
 JsonObject = Mapping[str, Any]
 
-# victory_bonus/defeat_penalty must dominate every feature-based score (any win
-# beats any non-terminal state, any loss is worse than any non-terminal state)
-# so beam search never prefers a "healthier-looking" loss over a win, or a
-# needlessly risky non-terminal state over a clean win.
 DEFAULT_WEIGHTS: dict[str, float] = {
     "player_hp_ratio": 40.0,
     "player_block": 0.5,
@@ -60,7 +56,7 @@ class ValueModel(ABC):
 class HeuristicValueFunction(ValueModel):
     def __init__(self, weights: Mapping[str, float] | None = None) -> None:
         self._weights = dict(DEFAULT_WEIGHTS)
-        if weights:
+        if weights is not None:
             self._weights.update(weights)
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
@@ -70,18 +66,21 @@ class HeuristicValueFunction(ValueModel):
         if outcome == "defeat":
             return self._weights["defeat_penalty"]
         features = self._extract_features(masked_emulator_dto)
-        return sum(self._weights.get(name, 0.0) * value for name, value in features.items())
+        return sum(self._weights.get(name, 0.0) * feature for name, feature in features.items())
 
     def _extract_features(self, dto: Mapping[str, Any]) -> dict[str, float]:
         hp = _num(dto.get("hp"))
         max_hp = max(1.0, _num(dto.get("maxHp"), default=1.0))
         block = max(0.0, _num(dto.get("block")))
 
-        enemies = [
-            e for e in (dto.get("enemies") or []) if isinstance(e, Mapping) and e.get("isAlive", True)
-        ]
-        enemy_hp = sum(max(0.0, _num(e.get("hp"))) for e in enemies)
-        enemy_max_hp = sum(max(1.0, _num(e.get("maxHp"), default=1.0)) for e in enemies) or 1.0
+        all_enemies = [enemy for enemy in (dto.get("enemies") or []) if isinstance(enemy, Mapping)]
+        enemies = [enemy for enemy in all_enemies if enemy.get("isAlive", True)]
+        # Keep dead enemies in the denominator so killing a nearly-dead enemy cannot
+        # make aggregate enemy_hp_ratio look worse merely by shrinking max HP.
+        enemy_hp = sum(max(0.0, _num(enemy.get("hp"))) for enemy in all_enemies)
+        enemy_max_hp = (
+            sum(max(1.0, _num(enemy.get("maxHp"), default=1.0)) for enemy in all_enemies) or 1.0
+        )
 
         incoming_before_block = 0.0
         for enemy in enemies:
@@ -118,7 +117,7 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
     if outcome in ("victory", "defeat"):
         return outcome
     transition = dto.get("transition")
-    if isinstance(transition, Mapping):
+    if isinstance(transition, Mapping) and transition.get("kind") == "combat_completed":
         victory = transition.get("victory")
         if victory is True:
             return "victory"
