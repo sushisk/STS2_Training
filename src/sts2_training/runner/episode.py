@@ -22,12 +22,42 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sts2_training.decision import CombatDecisionEngine
+from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.decision.search_modes import resolve_search_mode
 
 JsonObject = dict[str, Any]
 
 _LOG = logging.getLogger(__name__)
 
-__all__ = ["EpisodeLimitExceeded", "EpisodeResult", "EpisodeRunner"]
+__all__ = ["EpisodeLimitExceeded", "EpisodeResult", "EpisodeRunner", "build_engine"]
+
+
+def build_engine(
+    client: Any,
+    *,
+    engine: CombatDecisionEngine | None = None,
+    search_mode: str | BeamSearchConfig | None = None,
+    beam_max_depth: int | None = None,
+) -> CombatDecisionEngine:
+    """Resolves the engine each of the three top-level entry points should use.
+
+    - `engine` given: used as-is. Combining it with `search_mode`/`beam_max_depth` is
+      rejected (`ValueError`) rather than silently ignoring one of them - an explicit
+      engine already carries its own `BeamSearchConfig`.
+    - otherwise: a fresh `CombatDecisionEngine` built from `search_mode`/
+      `beam_max_depth` (see `decision.search_modes.resolve_search_mode` for how those
+      two combine - `beam_max_depth` overrides just the depth of whichever mode was
+      chosen).
+    """
+    if engine is not None:
+        if search_mode is not None or beam_max_depth is not None:
+            raise ValueError(
+                "pass either `engine` or `search_mode`/`beam_max_depth`, not both - "
+                "an explicit engine already has its own BeamSearchConfig"
+            )
+        return engine
+    beam_config = resolve_search_mode(search_mode, max_depth=beam_max_depth)
+    return CombatDecisionEngine(client, beam_config=beam_config)
 
 
 class EpisodeLimitExceeded(RuntimeError):

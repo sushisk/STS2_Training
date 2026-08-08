@@ -96,6 +96,39 @@ python -m sts2_training.runner.start_combat_from_state \
 `start_new_run`は`seed`省略時にランダムなseedを自動生成します(呼ぶたびに違うrunに
 なる、通常プレイと同じ挙動)。特定seedを固定したい場合のみ`--seed`を指定してください。
 
+## 探索モードの選択(`search_mode` / `beam_max_depth`)
+
+3つの入り口すべてが`search_mode`(プリセット名)と`beam_max_depth`(深さだけの上書き)
+を受け取れます。内部で`decision.search_modes.resolve_search_mode`を呼び、
+`CombatDecisionEngine`に渡す`BeamSearchConfig`を組み立てます(プリセット一覧は
+`decision/how_to_use.md`参照)。
+
+```python
+result = await start_combat_from_state(
+    client, scenario, decision_timeout_s=30.0,
+    search_mode="deep",       # プリセットを選ぶ
+    beam_max_depth=5,         # そのプリセットのmax_depthだけ上書き(省略可)
+)
+```
+
+```sh
+python -m sts2_training.runner.start_new_run \
+    --host 127.0.0.1 --port 8765 --character-id IRONCLAD \
+    --search-mode deep --beam-depth 5
+```
+
+**完全に手組みしたい場合**は`engine`引数(既に構築済みの`CombatDecisionEngine`)を
+渡してください。`engine`と`search_mode`/`beam_max_depth`を同時に渡すとエラーに
+なります(`episode.build_engine`が検証 - どちらが実際に効くのか曖昧なまま黙って
+片方を無視することを避けるため)。
+
+```python
+from sts2_training.decision import CombatDecisionEngine, resolve_search_mode
+
+my_engine = CombatDecisionEngine(client, beam_config=resolve_search_mode("wide", max_depth=6))
+result = await start_combat_from_state(client, scenario, engine=my_engine)
+```
+
 ## `start_run_from_state`の既知の制約(現状未対応)
 
 STS2_RLの`API/instance_whole_run.py`の`WholeRunInstance`は、`instance_config`から

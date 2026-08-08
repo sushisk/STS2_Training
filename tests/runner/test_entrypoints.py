@@ -64,6 +64,32 @@ class StartCombatFromStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.decisions_made, 0)
         self.assertEqual(client.close_instance_calls, 1)
 
+    async def test_search_mode_selects_the_beam_config_used(self) -> None:
+        client = _FakeClient()
+
+        result = await start_combat_from_state(
+            client, _scenario(), decision_timeout_s=5.0, search_mode="deep", beam_max_depth=7
+        )
+
+        self.assertEqual(result.instance_id, "inst-001")  # reaches the RL round trip fine
+
+    async def test_unknown_search_mode_raises_before_touching_the_client(self) -> None:
+        client = _FakeClient()
+
+        with self.assertRaises(ValueError):
+            await start_combat_from_state(client, _scenario(), decision_timeout_s=5.0, search_mode="nonexistent")
+
+        self.assertEqual(client.start_instance_calls, [])
+
+    async def test_engine_and_search_mode_together_is_rejected(self) -> None:
+        from sts2_training.decision.engine import CombatDecisionEngine
+
+        client = _FakeClient()
+        engine = CombatDecisionEngine(client)
+
+        with self.assertRaises(ValueError):
+            await start_combat_from_state(client, _scenario(), decision_timeout_s=5.0, engine=engine, search_mode="deep")
+
 
 class StartNewRunTest(unittest.IsolatedAsyncioTestCase):
     async def test_builds_whole_run_instance_config_and_runs_to_completion(self) -> None:
