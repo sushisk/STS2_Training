@@ -1,30 +1,20 @@
 """`CombatDecisionEngine`: get_decision -> (beam search | heuristic fallback)
 -> commit_action, over one `AsyncTrainingApiClient`.
 
-Beam search is only attempted for ordinary in-combat decisions
-(`action_type` drawn from `card`/`potion`/`system` - see
-`BeamSearchConfig.beam_searchable_action_types`). Every other decision
-(choice_card, map selection, event/shop/rest choices, ...) skips straight to
-the heuristic fallback: RNG-hypothesis branching (`emulate_action`/
-`emulate_actions`) is only meaningfully supported at a Combat decision
-boundary today - RL rejects it at every other boundary with
-`fault_kind="rng_hypothesis_unsupported_at_boundary"` (see STS2_RL's
-`instance_whole_run.py`) - so beam search must never even attempt it there.
-`BeamSearchEngine.search` also re-checks this itself, so it is never unsafe to
-call directly, but this early check saves a wasted round trip.
+Beam search is only useful for ordinary in-combat decisions. The search engine
+checks every explored boundary against `BeamSearchConfig.beam_searchable_action_types`
+and returns a no-candidate result when branching is unsupported, at which point
+this engine falls back to `HeuristicCombatSelector`.
 
-A `TransportError` (including `ServerEpochChangedError`) from beam search is
-never swallowed - it means the client's session state may now require
-`retry_request()` or is permanently invalid, and only the caller (which owns
-the client) can decide how to recover, exactly as for any other client
-operation. Everything else from beam search (a rejected batch, a bug in a
-custom `PolicyModel`/`ValueModel`, ...) is treated as non-fatal: this decision
-falls back to `HeuristicCombatSelector` instead of stalling the loop.
+Expected search failures such as a rejected `emulate_actions` batch are encoded
+in `BeamSearchResult` and fall back cleanly. Unexpected exceptions from custom
+`PolicyModel`/`ValueModel` implementations are not swallowed: treating a model
+bug as a valid heuristic decision would hide correctness problems and make bad
+model deployments difficult to detect.
 """
 
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -35,8 +25,6 @@ from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngin
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
 from sts2_training.selection.heuristic_selector import HeuristicCombatSelector, NoAvailableActionError
-
-_LOG = logging.getLogger(__name__)
 
 __all__ = ["CombatDecisionEngine", "DecisionOutcome", "NoAvailableActionError"]
 
@@ -96,7 +84,10 @@ class CombatDecisionEngine:
             only_action_id = legal_actions[0].get("action_id")
             return DecisionOutcome(decision, only_action_id, "forced_single_action", None)
 
-        result = await self._try_beam_search(instance_id, decision, deadline)
+        result: BeamSearchResult | None = None
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            result = await self._beam.search(instance_id, decision, timeout_s=remaining)
         if result is not None and result.best_root_action_id is not None:
             return DecisionOutcome(decision, result.best_root_action_id, "beam_search", result)
 
@@ -110,24 +101,23 @@ class CombatDecisionEngine:
         branch_id: str = ROOT_BRANCH_ID,
         timeout_s: float,
     ) -> JsonObject:
-        outcome = await self.decide(instance_id, branch_id=branch_id, timeout_s=timeout_s)
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        deadline = time.monotonic() + timeout_s
+        outcome = await self.decide(
+            instance_id,
+            branch_id=branch_id,
+            timeout_s=deadline - time.monotonic(),
+        )
         if outcome.chosen_action_id is None:
             raise NoAvailableActionError("no available legal_actions to select from")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TransportError("decision timeout elapsed before commit_action")
         return await self._client.commit_action(
             instance_id,
             outcome.decision["decision_point_id"],
             outcome.chosen_action_id,
-            timeout_s=timeout_s,
+            timeout_s=remaining,
         )
-
-    async def _try_beam_search(
-        self, instance_id: str, decision: JsonObject, deadline: float
-    ) -> BeamSearchResult | None:
-        remaining = max(0.05, deadline - time.monotonic())
-        try:
-            return await self._beam.search(instance_id, decision, timeout_s=remaining)
-        except TransportError:
-            raise
-        except Exception:  # noqa: BLE001 - never let a search/plugin bug stall the decision loop
-            _LOG.exception("beam search failed for instance_id=%s; falling back to heuristic", instance_id)
-            return None
