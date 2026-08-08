@@ -27,7 +27,7 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 `shop_choice`/`rest_choice`/`reward_select`境界でも問題なく動きます)、`runner`パッケージ
 はこの上に新しい判断ロジックを一切追加していません。ループとライフサイクル管理のみです。
 
-## 4つのモジュール
+## モジュール構成
 
 ### `scenario.py` — `instance_config`の組み立て
 
@@ -45,28 +45,26 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 フィールド(pending_choice、カード個別のアップグレード情報等)は`extra`引数でそのまま
 マージできます。
 
-### `episode.py` — 共有の実行ループ(`EpisodeRunner`)
+### `episode.py` — 共有の実行ループ
 
-`run(instance_id, decision_timeout_s=...)`が本体です。`legal_actions`が空になる
-(Combat勝敗確定、またはWhole Runの`run_terminal`)まで`decide()`→`commit_action()`を
-繰り返し、成功・失敗・タイムアウトいずれの場合も`finally`で`close_instance`を
-ベストエフォートで呼びます(`BeamSearchEngine._cleanup`と同じ設計思想 - `client`に
-`pending_retry`/`session_invalid`が残っている場合はスキップ)。
-
-戻り値`EpisodeResult`には`decisions_made`(実際にcommitした回数)、`final_dto`(最後に
-観測した`masked_emulator_dto` - 勝敗は`final_dto["outcome"]`を直接読んでください、
-STS2_RLの`agent/expose-terminal-outcome`以降はCombat/Whole Run双方で信頼できます)、
-`decision_sources`(`beam_search`/`heuristic_fallback`/`forced_single_action`/`none`
-それぞれが何回選ばれたかのカウント - beam searchがどれだけ機能しているかの簡易的な
-健全性指標)が入っています。
-
-暴走防止用に`max_decisions`を指定でき、超過すると`EpisodeLimitExceeded`が送出されます
-(それでも`close_instance`は呼ばれます)。
+- `EpisodeRunner.run(instance_id, decision_timeout_s=...)`: `legal_actions`が空になる
+  (Combat勝敗確定、またはWhole Runの`run_terminal`)まで`decide_and_commit()`を繰り返し、
+  成功・失敗・タイムアウトいずれの場合も`finally`で`close_instance`をベストエフォートで
+  呼びます(`client`に`pending_retry`/`session_invalid`が残っている場合はスキップ)。
+  戻り値`EpisodeResult`の`final_dto`が最後に観測した`masked_emulator_dto`です - 勝敗は
+  `final_dto["outcome"]`を直接読んでください。暴走防止用に`max_decisions`を指定でき、
+  超過すると`EpisodeLimitExceeded`が送出されます(それでも`close_instance`は呼ばれます)。
+- `build_engine(client, *, engine=None, search_mode=None, beam_max_depth=None)`:
+  `search_mode`/`beam_max_depth`から`CombatDecisionEngine`を組み立てる小さなヘルパー。
+- `start_and_run(client, instance_config, ...)`: `build_engine` + `start_instance` +
+  `EpisodeRunner.run`をまとめた本体。3つの`start_*`入り口はそれぞれの`instance_config`
+  を組み立ててこれに委譲するだけです。
 
 ### `start_combat_from_state.py` / `start_run_from_state.py` / `start_new_run.py`
 
-各モジュールは「対応する`instance_config`を組み立てて`start_instance`し、
-`EpisodeRunner`に渡す」という薄い管理役と、それを呼び出すCLIの両方を持っています。
+各モジュールは「対応する`instance_config`を組み立てて`start_and_run`に渡す」という
+薄い管理役と、それを呼び出すCLIの両方を持っています。CLIの共通部分(`--host`等の
+引数・結果のJSON出力)は`_cli.py`に集約されています。
 
 ```python
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection

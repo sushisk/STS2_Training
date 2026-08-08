@@ -13,18 +13,19 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.search_modes import resolve_search_mode
+from sts2_training.selection.heuristic_selector import NoAvailableActionError
 
 JsonObject = dict[str, Any]
 
 _LOG = logging.getLogger(__name__)
 
-__all__ = ["EpisodeLimitExceeded", "EpisodeResult", "EpisodeRunner", "build_engine"]
+__all__ = ["EpisodeLimitExceeded", "EpisodeResult", "EpisodeRunner", "build_engine", "start_and_run"]
 
 
 def build_engine(
@@ -59,19 +60,15 @@ class EpisodeLimitExceeded(RuntimeError):
 class EpisodeResult:
     """What actually happened when an instance was driven to completion.
 
-    `final_dto` is the raw `masked_emulator_dto` from the last response seen, even if
-    that's the very first one (an instance already terminal at the start of `run()`).
-    Not collapsed into a guessed `"victory"/"defeat"` enum - read `final_dto["outcome"]`
-    for that.
+    `final_dto` is the raw `masked_emulator_dto` from the last response seen - not
+    collapsed into a guessed `"victory"/"defeat"` enum, read `final_dto["outcome"]`
+    for that. `{}` if the instance was already terminal before the first decision.
     """
 
     instance_id: str
     decisions_made: int
     final_dto: JsonObject
     elapsed_s: float
-    # Count of DecisionOutcome.source values seen - a cheap signal for how often beam
-    # search actually won out versus falling back.
-    decision_sources: dict[str, int] = field(default_factory=dict)
 
 
 class EpisodeRunner:
@@ -92,34 +89,22 @@ class EpisodeRunner:
         max_decisions: int | None = None,
         close_timeout_s: float = 10.0,
     ) -> EpisodeResult:
-        """Repeatedly decide+commit until `legal_actions` is empty (Combat
+        """Repeatedly `decide_and_commit` until `legal_actions` is empty (Combat
         victory/defeat, or Whole Run `run_terminal`), then best-effort
-        `close_instance` regardless of how the loop ended. Inlines
-        `decide()`+`commit_action()` (what `decide_and_commit()` does) just to
-        capture `DecisionOutcome.source` for `decision_sources` along the way.
+        `close_instance` regardless of how the loop ended.
         """
         t_start = time.monotonic()
         decisions_made = 0
-        decision_sources: dict[str, int] = {}
         final_dto: JsonObject = {}
 
         try:
             while True:
-                outcome = await self._engine.decide(instance_id, timeout_s=decision_timeout_s)
-                decision_sources[outcome.source] = decision_sources.get(outcome.source, 0) + 1
-                if outcome.chosen_action_id is None:
-                    # Already terminal before this decide() - nothing to commit, but
-                    # still report the dto decide() fetched rather than leaving
-                    # final_dto at its {} default.
-                    final_dto = outcome.decision.get("masked_emulator_dto") or {}
-                    break
-
-                response = await self._client.commit_action(
-                    instance_id,
-                    outcome.decision["decision_point_id"],
-                    outcome.chosen_action_id,
-                    timeout_s=decision_timeout_s,
-                )
+                try:
+                    response = await self._engine.decide_and_commit(
+                        instance_id, timeout_s=decision_timeout_s
+                    )
+                except NoAvailableActionError:
+                    break  # already terminal before this decision - nothing to commit
                 decisions_made += 1
                 final_dto = response.get("masked_emulator_dto") or {}
 
@@ -138,7 +123,6 @@ class EpisodeRunner:
             decisions_made=decisions_made,
             final_dto=final_dto,
             elapsed_s=time.monotonic() - t_start,
-            decision_sources=decision_sources,
         )
 
     async def _close_best_effort(self, instance_id: str, timeout_s: float) -> None:
@@ -155,3 +139,27 @@ class EpisodeRunner:
             await self._client.close_instance(instance_id, timeout_s=timeout_s)
         except Exception:  # noqa: BLE001 - best-effort cleanup must never mask the episode result
             _LOG.exception("close_instance failed for instance_id=%s", instance_id)
+
+
+async def start_and_run(
+    client: Any,
+    instance_config: JsonObject,
+    *,
+    start_timeout_s: float = 30.0,
+    decision_timeout_s: float = 30.0,
+    max_decisions: int | None = None,
+    engine: CombatDecisionEngine | None = None,
+    search_mode: str | BeamSearchConfig | None = None,
+    beam_max_depth: int | None = None,
+) -> EpisodeResult:
+    """`build_engine` + `start_instance` + `EpisodeRunner.run` - the shared body
+    behind every `start_*` entry point in this package; each just supplies its own
+    `instance_config` (see `scenario.py`).
+    """
+    resolved_engine = build_engine(
+        client, engine=engine, search_mode=search_mode, beam_max_depth=beam_max_depth
+    )
+    instance_id = await client.start_instance(instance_config, timeout_s=start_timeout_s)
+    return await EpisodeRunner(client, resolved_engine).run(
+        instance_id, decision_timeout_s=decision_timeout_s, max_decisions=max_decisions
+    )

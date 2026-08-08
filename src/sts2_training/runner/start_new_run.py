@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import random
 import sys
 from typing import Any
@@ -23,8 +22,8 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
-from sts2_training.decision.search_modes import SEARCH_MODES
-from sts2_training.runner.episode import EpisodeResult, EpisodeRunner, build_engine
+from sts2_training.runner._cli import add_common_arguments, print_result
+from sts2_training.runner.episode import EpisodeResult, start_and_run
 from sts2_training.runner.scenario import NewRunConfig
 
 __all__ = ["start_new_run"]
@@ -51,41 +50,25 @@ async def start_new_run(
     """
     if seed is None:
         seed = (rng or random).randint(1, 2**31 - 1)
-    resolved_engine = build_engine(
-        client, engine=engine, search_mode=search_mode, beam_max_depth=beam_max_depth
-    )
     config = NewRunConfig(character_id=character_id, ascension=ascension, seed=seed)
-    instance_id = await client.start_instance(
-        config.to_instance_config(), timeout_s=start_timeout_s
-    )
-    runner = EpisodeRunner(client, resolved_engine)
-    return await runner.run(
-        instance_id, decision_timeout_s=decision_timeout_s, max_decisions=max_decisions
+    return await start_and_run(
+        client,
+        config.to_instance_config(),
+        start_timeout_s=start_timeout_s,
+        decision_timeout_s=decision_timeout_s,
+        max_decisions=max_decisions,
+        engine=engine,
+        search_mode=search_mode,
+        beam_max_depth=beam_max_depth,
     )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--connect-timeout", type=float, default=5.0)
-    parser.add_argument("--decision-timeout", type=float, default=30.0)
-    parser.add_argument("--max-decisions", type=int, default=None)
+    add_common_arguments(parser)
     parser.add_argument("--character-id", required=True)
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--seed", type=int, default=None, help="omit for a fresh random seed each run")
-    parser.add_argument(
-        "--search-mode",
-        choices=sorted(SEARCH_MODES),
-        default=None,
-        help="beam search preset (see decision.search_modes); default: standard",
-    )
-    parser.add_argument(
-        "--beam-depth",
-        type=int,
-        default=None,
-        help="override just the beam search depth of --search-mode",
-    )
     return parser.parse_args(argv)
 
 
@@ -105,20 +88,7 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    result = asyncio.run(_run(_parse_args(argv)))
-    print(
-        json.dumps(
-            {
-                "instance_id": result.instance_id,
-                "decisions_made": result.decisions_made,
-                "elapsed_s": result.elapsed_s,
-                "decision_sources": result.decision_sources,
-                "final_dto": result.final_dto,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-    )
+    print_result(asyncio.run(_run(_parse_args(argv))))
     return 0
 
 

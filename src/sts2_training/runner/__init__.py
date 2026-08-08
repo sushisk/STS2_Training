@@ -13,7 +13,13 @@ All three accept `search_mode`/`beam_max_depth` to pick the beam config (see
 """
 
 from sts2_training.decision.search_modes import DEFAULT_SEARCH_MODE, SEARCH_MODES, resolve_search_mode
-from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeResult, EpisodeRunner, build_engine
+from sts2_training.runner.episode import (
+    EpisodeLimitExceeded,
+    EpisodeResult,
+    EpisodeRunner,
+    build_engine,
+    start_and_run,
+)
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario, NewRunConfig, RunSnapshot
 from sts2_training.runner.start_combat_from_state import start_combat_from_state
 from sts2_training.runner.start_new_run import start_new_run
@@ -35,6 +41,7 @@ __all__ = [
     "SEARCH_MODES",
     "build_engine",
     "resolve_search_mode",
+    "start_and_run",
     "start_combat_from_state",
     "start_new_run",
     "start_run_from_state",

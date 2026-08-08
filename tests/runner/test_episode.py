@@ -10,7 +10,7 @@ import unittest
 from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.search_modes import SEARCH_MODES
-from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner, build_engine
+from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner, build_engine, start_and_run
 
 _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
 
@@ -107,13 +107,12 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         result = await runner.run("inst-001", decision_timeout_s=5.0)
 
         self.assertEqual(result.decisions_made, 2)
-        self.assertEqual(result.decision_sources, {"forced_single_action": 2})
         self.assertEqual(result.final_dto["outcome"], "victory")
         self.assertEqual(result.final_dto["legal_actions"], [])
         self.assertEqual(connection.close_instance_calls, 1)
         self.assertEqual(connection.close_instance_instance_ids, ["inst-001"])
 
-    async def test_already_terminal_at_start_makes_no_commit_but_reports_final_dto(self) -> None:
+    async def test_already_terminal_at_start_makes_no_commit(self) -> None:
         decisions = [_decision("d0", legal_actions=[], outcome="defeat")]
         client, connection = await self._client_and_connection(decisions)
         runner = EpisodeRunner(client)
@@ -121,8 +120,7 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         result = await runner.run("inst-001", decision_timeout_s=5.0)
 
         self.assertEqual(result.decisions_made, 0)
-        self.assertEqual(result.decision_sources, {"none": 1})
-        self.assertEqual(result.final_dto["outcome"], "defeat")
+        self.assertEqual(result.final_dto, {})
         self.assertEqual(connection.close_instance_calls, 1)
 
     async def test_max_decisions_raises_but_still_closes_instance(self) -> None:
@@ -190,6 +188,27 @@ class BuildEngineTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             build_engine(client=object(), engine=given, beam_max_depth=3)
+
+
+class StartAndRunTest(unittest.IsolatedAsyncioTestCase):
+    """Unlike `EpisodeRunnerTest`, starts from a fresh (not yet started) client -
+    `start_and_run` calls `start_instance` itself, which is the one extra step it
+    adds on top of `EpisodeRunner.run`.
+    """
+
+    async def test_starts_instance_and_runs_to_completion(self) -> None:
+        decisions = [_decision("d0"), _decision("d1", legal_actions=[], outcome="victory")]
+        connection = _FakeConnection(decisions)
+        client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+
+        result = await start_and_run(
+            client, {"instance_type": "combat"}, decision_timeout_s=5.0, search_mode="shallow"
+        )
+
+        self.assertEqual(result.instance_id, "inst-001")
+        self.assertEqual(result.decisions_made, 1)
+        self.assertEqual(result.final_dto["outcome"], "victory")
+        self.assertEqual(connection.close_instance_calls, 1)
 
 
 if __name__ == "__main__":
