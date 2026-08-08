@@ -101,7 +101,7 @@ class PriorHeuristicPolicy(PolicyModel):
         *,
         top_k: int,
     ) -> list[ActionCandidate]:
-        if top_k <= 0:
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
             raise ValueError("top_k must be a positive integer")
         actions = available_actions(legal_actions)
         if not actions:
