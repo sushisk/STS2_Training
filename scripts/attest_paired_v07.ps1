@@ -10,10 +10,6 @@ $TrainingRepo = 'sushisk/STS2_Training'
 $TrainingPr = 19
 $RlRepo = 'sushisk/STS2_RL'
 $RlPr = 8
-$AttestationContext = 'paired-v07-exact-pair'
-$TrustedStatusIssuer = 'sushisk'
-$TrustedStatusIssuerId = 136587185
-$TrustedAssociations = @('OWNER', 'MEMBER', 'COLLABORATOR')
 
 function Invoke-Checked {
     param(
@@ -36,13 +32,16 @@ function Invoke-GhJson {
 }
 
 function Assert-CleanGitTree {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
     $dirty = & git -C $Path status --porcelain
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to inspect $Label git tree at $Path"
     }
     if ($dirty) {
-        throw "$Label working tree must be clean for exact-pair validation"
+        throw "$Label working tree must be clean for paired validation"
     }
 }
 
@@ -57,20 +56,11 @@ function Assert-ExactLocalHead {
         throw "Unable to inspect $Label HEAD at $Path"
     }
     if ($actualSha -ne $ExpectedSha) {
-        throw "$Label checkout HEAD changed during exact-pair validation: expected=$ExpectedSha actual=$actualSha"
+        throw "$Label checkout HEAD changed during paired validation: expected=$ExpectedSha actual=$actualSha"
     }
 }
 
-function Assert-TrustedStatusIssuer {
-    $viewer = Invoke-GhJson api user
-    $login = [string]$viewer.login
-    $id = [int64]$viewer.id
-    if ($login -ne $TrustedStatusIssuer -or $id -ne $TrustedStatusIssuerId) {
-        throw "GitHub status issuer must be $TrustedStatusIssuer ($TrustedStatusIssuerId), got $login ($id)"
-    }
-}
-
-function Assert-TrustedPullRequest {
+function Assert-SameRepoHead {
     param(
         [Parameter(Mandatory = $true)]$PrInfo,
         [Parameter(Mandatory = $true)][string]$ExpectedRepo,
@@ -78,72 +68,11 @@ function Assert-TrustedPullRequest {
     )
     $headRepo = [string]$PrInfo.head.repo.full_name
     if ($headRepo -ne $ExpectedRepo) {
-        throw "$Label PR head must come from trusted repository $ExpectedRepo, got $headRepo"
-    }
-    $association = [string]$PrInfo.author_association
-    if ($TrustedAssociations -notcontains $association) {
-        throw "$Label PR author association $association is not trusted for execution on the Emulator host"
+        throw "$Label PR head must come from $ExpectedRepo for this manual Emulator validator, got $headRepo"
     }
 }
 
-function Get-CurrentHeadWorkflowRun {
-    param(
-        [Parameter(Mandatory = $true)][string]$Repo,
-        [Parameter(Mandatory = $true)][string]$HeadSha,
-        [Parameter(Mandatory = $true)][string]$WorkflowName
-    )
-    $deadline = (Get-Date).AddMinutes(2)
-    do {
-        $runs = Invoke-GhJson api "repos/$Repo/actions/runs?head_sha=$HeadSha&event=pull_request&per_page=100"
-        $matches = @(
-            $runs.workflow_runs |
-                Where-Object { [string]$_.name -eq $WorkflowName -and [string]$_.head_sha -eq $HeadSha } |
-                Sort-Object -Property created_at -Descending
-        )
-        if ($matches.Count -gt 0) {
-            return $matches[0]
-        }
-        Start-Sleep -Seconds 2
-    } while ((Get-Date) -lt $deadline)
-    throw "No pull_request workflow run named '$WorkflowName' found for $Repo@$HeadSha"
-}
-
-function Wait-WorkflowRunCompleted {
-    param(
-        [Parameter(Mandatory = $true)][string]$Repo,
-        [Parameter(Mandatory = $true)][int64]$RunId,
-        [Parameter(Mandatory = $true)][datetime]$Deadline
-    )
-    do {
-        $run = Invoke-GhJson api "repos/$Repo/actions/runs/$RunId"
-        if ([string]$run.status -eq 'completed') {
-            return $run
-        }
-        Start-Sleep -Seconds 3
-    } while ((Get-Date) -lt $Deadline)
-    throw "Timed out waiting for GitHub Actions run $Repo#$RunId"
-}
-
-function Assert-PairGateGreen {
-    param(
-        [Parameter(Mandatory = $true)][string]$Repo,
-        [Parameter(Mandatory = $true)][string]$HeadSha,
-        [Parameter(Mandatory = $true)][string]$WorkflowName
-    )
-    $run = Get-CurrentHeadWorkflowRun -Repo $Repo -HeadSha $HeadSha -WorkflowName $WorkflowName
-    $run = Wait-WorkflowRunCompleted -Repo $Repo -RunId ([int64]$run.id) -Deadline ((Get-Date).AddMinutes(5))
-    if ([string]$run.conclusion -ne 'success') {
-        Write-Host "Re-running $WorkflowName for $Repo@$HeadSha after publishing attestation..."
-        Invoke-Checked gh api --method POST "repos/$Repo/actions/runs/$($run.id)/rerun"
-        $run = Wait-WorkflowRunCompleted -Repo $Repo -RunId ([int64]$run.id) -Deadline ((Get-Date).AddMinutes(5))
-    }
-    if ([string]$run.conclusion -ne 'success') {
-        throw "$WorkflowName did not become green for $Repo@$HeadSha; conclusion=$($run.conclusion)"
-    }
-    Write-Host "Verified green GitHub check: $Repo / $WorkflowName / $HeadSha"
-}
-
-function Invoke-UncredentialedTestBody {
+function Invoke-AdvisoryTestBody {
     param(
         [Parameter(Mandatory = $true)][string]$TrainingRoot,
         [Parameter(Mandatory = $true)][string]$RlRootResolved,
@@ -158,9 +87,9 @@ function Invoke-UncredentialedTestBody {
     $savedGithubToken = if ($hadGithubToken) { $env:GITHUB_TOKEN } else { $null }
 
     try {
-        # PR-controlled Python/test code must not inherit the GitHub API tokens or the
-        # GitHub CLI executable used by the trusted wrapper. This is not a sandbox, so
-        # the wrapper also refuses fork/untrusted-author PRs above.
+        # Credential stripping is hygiene only. It is NOT a sandbox: PR-controlled
+        # Python/test code still has host filesystem/process/network access unless the
+        # caller supplies an OS-level isolated environment.
         Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
         Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
         $env:PATH = (($originalPath -split ';') | Where-Object {
@@ -169,11 +98,11 @@ function Invoke-UncredentialedTestBody {
         $env:STS2_RL_ROOT = $RlRootResolved
 
         if (-not $SkipDependencyInstall) {
-            Write-Host 'Installing Training test dependencies without GitHub credentials...'
+            Write-Host 'Installing Training test dependencies without GitHub API credentials...'
             Invoke-Checked python -m pip install -e "$TrainingRoot[test]" pythonnet
         }
 
-        Write-Host 'Running real Emulator paired v0.7 integration without GitHub credentials...'
+        Write-Host 'Running advisory real-Emulator paired v0.7 integration...'
         Invoke-Checked python -m pytest "$TrainingRoot/tests/integration/test_paired_rl_v07.py" -q
     }
     finally {
@@ -183,8 +112,10 @@ function Invoke-UncredentialedTestBody {
     }
 }
 
+Write-Warning 'This script is advisory/manual validation only. It does not publish GitHub commit statuses and must not be used as branch-protection proof of exact-pair compatibility.'
+Write-Warning 'Run PR-controlled Emulator tests only on a disposable/isolated host if the result will influence release decisions.'
+
 Invoke-Checked gh auth status
-Assert-TrustedStatusIssuer
 $ghDirectory = Split-Path -Parent (Get-Command gh -ErrorAction Stop).Source
 
 $trainingRoot = (& git rev-parse --show-toplevel).Trim()
@@ -203,8 +134,8 @@ Assert-CleanGitTree -Path $rlRootResolved -Label 'RL'
 
 $trainingPrInfo = Invoke-GhJson api "repos/$TrainingRepo/pulls/$TrainingPr"
 $rlPrInfo = Invoke-GhJson api "repos/$RlRepo/pulls/$RlPr"
-Assert-TrustedPullRequest -PrInfo $trainingPrInfo -ExpectedRepo $TrainingRepo -Label 'Training'
-Assert-TrustedPullRequest -PrInfo $rlPrInfo -ExpectedRepo $RlRepo -Label 'RL'
+Assert-SameRepoHead -PrInfo $trainingPrInfo -ExpectedRepo $TrainingRepo -Label 'Training'
+Assert-SameRepoHead -PrInfo $rlPrInfo -ExpectedRepo $RlRepo -Label 'RL'
 
 $currentTrainingSha = [string]$trainingPrInfo.head.sha
 $currentRlSha = [string]$rlPrInfo.head.sha
@@ -214,25 +145,22 @@ Assert-ExactLocalHead -Path $rlRootResolved -ExpectedSha $currentRlSha -Label 'R
 Write-Host "Training current PR head: $currentTrainingSha"
 Write-Host "RL current PR head:       $currentRlSha"
 
-Invoke-UncredentialedTestBody `
+Invoke-AdvisoryTestBody `
     -TrainingRoot $trainingRoot `
     -RlRootResolved $rlRootResolved `
     -GhDirectory $ghDirectory `
     -SkipDependencyInstall ([bool]$SkipInstall)
 
-# PR-controlled test code had filesystem access to both checkouts. Before granting a
-# trusted status, prove that the exact commits we inspected are still checked out and
-# that neither worktree was modified during the test run.
+# The test code had host access. Verify only the properties this helper can actually
+# verify: both local worktrees stayed clean and at the exact SHAs, and neither PR head
+# moved while the test ran. These checks do not turn the host into a security boundary.
 Assert-ExactLocalHead -Path $trainingRoot -ExpectedSha $currentTrainingSha -Label 'Training'
 Assert-ExactLocalHead -Path $rlRootResolved -ExpectedSha $currentRlSha -Label 'RL'
 Assert-CleanGitTree -Path $trainingRoot -Label 'Training'
 Assert-CleanGitTree -Path $rlRootResolved -Label 'RL'
-Assert-TrustedStatusIssuer
 
 $latestTrainingPrInfo = Invoke-GhJson api "repos/$TrainingRepo/pulls/$TrainingPr"
 $latestRlPrInfo = Invoke-GhJson api "repos/$RlRepo/pulls/$RlPr"
-Assert-TrustedPullRequest -PrInfo $latestTrainingPrInfo -ExpectedRepo $TrainingRepo -Label 'Training'
-Assert-TrustedPullRequest -PrInfo $latestRlPrInfo -ExpectedRepo $RlRepo -Label 'RL'
 $latestTrainingSha = [string]$latestTrainingPrInfo.head.sha
 $latestRlSha = [string]$latestRlPrInfo.head.sha
 
@@ -240,24 +168,5 @@ if ($latestTrainingSha -ne $currentTrainingSha -or $latestRlSha -ne $currentRlSh
     throw "A PR head moved during the real-environment test. Training=$latestTrainingSha RL=$latestRlSha; discard this result and rerun the current pair."
 }
 
-$description = "Training=$currentTrainingSha RL=$currentRlSha"
-if ($description.Length -gt 140) {
-    throw 'Exact-pair attestation description exceeds GitHub commit-status limit'
-}
-
-foreach ($target in @(
-    @{ Repo = $TrainingRepo; Sha = $currentTrainingSha },
-    @{ Repo = $RlRepo; Sha = $currentRlSha }
-)) {
-    Invoke-Checked gh api --method POST "repos/$($target.Repo)/statuses/$($target.Sha)" `
-        -f 'state=success' `
-        -f "context=$AttestationContext" `
-        -f "description=$description"
-}
-
-Write-Host "Real Emulator paired v0.7 integration passed for exact pair: $description"
-Write-Host "Published '$AttestationContext' success status as trusted issuer $TrustedStatusIssuer ($TrustedStatusIssuerId)."
-
-Assert-PairGateGreen -Repo $TrainingRepo -HeadSha $currentTrainingSha -WorkflowName 'paired-v07-exact-pair'
-Assert-PairGateGreen -Repo $RlRepo -HeadSha $currentRlSha -WorkflowName 'paired-v07-counterpart-gate'
-Write-Host 'Both exact-pair GitHub checks are green.'
+Write-Host "Advisory real-Emulator paired v0.7 validation passed for Training=$currentTrainingSha RL=$currentRlSha"
+Write-Host 'No GitHub status was published. A trusted exact-pair release gate requires the isolated orchestrator described in docs/paired_v07_release_assurance.md.'
