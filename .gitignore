@@ -14,11 +14,3 @@ dist/
 
 .coverage
 htmlcov/
-
-# Local dev tooling for card/deck evaluation extraction and scoring
-# (extract_card_effects.py, score_cards.py, and their output CSVs) - exploratory,
-# not part of the shipped package.
-tools/
-
-# Scratch/parked work-in-progress not (yet) part of the tracked source tree.
-.tmp/
