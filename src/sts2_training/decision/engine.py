@@ -81,9 +81,13 @@ class CombatDecisionEngine:
     ) -> DecisionOutcome:
         deadline = _deadline_from_timeout(timeout_s)
 
-        decision = await self._client.get_decision(
+        raw_decision = await self._client.get_decision(
             instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
         )
+        if not isinstance(raw_decision, Mapping):
+            raise RuntimeError("get_decision must return a mapping")
+        decision: JsonObject = dict(raw_decision)
+
         decision_point_id = decision.get("decision_point_id")
         if not isinstance(decision_point_id, str) or not decision_point_id:
             raise RuntimeError("get_decision returned an invalid decision_point_id")
@@ -94,7 +98,10 @@ class CombatDecisionEngine:
 
         raw_legal_actions = dto.get("legal_actions")
         if raw_legal_actions is None:
-            legal_actions = []
+            if dto.get("run_terminal") is True:
+                legal_actions = []
+            else:
+                raise RuntimeError("get_decision returned invalid legal_actions")
         elif isinstance(raw_legal_actions, Sequence) and not isinstance(
             raw_legal_actions, (str, bytes)
         ):
