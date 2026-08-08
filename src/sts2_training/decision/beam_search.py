@@ -242,6 +242,11 @@ class BeamSearchEngine:
                 )
                 stats.value_ms += value_ms
                 stats.nodes_expanded += len(branch_results)
+                if branch_results and not next_beam and not newly_finished:
+                    # The validated client only permits completed/partial/faulted here.
+                    # If no node was scoreable, every returned Branch faulted; silently
+                    # switching to a heuristic root action would hide an emulator failure.
+                    raise RuntimeError("all emulate_actions branch results faulted")
                 finished.extend(newly_finished)
 
                 next_beam.sort(key=lambda n: n.value, reverse=True)
