@@ -11,6 +11,8 @@ $TrainingPr = 19
 $RlRepo = 'sushisk/STS2_RL'
 $RlPr = 8
 $AttestationContext = 'paired-v07-exact-pair'
+$TrustedStatusIssuer = 'sushisk'
+$TrustedStatusIssuerId = 136587185
 $TrustedAssociations = @('OWNER', 'MEMBER', 'COLLABORATOR')
 
 function Invoke-Checked {
@@ -40,7 +42,31 @@ function Assert-CleanGitTree {
         throw "Unable to inspect $Label git tree at $Path"
     }
     if ($dirty) {
-        throw "$Label working tree must be clean before exact-pair validation"
+        throw "$Label working tree must be clean for exact-pair validation"
+    }
+}
+
+function Assert-ExactLocalHead {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $actualSha = (& git -C $Path rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $actualSha) {
+        throw "Unable to inspect $Label HEAD at $Path"
+    }
+    if ($actualSha -ne $ExpectedSha) {
+        throw "$Label checkout HEAD changed during exact-pair validation: expected=$ExpectedSha actual=$actualSha"
+    }
+}
+
+function Assert-TrustedStatusIssuer {
+    $viewer = Invoke-GhJson api user
+    $login = [string]$viewer.login
+    $id = [int64]$viewer.id
+    if ($login -ne $TrustedStatusIssuer -or $id -ne $TrustedStatusIssuerId) {
+        throw "GitHub status issuer must be $TrustedStatusIssuer ($TrustedStatusIssuerId), got $login ($id)"
     }
 }
 
@@ -101,6 +127,7 @@ function Invoke-UncredentialedTestBody {
 }
 
 Invoke-Checked gh auth status
+Assert-TrustedStatusIssuer
 $ghDirectory = Split-Path -Parent (Get-Command gh -ErrorAction Stop).Source
 
 $trainingRoot = (& git rev-parse --show-toplevel).Trim()
@@ -124,20 +151,11 @@ Assert-TrustedPullRequest -PrInfo $rlPrInfo -ExpectedRepo $RlRepo -Label 'RL'
 
 $currentTrainingSha = [string]$trainingPrInfo.head.sha
 $currentRlSha = [string]$rlPrInfo.head.sha
-$localTrainingSha = (& git -C $trainingRoot rev-parse HEAD).Trim()
-$localRlSha = (& git -C $rlRootResolved rev-parse HEAD).Trim()
+Assert-ExactLocalHead -Path $trainingRoot -ExpectedSha $currentTrainingSha -Label 'Training'
+Assert-ExactLocalHead -Path $rlRootResolved -ExpectedSha $currentRlSha -Label 'RL'
 
 Write-Host "Training current PR head: $currentTrainingSha"
-Write-Host "Training local HEAD:      $localTrainingSha"
 Write-Host "RL current PR head:       $currentRlSha"
-Write-Host "RL local HEAD:            $localRlSha"
-
-if ($localTrainingSha -ne $currentTrainingSha) {
-    throw "Training checkout is not PR #$TrainingPr current head. Checkout $currentTrainingSha first."
-}
-if ($localRlSha -ne $currentRlSha) {
-    throw "RL checkout is not PR #$RlPr current head. Checkout $currentRlSha first."
-}
 
 Invoke-UncredentialedTestBody `
     -TrainingRoot $trainingRoot `
@@ -145,8 +163,19 @@ Invoke-UncredentialedTestBody `
     -GhDirectory $ghDirectory `
     -SkipDependencyInstall ([bool]$SkipInstall)
 
+# PR-controlled test code had filesystem access to both checkouts. Before granting a
+# trusted status, prove that the exact commits we inspected are still checked out and
+# that neither worktree was modified during the test run.
+Assert-ExactLocalHead -Path $trainingRoot -ExpectedSha $currentTrainingSha -Label 'Training'
+Assert-ExactLocalHead -Path $rlRootResolved -ExpectedSha $currentRlSha -Label 'RL'
+Assert-CleanGitTree -Path $trainingRoot -Label 'Training'
+Assert-CleanGitTree -Path $rlRootResolved -Label 'RL'
+Assert-TrustedStatusIssuer
+
 $latestTrainingPrInfo = Invoke-GhJson api "repos/$TrainingRepo/pulls/$TrainingPr"
 $latestRlPrInfo = Invoke-GhJson api "repos/$RlRepo/pulls/$RlPr"
+Assert-TrustedPullRequest -PrInfo $latestTrainingPrInfo -ExpectedRepo $TrainingRepo -Label 'Training'
+Assert-TrustedPullRequest -PrInfo $latestRlPrInfo -ExpectedRepo $RlRepo -Label 'RL'
 $latestTrainingSha = [string]$latestTrainingPrInfo.head.sha
 $latestRlSha = [string]$latestRlPrInfo.head.sha
 
@@ -170,4 +199,4 @@ foreach ($target in @(
 }
 
 Write-Host "Real Emulator paired v0.7 integration passed for exact pair: $description"
-Write-Host "Published '$AttestationContext' success status to both exact commits."
+Write-Host "Published '$AttestationContext' success status as trusted issuer $TrustedStatusIssuer ($TrustedStatusIssuerId)."
