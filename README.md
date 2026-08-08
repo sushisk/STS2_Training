@@ -95,10 +95,12 @@ selection recovery rather than a second logical selection.
 ## Decision logic: Policy + Beam Search + Value function
 
 `sts2_training.decision.CombatDecisionEngine` wires `get_decision` -> policy-guided
-beam search (`emulate_actions` batching, one API request per beam depth) -> value-function
-scoring -> `commit_action` on top of `AsyncTrainingApiClient`. It falls back to
-`selection.HeuristicCombatSelector` for any decision beam search cannot safely branch on
-(non-combat boundaries, a rejected batch, a plugin exception). `PolicyModel`/`ValueModel`
-are abstract bases with runnable heuristic defaults so the pipeline works end-to-end before
-any trained checkpoint exists - see `src/sts2_training/decision/how_to_use.md` for the full
-usage guide, config knobs, and how to plug in real models.
+beam search (`emulate_actions` batching, one logical batch per beam depth, chunked to the
+active instance's published capacity) -> value-function scoring -> `commit_action` on top
+of `AsyncTrainingApiClient`. It falls back to `selection.HeuristicCombatSelector` when
+beam search cannot safely branch (for example, a non-combat boundary or a rejected batch).
+Unexpected policy/value implementation errors are surfaced instead of silently converted
+into heuristic decisions. `PolicyModel`/`ValueModel` are abstract bases with runnable
+heuristic defaults so the pipeline works end-to-end before any trained checkpoint exists -
+see `src/sts2_training/decision/how_to_use.md` for the full usage guide, config knobs, and
+how to plug in real models.
