@@ -1,14 +1,9 @@
 """`BeamSearchEngine`: policy-guided beam search over `AsyncTrainingApiClient`.
 
-Per `docs/STS2_wire_contract_v0.7.md`'s Beam integration guidance, **one beam
-depth is sent as one or more bounded `emulate_actions` requests**: every
-surviving beam node's policy-proposed candidate actions are batched together
-and scored together, rather than one `emulate_action` call per candidate. A
-single request cannot exceed RL's `BranchManager.max_branches` capacity (64
-for the standard Combat configuration - see `BeamSearchConfig.max_batch_size`),
-so a frontier wider than that is chunked into multiple same-depth requests.
-This batching is what makes the assumed latency model (`beam search ~= 5ms +
-1ms/decision`, amortized over every board in the batch) achievable.
+Per `docs/STS2_wire_contract_v0.7.md`'s Beam integration guidance, one beam
+depth is sent as one logical `emulate_actions` batch. The batch is chunked
+when necessary to respect both the configured upper bound and the active RL
+instance's published `max_emulate_actions_items` capability.
 
 `emulate_actions` is synchronous at the RL coordinator boundary -
 `BranchManager.poll()` only returns once every Branch dispatched by the call
@@ -49,10 +44,8 @@ class BeamSearchConfig:
     max_depth: int = 2
     simulation_options: Mapping[str, Any] | None = None
     time_budget_ms: float | None = None
-    # RL's standard Combat `BranchManager.max_branches` capacity (see
-    # `docs/STS2_wire_contract_v0.7.md`'s "Batch-size capability" section). A
-    # frontier wider than this is split into multiple same-depth
-    # `emulate_actions` requests rather than sent as one oversized request.
+    # Local upper bound. The active RL instance may publish a smaller
+    # max_emulate_actions_items capability, which always wins.
     max_batch_size: int = 64
     expand_partial: bool = True
     release_branches_on_finish: bool = True
@@ -69,6 +62,8 @@ class BeamSearchConfig:
             raise ValueError("max_depth must be positive")
         if self.max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
+        if self.time_budget_ms is not None and self.time_budget_ms <= 0:
+            raise ValueError("time_budget_ms must be positive when provided")
         if self.simulation_options is None:
             self.simulation_options = {"stop_condition": "next_decision"}
 
@@ -177,9 +172,7 @@ class BeamSearchEngine:
         root_legal_actions = root_dto.get("legal_actions")
         if not root_legal_actions:
             return BeamSearchResult(None, None, None, "no_legal_actions", stats)
-
-        action_types = {a.get("action_type") for a in root_legal_actions}
-        if not action_types <= cfg.beam_searchable_action_types:
+        if not _is_beam_searchable(root_dto, cfg.beam_searchable_action_types):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
 
         root_node = BeamNode(
@@ -207,6 +200,19 @@ class BeamSearchEngine:
                     reason = "time_budget"
                     break
 
+                searchable: list[BeamNode] = []
+                for node in beam:
+                    if _is_beam_searchable(
+                        node.masked_emulator_dto, cfg.beam_searchable_action_types
+                    ):
+                        searchable.append(node)
+                    else:
+                        finished.append(node)
+                beam = searchable
+                if not beam:
+                    reason = "not_beam_searchable"
+                    break
+
                 items, item_meta, policy_ms = self._propose_frontier(beam)
                 stats.policy_ms += policy_ms
                 if not items:
@@ -221,7 +227,7 @@ class BeamSearchEngine:
                     item_meta, branch_results, depth
                 )
                 stats.value_ms += value_ms
-                stats.nodes_expanded += len(item_meta)
+                stats.nodes_expanded += len(branch_results)
                 finished.extend(newly_finished)
 
                 next_beam.sort(key=lambda n: n.value, reverse=True)
@@ -290,9 +296,7 @@ class BeamSearchEngine:
         stats: BeamSearchStats,
         deadline: float,
     ) -> tuple[dict[str, Any], str | None]:
-        """Sends one depth's `items` to RL as one or more `emulate_actions`
-        chunks of at most `max_batch_size` each (see the v0.7 wire contract's
-        `max_branches` capacity note), merging `branch_results` across chunks.
+        """Send one depth's candidates as one or more bounded requests.
 
         Returns `(merged_branch_results, fatal_reason)`. `fatal_reason` is
         `None` on full success; otherwise it names why chunking stopped early,
@@ -300,19 +304,25 @@ class BeamSearchEngine:
         before that - callers should score those, not discard them.
         """
         cfg = self.config
+        batch_size = cfg.max_batch_size
+        server_limit = getattr(self._client, "max_emulate_actions_items", None)
+        if isinstance(server_limit, int) and not isinstance(server_limit, bool) and server_limit > 0:
+            batch_size = min(batch_size, server_limit)
+
         branch_results: dict[str, Any] = {}
-        for start in range(0, len(items), cfg.max_batch_size):
-            if time.monotonic() >= deadline:
+        for start in range(0, len(items), batch_size):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return branch_results, "time_budget"
-            chunk_items = items[start : start + cfg.max_batch_size]
-            chunk_meta = item_meta[start : start + cfg.max_batch_size]
+            chunk_items = items[start : start + batch_size]
+            chunk_meta = item_meta[start : start + batch_size]
 
             t0 = time.monotonic()
             try:
                 response = await self._client.emulate_actions(
                     instance_id,
                     chunk_items,
-                    timeout_s=_remaining(deadline),
+                    timeout_s=remaining,
                     simulation_options=cfg.simulation_options,
                 )
             except (ApiOperationError, ApiProtocolError) as exc:
@@ -336,7 +346,17 @@ class BeamSearchEngine:
         depth: int,
     ) -> tuple[list[BeamNode], list[BeamNode], float]:
         cfg = self.config
-        resolved: list[tuple[BeamNode, ActionCandidate, str, int, Mapping[str, Any], Mapping[str, Any], Any]] = []
+        resolved: list[
+            tuple[
+                BeamNode,
+                ActionCandidate,
+                str,
+                int,
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Any,
+            ]
+        ] = []
         for node, candidate, branch_id, rng_id in item_meta:
             result = branch_results.get(branch_id)
             if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
@@ -349,6 +369,8 @@ class BeamSearchEngine:
         t0 = time.monotonic()
         values = self._value_fn.evaluate_batch([entry[5] for entry in resolved]) if resolved else []
         value_ms = (time.monotonic() - t0) * 1000.0
+        if len(values) != len(resolved):
+            raise RuntimeError("ValueModel.evaluate_batch must return exactly one value per dto")
 
         next_beam: list[BeamNode] = []
         newly_finished: list[BeamNode] = []
@@ -388,15 +410,53 @@ class BeamSearchEngine:
                 instance_id,
             )
             return
+
         try:
             await self._client.cancel_branches(instance_id, branch_ids, timeout_s=5.0)
-            await self._client.release_branches(instance_id, branch_ids, timeout_s=5.0)
-        except Exception:  # noqa: BLE001 - best-effort cleanup must never mask the search result
+        except Exception:  # noqa: BLE001 - cleanup must not mask the search result
             _LOG.exception(
-                "beam search branch cleanup failed for instance_id=%s (%d branches)",
+                "beam search branch cancellation failed for instance_id=%s (%d branches)",
                 instance_id,
                 len(branch_ids),
             )
+
+        if getattr(self._client, "pending_retry", None) is not None or getattr(
+            self._client, "session_invalid", False
+        ):
+            _LOG.warning(
+                "skipping beam search branch release for instance_id=%s after cancellation failure",
+                instance_id,
+            )
+            return
+
+        try:
+            await self._client.release_branches(instance_id, branch_ids, timeout_s=5.0)
+        except Exception:  # noqa: BLE001 - cleanup must not mask the search result
+            _LOG.exception(
+                "beam search branch release failed for instance_id=%s (%d branches)",
+                instance_id,
+                len(branch_ids),
+            )
+
+
+def _is_beam_searchable(
+    dto: Mapping[str, Any], allowed_action_types: frozenset[str]
+) -> bool:
+    legal_actions = dto.get("legal_actions")
+    if not isinstance(legal_actions, Sequence) or isinstance(legal_actions, (str, bytes)):
+        return False
+    if not legal_actions:
+        return False
+
+    action_types: set[str] = set()
+    for action in legal_actions:
+        if not isinstance(action, Mapping):
+            return False
+        action_type = action.get("action_type")
+        if not isinstance(action_type, str):
+            return False
+        action_types.add(action_type)
+    return action_types <= allowed_action_types
 
 
 def _is_terminal(dto: Mapping[str, Any]) -> bool:
@@ -409,10 +469,7 @@ def _is_terminal(dto: Mapping[str, Any]) -> bool:
     if isinstance(transition, Mapping) and transition.get("kind") == "combat_completed":
         return True
     legal_actions = dto.get("legal_actions")
-    if legal_actions is not None and len(legal_actions) == 0:
-        return True
+    if isinstance(legal_actions, Sequence) and not isinstance(legal_actions, (str, bytes)):
+        if len(legal_actions) == 0:
+            return True
     return False
-
-
-def _remaining(deadline: float, *, minimum: float = 0.05) -> float:
-    return max(minimum, deadline - time.monotonic())
