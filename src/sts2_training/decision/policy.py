@@ -27,8 +27,6 @@ from sts2_training.selection.action_classification import (
     CHOICE_CARD_ACTION_TYPE,
     CHOICE_CONFIRM_ACTION_TYPE,
     CHOICE_SKIP_ACTION_TYPE,
-    available_actions,
-    group_by_action_type,
 )
 
 JsonObject = Mapping[str, Any]
@@ -106,15 +104,21 @@ class PriorHeuristicPolicy(PolicyModel):
     ) -> list[ActionCandidate]:
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
             raise ValueError("top_k must be a positive integer")
-        actions = available_actions(legal_actions)
-        if not actions:
+
+        # Group and filter in one pass. Calling available_actions() and then
+        # group_by_action_type() would re-check is_available for every action.
+        by_type: dict[str, list[JsonObject]] = {}
+        for action in legal_actions:
+            if action.get("is_available") is False:
+                continue
+            action_type = action.get("action_type")
+            if isinstance(action_type, str):
+                by_type.setdefault(action_type, []).append(action)
+        if not by_type:
             return []
 
-        by_type = group_by_action_type(actions)
         other_types = sorted(
-            action_type
-            for action_type in by_type
-            if isinstance(action_type, str) and action_type not in _CATEGORY_PRIORITY
+            action_type for action_type in by_type if action_type not in _CATEGORY_PRIORITY
         )
 
         ordered: list[JsonObject] = []
