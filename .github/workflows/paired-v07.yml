@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  paired-head-gate:
-    # Keep the existing job/check name so any branch-protection rule that already
-    # requires this context continues to work. The implementation is now fully
-    # GitHub-hosted and does not wait for an externally-published commit status.
-    name: exact Training/RL pair passed trusted integration
+  training-hosted-contract:
+    # This required job is intentionally repo-local. The legacy workflow name is
+    # retained for tooling compatibility, but this job is not evidence that a
+    # particular Training/RL commit pair passed trusted cross-repository integration.
+    name: training-hosted-contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -32,8 +32,9 @@ jobs:
       - name: Run hosted unit and contract regression tests
         run: python -m pytest -q -m "not integration"
 
-      - name: Explain real-Emulator coverage
+      - name: Explain paired validation boundary
         if: always()
         run: |
-          echo "The merge-blocking check is intentionally self-contained on GitHub-hosted runners."
-          echo "tests marked 'integration' require STS2_RL_ROOT plus the real Emulator runtime and remain optional/manual validation."
+          echo "This required check proves only Training repo-local hosted unit/contract regressions."
+          echo "It does not attest an exact Training/RL commit pair."
+          echo "Real-Emulator paired validation remains separate and must not be treated as a trusted release gate until it runs through an isolated exact-pair orchestrator."
