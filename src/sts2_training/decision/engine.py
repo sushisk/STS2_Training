@@ -157,9 +157,15 @@ class CombatDecisionEngine:
 def _beam_result_is_actionable(result: BeamSearchResult) -> bool:
     if result.best_root_action_id is None:
         return False
-    if result.reason == "time_budget":
-        return False
-    return not result.reason.startswith("emulate_actions_rejected:")
+    incomplete_depth = result.reason == "time_budget" or result.reason.startswith(
+        "emulate_actions_rejected:"
+    )
+    if not incomplete_depth:
+        return True
+    return (
+        result.best_node is not None
+        and result.best_node.depth <= result.stats.depths_completed
+    )
 
 
 def _deadline_from_timeout(timeout_s: float) -> float:
