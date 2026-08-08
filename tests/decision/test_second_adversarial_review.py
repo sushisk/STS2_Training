@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sts2_training.decision.beam_search import (
+    BeamNode,
     BeamSearchConfig,
     BeamSearchEngine,
     BeamSearchResult,
@@ -112,6 +113,19 @@ class _DecisionClient:
         }
 
 
+def _beam_node(*, depth: int) -> BeamNode:
+    return BeamNode(
+        branch_id=f"b-{depth}",
+        parent_branch_id="root",
+        rng_id=1,
+        decision_point_id=f"d-{depth}",
+        masked_emulator_dto={"legal_actions": []},
+        depth=depth,
+        value=10.0,
+        root_action_id="beam-a",
+    )
+
+
 class _RejectedPartialBeam:
     async def search(
         self,
@@ -123,9 +137,26 @@ class _RejectedPartialBeam:
         return BeamSearchResult(
             best_root_action_id="beam-a",
             best_value=10.0,
-            best_node=None,
+            best_node=_beam_node(depth=1),
             reason="emulate_actions_rejected:branch_capacity",
             stats=BeamSearchStats(depths_completed=0),
+        )
+
+
+class _CompleteDepthTimeoutBeam:
+    async def search(
+        self,
+        instance_id: str,
+        root_decision: Mapping[str, Any],
+        *,
+        timeout_s: float,
+    ) -> BeamSearchResult:
+        return BeamSearchResult(
+            best_root_action_id="beam-a",
+            best_value=10.0,
+            best_node=_beam_node(depth=1),
+            reason="time_budget",
+            stats=BeamSearchStats(depths_completed=1),
         )
 
 
@@ -188,6 +219,18 @@ class IncompleteBeamDecisionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.source, "heuristic_fallback")
         self.assertEqual(outcome.chosen_action_id, "fallback-b")
         self.assertIsNotNone(outcome.beam_result)
+
+    async def test_completed_depth_result_survives_later_time_budget(self) -> None:
+        engine = CombatDecisionEngine(
+            _DecisionClient(),
+            fallback_selector=_FallbackSelector(),  # type: ignore[arg-type]
+        )
+        engine._beam = _CompleteDepthTimeoutBeam()  # type: ignore[assignment]
+
+        outcome = await engine.decide("inst-001", timeout_s=1.0)
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "beam-a")
 
 
 class HeuristicInputValidationTest(unittest.TestCase):
