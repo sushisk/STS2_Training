@@ -86,6 +86,22 @@ class AsyncTrainingApiClient(ApiContract):
     def session_invalid(self) -> bool:
         return self._session_invalid
 
+    def _accept_start_instance_for_request(
+        self,
+        request: Mapping[str, object],
+        response: Mapping[str, object],
+    ) -> str:
+        instance_config = request.get("instance_config")
+        if (
+            isinstance(instance_config, Mapping)
+            and instance_config.get("instance_type") == "combat"
+            and response.get("max_emulate_actions_items") is None
+        ):
+            raise ApiProtocolError(
+                "combat start_instance response must include max_emulate_actions_items"
+            )
+        return self._accept_start_instance(response)
+
     async def retry_request(
         self,
         retry_request: RetryRequest,
@@ -105,7 +121,7 @@ class AsyncTrainingApiClient(ApiContract):
             if operation == "start_instance":
                 response = await self._execute(request, deadline=deadline)
                 try:
-                    result = self._accept_start_instance(response)
+                    result = self._accept_start_instance_for_request(request, response)
                 except ApiProtocolError:
                     await self._mark_protocol_uncertain(request)
                     raise
@@ -174,7 +190,7 @@ class AsyncTrainingApiClient(ApiContract):
             request = self._build_start_instance(self._next_request_seq, instance_config)
             response = await self._execute(request, deadline=deadline)
             try:
-                result = self._accept_start_instance(response)
+                result = self._accept_start_instance_for_request(request, response)
             except ApiProtocolError:
                 await self._mark_protocol_uncertain(request)
                 raise
@@ -461,6 +477,7 @@ class AsyncTrainingApiClient(ApiContract):
             self._consume_sequence(token)
             if token.operation == "close_instance" and exc.response.get("status") == "faulted":
                 self._instance_id = None
+                self._max_emulate_actions_items = None
                 self._audit.clear()
             if fault_kind in _FATAL_CONSUMING_SESSION_REJECTIONS:
                 self._session_invalid = True
@@ -516,8 +533,11 @@ class AsyncTrainingApiClient(ApiContract):
         return response
 
     async def _mark_protocol_uncertain(self, request: Mapping[str, object]) -> None:
-        await self._connection.invalidate()
+        # Preserve the exact recovery token before the first cancellation point. RL may
+        # already have consumed this request, so connection teardown must not be able to
+        # erase the only exact-replay path.
         self._remember_pending(RetryRequest.from_message(request))
+        await self._connection.invalidate()
 
     def _ensure_fresh_request_allowed(self) -> None:
         if self._session_invalid:

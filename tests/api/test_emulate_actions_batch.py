@@ -43,6 +43,7 @@ class _EmulateActionsConnection:
                 **self._common(request),
                 "status": "completed",
                 "instance_id": "inst-001",
+                "max_emulate_actions_items": 64,
             }
 
         if operation == "emulate_actions":

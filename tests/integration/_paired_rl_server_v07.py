@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 _SERVER_MAX_MESSAGE_BYTES = 4096
+_PAIRED_MAX_EMULATE_ACTIONS_ITEMS = 16
 
 
 def _configure_rl_imports(root: Path) -> None:
@@ -18,11 +20,32 @@ def _configure_rl_imports(root: Path) -> None:
 
 
 def _install_mixed_fault_hook() -> None:
-    from API.instance_combat import CombatInstance
+    """Force one item to fail inside the real worker execution path.
 
+    The previous hook rewrote a successful result during response finalization, which
+    only tested Training's mixed-status parsing. This hook corrupts one admitted
+    candidate before it is serialized to a Branch Worker so the worker itself returns a
+    normalized fault. Finalization only relabels that already-real worker fault with the
+    stable integration-test fault kind expected by the paired assertion.
+    """
+
+    from API.instance_combat import CombatInstance
+    from search.decision_context import SemanticAction
+
+    original_validate = CombatInstance._validate_emulate_actions_item
     original_finalize = CombatInstance._finalize_branch_result
 
-    def finalize_with_forced_fault(
+    def validate_with_forced_worker_fault(self, item):
+        admitted = original_validate(self, item)
+        if admitted.branch_id != "forced-fault":
+            return admitted
+        broken_candidate = replace(
+            admitted.candidate,
+            semantic_action=SemanticAction("__paired_forced_worker_fault__", None, None),
+        )
+        return replace(admitted, candidate=broken_candidate)
+
+    def finalize_with_verified_worker_fault(
         self,
         *,
         branch_id,
@@ -33,14 +56,12 @@ def _install_mixed_fault_hook() -> None:
         result,
     ):
         if branch_id == "forced-fault":
-            return {
-                "status": "faulted",
-                "branch_id": branch_id,
-                "parent_branch_id": parent_branch_id,
-                "rng_id": rng_id,
-                "error": "forced paired-integration fault",
-                "fault_kind": "integration_test",
-            }
+            if result.status == "success":
+                raise AssertionError("forced paired fault unexpectedly succeeded in worker")
+            diagnostics = dict(result.diagnostics or {})
+            diagnostics["fault_kind"] = "integration_test"
+            diagnostics.setdefault("message", "forced paired worker fault")
+            result = replace(result, diagnostics=diagnostics)
         return original_finalize(
             self,
             branch_id=branch_id,
@@ -51,7 +72,8 @@ def _install_mixed_fault_hook() -> None:
             result=result,
         )
 
-    CombatInstance._finalize_branch_result = finalize_with_forced_fault
+    CombatInstance._validate_emulate_actions_item = validate_with_forced_worker_fault
+    CombatInstance._finalize_branch_result = finalize_with_verified_worker_fault
 
 
 async def _serve(root: Path, host: str, port: int) -> None:
@@ -61,7 +83,13 @@ async def _serve(root: Path, host: str, port: int) -> None:
     from API.server import RLApiServer
     from API.tcp_server import AsyncioTcpServer
 
-    dispatcher = RLApiServer()
+    # Use a non-default capacity so the paired test proves Training discovers the
+    # configured RL value instead of accidentally depending on Combat's default 64.
+    dispatcher = RLApiServer(
+        instance_factory_kwargs={
+            "combat": {"max_branches": _PAIRED_MAX_EMULATE_ACTIONS_ITEMS}
+        }
+    )
     server = AsyncioTcpServer(
         dispatcher.handle_request,
         server_epoch=dispatcher.server_epoch,

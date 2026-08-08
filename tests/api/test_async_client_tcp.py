@@ -90,11 +90,14 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 }
             if instance_type == "missing-instance":
                 return {**common, "status": "completed"}
-            return {
+            response = {
                 **common,
                 "status": "completed",
                 "instance_id": "inst-001",
             }
+            if instance_type == "combat":
+                response["max_emulate_actions_items"] = 64
+            return response
 
         response = {
             **common,

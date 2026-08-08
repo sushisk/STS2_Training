@@ -41,10 +41,13 @@ sent. `request_seq` advances only after the operation-specific response is accep
 Optional `simulation_options` uses the same validation rules as `emulate_action`.
 
 For Combat, `simulation_options.max_time_ms` is a **per-Branch execution timeout**, not
-a wall-clock deadline for the entire batch. Each worker's current FIFO-head Branch gets
-an absolute deadline; completion on another worker does not extend that deadline. If a
-worker has multiple Branches queued, the next Branch receives a fresh deadline after the
-preceding Branch on that worker completes. Consequently total batch wall-clock time may
+a wall-clock deadline for the entire batch. `BranchManager.poll()` keeps at most one
+outstanding request on each worker. Branches beyond the worker count remain
+coordinator-side `queued` until a compatible worker becomes free, and their timeout does
+not start until they are actually dispatched. Completion on another worker never extends
+an executing Branch's deadline. If a worker times out, only that worker's executing
+Branch receives `task_timeout`; the worker is respawned and a queued tail Branch is then
+dispatched with its own fresh deadline. Consequently total batch wall-clock time may
 exceed `max_time_ms` when a batch is larger than the worker count.
 
 Conceptual shape:
@@ -114,11 +117,27 @@ pre-existing b2 -> c2
 ### Batch-size capability
 
 A single `emulate_actions` request cannot contain more Branches than RL's configured
-`BranchManager.max_branches` capacity. The standard Combat configuration uses 64. A
-frontier wider than the active capacity must therefore be split into multiple
-`emulate_actions` requests at the same Beam depth. The Beam integration target is
-"one depth = one or more bounded batch requests", not an unconditional one-request-per-
-depth guarantee.
+`BranchManager.max_branches` capacity. Combat publishes that instance-specific limit in
+the completed `start_instance` response as the positive integer
+`max_emulate_actions_items`:
+
+```json
+{
+  "status": "completed",
+  "instance_id": "inst-001",
+  "max_emulate_actions_items": 64
+}
+```
+
+The standard Combat configuration uses 64, but callers must not assume that value: the
+server may be configured with a smaller or larger capacity. Training caches the published
+limit for the active instance and rejects an `emulate_actions` request that exceeds it,
+so Beam can chunk a wide frontier deterministically before sending it. This capability is
+the configured maximum batch size, not a claim about the momentary number of free Branch
+slots; RL still performs the authoritative active-capacity admission check.
+
+The Beam integration target is therefore "one depth = one or more bounded batch
+requests", not an unconditional one-request-per-depth guarantee.
 
 ## Admission and execution
 
@@ -129,13 +148,15 @@ is rejected and no item is admitted.
 After admission, Phase B prepares all WorkItems before committing internal Branch
 records. Heterogeneous-parent Branches are then registered as one manager batch before a
 single `BranchManager.poll()` call. If coordinator-side preparation, submission,
-dispatch, or response finalization raises, all internal Branches from that batch are
-cancelled/released, batch bookkeeping is removed, and RNG allocation state is restored.
-Any public branch ID already registered before such an unexpected failure remains burned
-(non-reusable) but is quarantined and cannot become a parent or execute later.
+dispatch, result collection, or response finalization raises, all internal Branches from
+that batch are cancelled/released, batch bookkeeping is removed, and RNG allocation
+state is restored. Any public branch ID already registered before such an unexpected
+failure remains burned (non-reusable) but is quarantined and cannot become a parent or
+execute later.
 
-`BranchManager.poll()` synchronously waits for every Branch dispatched by the call to
-reach a terminal outcome. Worker processes may execute queued items in parallel.
+`BranchManager.poll()` synchronously waits for every Branch admitted by the call to reach
+a terminal outcome. Worker processes may execute up to one Branch per worker in
+parallel; additional Branches stay coordinator-side `queued` until a worker is free.
 
 ## Response
 
@@ -163,12 +184,14 @@ extra keys. Every per-Branch result is terminal:
 - `faulted`: that Branch failed; sibling Branches may still be `completed`.
 
 `queued` and `running` are not valid normal `emulate_actions` response outcomes because
-`BranchManager.poll()` has already synchronously resolved the Branches it dispatched.
-A missing poll result is an internal invariant violation and must surface as a fault or
-exception, never as a normal `running` fallback.
+`BranchManager.poll()` has already synchronously resolved the Branches admitted for that
+batch. A missing poll result is a coordinator invariant violation. RL must fail the whole
+Phase B transaction and run the same cancel/release/bookkeeping/RNG quarantine path used
+for other unexpected coordinator failures; it must not manufacture a normal per-Branch
+`faulted` result under a top-level `completed` response.
 
-For every per-Branch result, Training correlates these fields against the corresponding
-request item:
+For every normal per-Branch result, Training correlates these fields against the
+corresponding request item:
 
 ```text
 branch_id
@@ -177,9 +200,9 @@ rng_id
 ```
 
 `completed` / `partial` responses additionally retain the existing decision-payload
-validation. Any missing result, extra result, or correlation mismatch is an
-`ApiProtocolError`; completion is uncertain and the exact request remains pending for
-retry.
+validation. Any missing result, extra result, or correlation mismatch observed by
+Training is an `ApiProtocolError`; completion is uncertain and the exact request remains
+pending for retry.
 
 ## Retry and at-most-once semantics
 
@@ -200,6 +223,17 @@ Because the protocol is single-in-flight, Training only retains replay identitie
 the immediately current/previous request. When a different `request_id` is observed,
 older selection identities are discarded; audit replay bookkeeping is therefore bounded
 by one batch rather than total speculative selections over the search.
+
+## Version rollout and deployment compatibility
+
+DTO v0.7 is a deliberate **hard cutover**, not a rolling-compatible extension of v0.6.
+An RL endpoint and a Training client participating in v0.7 must therefore be deployed or
+activated as one lockstep compatibility unit. A deployment must not route v0.7 Training
+to a v0.6 RL endpoint, or v0.6 Training to a v0.7-only RL endpoint.
+
+If an environment cannot guarantee that lockstep activation, it must add an explicit
+version-negotiation or dual-version compatibility mechanism before adopting v0.7. This
+PR pair does not claim mixed-version interoperability.
 
 ## Explicit non-goals for v0.7
 

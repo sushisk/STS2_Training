@@ -16,6 +16,7 @@ pytestmark = pytest.mark.integration
 
 _HOST = "127.0.0.1"
 _SERVER_MAX_MESSAGE_BYTES = 4096
+_PAIRED_MAX_EMULATE_ACTIONS_ITEMS = 16
 _LARGE_RESPONSE_LIMIT = 64 * 1024 * 1024
 _SERVER_HELPER = Path(__file__).with_name("_paired_rl_server_v07.py")
 
@@ -134,8 +135,29 @@ async def _exercise_paired_v07(port: int) -> None:
     )
     async with AsyncTrainingApiClient(connection) as client:
         instance_id = await client.start_instance(_combat_config(), timeout_s=30.0)
+        assert client.max_emulate_actions_items == _PAIRED_MAX_EMULATE_ACTIONS_ITEMS
         root = await client.get_decision(instance_id, timeout_s=30.0)
         root_action = _action_id(root)
+
+        # The discovered RL capability is enforced locally before a wire request can
+        # consume request_seq. The paired server intentionally uses non-default 16.
+        seq_before_capacity = client.next_request_seq
+        with pytest.raises(ValueError, match="max_emulate_actions_items=16"):
+            await client.emulate_actions(
+                instance_id,
+                [
+                    {
+                        "parent_branch_id": "root",
+                        "branch_id": f"too-wide-{index}",
+                        "rng_id": index + 1,
+                        "decision_point_id": root["decision_point_id"],
+                        "action_id": root_action,
+                    }
+                    for index in range(_PAIRED_MAX_EMULATE_ACTIONS_ITEMS + 1)
+                ],
+                timeout_s=30.0,
+            )
+        assert client.next_request_seq == seq_before_capacity
 
         # The Training contract can reject same-batch parent dependencies completely
         # locally, in either repository pairing, without consuming request_seq.

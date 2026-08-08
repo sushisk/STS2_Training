@@ -37,6 +37,7 @@ class _BranchBatchConnection:
                 **common,
                 "status": "completed",
                 "instance_id": "inst-001",
+                "max_emulate_actions_items": 64,
             }
 
         self.branch_attempts += 1
