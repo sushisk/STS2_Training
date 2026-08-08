@@ -83,6 +83,21 @@ def test_terminal_markers_must_be_boolean(marker: str, value: object) -> None:
         contract._validate_decision_payload(_response(masked))  # noqa: SLF001
 
 
+def test_terminal_markers_are_mutually_exclusive() -> None:
+    contract = ApiContract(client_session_id="session-a")
+
+    with pytest.raises(ApiProtocolError, match="mutually exclusive"):
+        contract._validate_decision_payload(  # noqa: SLF001
+            _response(
+                {
+                    "terminal": True,
+                    "run_terminal": True,
+                    "outcome": "victory",
+                }
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "masked",
     [
