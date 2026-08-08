@@ -59,11 +59,13 @@ class AsyncClientCloseFaultStateTest(unittest.IsolatedAsyncioTestCase):
         instance_id = await client.start_instance(
             {"instance_type": "combat"}, timeout_s=1.0
         )
+        self.assertEqual(client.max_emulate_actions_items, 64)
 
         with self.assertRaises(RequestFaultedError):
             await client.close_instance(instance_id, timeout_s=1.0)
 
         self.assertIsNone(client.instance_id)
+        self.assertIsNone(client.max_emulate_actions_items)
         self.assertFalse(client.close_uncertain)
         self.assertIsNone(client.pending_retry)
         self.assertEqual(client.next_request_seq, 3)
