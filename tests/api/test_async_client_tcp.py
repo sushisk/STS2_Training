@@ -39,7 +39,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 if request.get("transport_operation") == "hello":
                     response = {
                         "transport_operation": "hello",
-                        "schema_version": "0.6",
+                        "schema_version": "0.7",
                         "client_session_id": request["client_session_id"],
                         "server_epoch": "epoch-1",
                     }
@@ -65,7 +65,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _common(request: dict) -> dict:
         return {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -90,11 +90,14 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 }
             if instance_type == "missing-instance":
                 return {**common, "status": "completed"}
-            return {
+            response = {
                 **common,
                 "status": "completed",
                 "instance_id": "inst-001",
             }
+            if instance_type == "combat":
+                response["max_emulate_actions_items"] = 64
+            return response
 
         response = {
             **common,
@@ -133,7 +136,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             self.requests,
             [
                 {
-                    "schema_version": "0.6",
+                    "schema_version": "0.7",
                     "client_session_id": "session-a",
                     "request_seq": 1,
                     "request_id": "session-a:1",

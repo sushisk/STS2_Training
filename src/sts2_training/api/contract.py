@@ -7,7 +7,7 @@ from typing import Any
 from sts2_training.selection_log import SelectionAudit, SelectionEventLogger
 
 JsonObject = dict[str, Any]
-SCHEMA_VERSION = "0.6"
+SCHEMA_VERSION = "0.7"
 ROOT_BRANCH_ID = "root"
 ROOT_RNG_ID = 0
 KNOWN_STATUSES = frozenset(
@@ -28,6 +28,10 @@ _BRANCH_BATCH_OPERATIONS = frozenset(
 _BRANCH_STATUS_VALUES = frozenset(
     {"queued", "running", "completed", "cancelled", "faulted", "released"}
 )
+# emulate_actions is synchronous at the coordinator boundary: BranchManager.poll()
+# returns only after every Branch dispatched for the batch is terminal. queued/running
+# are therefore invalid per-item response states for this operation.
+_EMULATE_ACTIONS_BRANCH_STATUSES = frozenset({"completed", "partial", "faulted"})
 
 
 class ApiProtocolError(RuntimeError):
@@ -51,7 +55,7 @@ class RequestFaultedError(ApiOperationError):
 
 
 class ApiContract:
-    """DTO v0.6 construction, correlation, active-instance state, and selection audit."""
+    """DTO v0.7 construction, correlation, active-instance state, and selection audit."""
 
     def __init__(
         self,
@@ -63,6 +67,7 @@ class ApiContract:
         self._validate_non_empty_str(self._client_session_id, "client_session_id")
         self._audit = SelectionAudit(selection_logger)
         self._instance_id: str | None = None
+        self._max_emulate_actions_items: int | None = None
 
     @property
     def client_session_id(self) -> str:
@@ -71,6 +76,11 @@ class ApiContract:
     @property
     def instance_id(self) -> str | None:
         return self._instance_id
+
+    @property
+    def max_emulate_actions_items(self) -> int | None:
+        """RL-published batch limit for the active instance, when supported."""
+        return self._max_emulate_actions_items
 
     def _new_request(self, request_seq: int, operation: str, **fields: Any) -> JsonObject:
         if not isinstance(request_seq, int) or isinstance(request_seq, bool) or request_seq <= 0:
@@ -90,7 +100,13 @@ class ApiContract:
     def _accept_start_instance(self, response: Mapping[str, Any]) -> str:
         self._require_status(response, {"completed"})
         instance_id = self._require_non_empty_str(response, "instance_id")
+        max_items = response.get("max_emulate_actions_items")
+        if max_items is not None and (
+            isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0
+        ):
+            raise ApiProtocolError("max_emulate_actions_items must be a positive integer")
         self._instance_id = instance_id
+        self._max_emulate_actions_items = max_items
         self._audit.clear()
         self._audit.remember(response)
         return instance_id
@@ -165,6 +181,120 @@ class ApiContract:
             fields["simulation_options"] = dict(simulation_options)
         return self._new_request(request_seq, "emulate_action", **fields)
 
+    def _build_emulate_actions(
+        self,
+        request_seq: int,
+        instance_id: str,
+        items: Sequence[Mapping[str, Any]],
+        simulation_options: Mapping[str, Any] | None,
+    ) -> JsonObject:
+        """Build DTO v0.7's ``emulate_actions`` batch request.
+
+        The wire contract requires every ``parent_branch_id`` to refer to a Branch that
+        already exists when this batch request starts. Training cannot prove RL-side
+        existence locally, but it can reject any parent that is created by another item
+        in the same batch. Beam Search should send one frontier depth per batch.
+        """
+        self._validate_instance_id(instance_id)
+        if isinstance(items, (str, bytes)):
+            raise TypeError("items must be a sequence of item mappings")
+        items = list(items)
+        if not items:
+            raise ValueError("emulate_actions items must not be empty")
+        if (
+            self._max_emulate_actions_items is not None
+            and len(items) > self._max_emulate_actions_items
+        ):
+            raise ValueError(
+                f"emulate_actions item count {len(items)} exceeds RL "
+                f"max_emulate_actions_items={self._max_emulate_actions_items}; "
+                "chunk the frontier into multiple requests"
+            )
+
+        seen_branch_ids: set[str] = set()
+        normalized_items: list[JsonObject] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise TypeError("each emulate_actions item must be a mapping")
+            parent_branch_id = item["parent_branch_id"]
+            branch_id = item["branch_id"]
+            rng_id = item["rng_id"]
+            decision_point_id = item["decision_point_id"]
+            action_id = item["action_id"]
+            for value, name in (
+                (parent_branch_id, "parent_branch_id"),
+                (branch_id, "branch_id"),
+                (decision_point_id, "decision_point_id"),
+                (action_id, "action_id"),
+            ):
+                self._validate_non_empty_str(value, name)
+            if branch_id == ROOT_BRANCH_ID:
+                raise ValueError("emulate_actions item branch_id must not be 'root'")
+            if branch_id in seen_branch_ids:
+                raise ValueError(f"emulate_actions item branch_id {branch_id!r} is duplicated")
+            seen_branch_ids.add(branch_id)
+            if not isinstance(rng_id, int) or isinstance(rng_id, bool) or rng_id <= 0:
+                raise ValueError("emulate_actions item rng_id must be a positive integer")
+            normalized_items.append(
+                {
+                    "parent_branch_id": parent_branch_id,
+                    "branch_id": branch_id,
+                    "rng_id": rng_id,
+                    "decision_point_id": decision_point_id,
+                    "action_id": action_id,
+                }
+            )
+
+        batch_branch_ids = {item["branch_id"] for item in normalized_items}
+        for item in normalized_items:
+            parent_branch_id = item["parent_branch_id"]
+            if parent_branch_id in batch_branch_ids:
+                raise ValueError(
+                    f"emulate_actions parent_branch_id {parent_branch_id!r} is created within the same batch"
+                )
+
+        fields: JsonObject = {"instance_id": instance_id, "items": normalized_items}
+        if simulation_options is not None:
+            self._validate_simulation_options(simulation_options)
+            fields["simulation_options"] = dict(simulation_options)
+        return self._new_request(request_seq, "emulate_actions", **fields)
+
+    def _validate_emulate_actions_response(
+        self,
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> None:
+        self._require_status(response, {"completed"})
+        branch_results = response.get("branch_results")
+        if not isinstance(branch_results, dict):
+            raise ApiProtocolError("branch_results must be a dictionary")
+
+        items = request.get("items")
+        if not isinstance(items, list):
+            raise ApiProtocolError("emulate_actions request is missing items")
+        expected_items = {item["branch_id"]: item for item in items}
+        if set(branch_results) != set(expected_items):
+            raise ApiProtocolError("response branch_results keys do not match request items")
+
+        for branch_id, branch_result in branch_results.items():
+            if not isinstance(branch_result, Mapping):
+                raise ApiProtocolError(f"branch_results[{branch_id!r}] must be a dictionary")
+            status = branch_result.get("status")
+            if status not in _EMULATE_ACTIONS_BRANCH_STATUSES:
+                raise ApiProtocolError(f"invalid branch status for {branch_id!r}: {status!r}")
+
+            expected = expected_items[branch_id]
+            self._require_response_match(branch_result, "branch_id", branch_id)
+            self._require_response_match(
+                branch_result, "parent_branch_id", expected["parent_branch_id"]
+            )
+            self._require_response_match(branch_result, "rng_id", expected["rng_id"])
+
+            if status in {"completed", "partial"}:
+                self._validate_decision_payload(branch_result)
+            elif status == "faulted":
+                self._require_non_empty_str(branch_result, "error")
+
     def _build_branch_batch_operation(
         self,
         request_seq: int,
@@ -185,6 +315,7 @@ class ApiContract:
     def _accept_close_instance(self, response: JsonObject) -> JsonObject:
         self._require_status(response, {"completed"})
         self._instance_id = None
+        self._max_emulate_actions_items = None
         self._audit.clear()
         return response
 
@@ -210,6 +341,8 @@ class ApiContract:
             raise RequestFaultedError(response)
         if request.get("operation") in _BRANCH_BATCH_OPERATIONS:
             self._validate_branch_batch_response(request, response)
+        elif request.get("operation") == "emulate_actions":
+            self._validate_emulate_actions_response(request, response)
         return dict(response)
 
     def _validate_branch_batch_response(
@@ -241,6 +374,14 @@ class ApiContract:
                 raise ApiProtocolError(
                     f"invalid branch status for {branch_id!r}: {branch_status!r}"
                 )
+
+        # Once RL has confirmed cancellation or release, the Branch can no longer be
+        # selected as a parent. Retaining its deep-copied Decision payload would make
+        # audit memory grow with the total number of speculative Branches ever created.
+        if operation in {"cancel_branches", "release_branches"}:
+            instance_id = request.get("instance_id")
+            if isinstance(instance_id, str) and instance_id:
+                self._audit.forget(instance_id, branch_ids)
 
     def _validate_selected_action_response(
         self, request: Mapping[str, Any], response: Mapping[str, Any]

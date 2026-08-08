@@ -1,4 +1,4 @@
-"""Async-first Training client for RL/Training DTO contract v0.6."""
+"""Async-first Training client for RL/Training DTO contract v0.7."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class AsyncTrainingApiClient(ApiContract):
     closed.
 
     A changed RL ``server_epoch`` or a session-level sequencing/ownership rejection
-    permanently invalidates this logical client. v0.6 intentionally does not guess how
+    permanently invalidates this logical client. v0.7 intentionally does not guess how
     to continue from divergent client/server session state.
     """
 
@@ -86,6 +86,22 @@ class AsyncTrainingApiClient(ApiContract):
     def session_invalid(self) -> bool:
         return self._session_invalid
 
+    def _accept_start_instance_for_request(
+        self,
+        request: Mapping[str, object],
+        response: Mapping[str, object],
+    ) -> str:
+        instance_config = request.get("instance_config")
+        if (
+            isinstance(instance_config, Mapping)
+            and instance_config.get("instance_type") == "combat"
+            and response.get("max_emulate_actions_items") is None
+        ):
+            raise ApiProtocolError(
+                "combat start_instance response must include max_emulate_actions_items"
+            )
+        return self._accept_start_instance(response)
+
     async def retry_request(
         self,
         retry_request: RetryRequest,
@@ -105,7 +121,7 @@ class AsyncTrainingApiClient(ApiContract):
             if operation == "start_instance":
                 response = await self._execute(request, deadline=deadline)
                 try:
-                    result = self._accept_start_instance(response)
+                    result = self._accept_start_instance_for_request(request, response)
                 except ApiProtocolError:
                     await self._mark_protocol_uncertain(request)
                     raise
@@ -138,6 +154,12 @@ class AsyncTrainingApiClient(ApiContract):
                     request, source_branch_id=parent, deadline=deadline
                 )
 
+            if operation == "emulate_actions":
+                items = request.get("items")
+                if not isinstance(items, list) or not items:
+                    raise ApiProtocolError("retry emulate_actions is missing items")
+                return await self._execute_emulate_actions(request, deadline=deadline)
+
             if operation in {"cancel_branches", "release_branches", "get_branch_status"}:
                 response = await self._execute(request, deadline=deadline)
                 self._consume_sequence(retry_request)
@@ -168,7 +190,7 @@ class AsyncTrainingApiClient(ApiContract):
             request = self._build_start_instance(self._next_request_seq, instance_config)
             response = await self._execute(request, deadline=deadline)
             try:
-                result = self._accept_start_instance(response)
+                result = self._accept_start_instance_for_request(request, response)
             except ApiProtocolError:
                 await self._mark_protocol_uncertain(request)
                 raise
@@ -242,6 +264,93 @@ class AsyncTrainingApiClient(ApiContract):
             )
             return await self._execute_selected_action(
                 request, source_branch_id=parent_branch_id, deadline=deadline
+            )
+
+    async def emulate_actions(
+        self,
+        instance_id: str,
+        items: Sequence[Mapping[str, object]],
+        *,
+        timeout_s: float,
+        simulation_options: Mapping[str, object] | None = None,
+    ) -> JsonObject:
+        """DTO v0.7 batch counterpart of ``emulate_action``.
+
+        Every item parent must already exist and be usable when the batch request starts;
+        a Branch created by another item in the same batch is not a valid parent. The
+        whole batch is sent as one request over the existing single in-flight,
+        session-sequenced protocol and exact-replayed as a whole if completion is
+        uncertain.
+        """
+        async with self._operation_deadline(timeout_s) as deadline:
+            self._ensure_fresh_request_allowed()
+            request = self._build_emulate_actions(
+                self._next_request_seq, instance_id, items, simulation_options
+            )
+            return await self._execute_emulate_actions(request, deadline=deadline)
+
+    async def _execute_emulate_actions(
+        self,
+        request: JsonObject,
+        *,
+        deadline: float,
+    ) -> JsonObject:
+        response: JsonObject | None = None
+        token = RetryRequest.from_message(request)
+        try:
+            response = await self._execute(request, deadline=deadline)
+            self._consume_sequence(token)
+        except asyncio.CancelledError as exc:
+            self._record_emulate_actions_batch(request, response, error=exc)
+            raise
+        except ApiOperationError as exc:
+            self._record_emulate_actions_batch(request, exc.response)
+            raise
+        except Exception as exc:
+            self._record_emulate_actions_batch(request, response, error=exc)
+            raise
+
+        self._record_emulate_actions_batch(request, response)
+        return response
+
+    def _record_emulate_actions_batch(
+        self,
+        request: Mapping[str, object],
+        response: Mapping[str, object] | None,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        items = request.get("items")
+        if not isinstance(items, list):
+            return
+        branch_results = response.get("branch_results") if response is not None else None
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            branch_id = item.get("branch_id")
+            branch_result = (
+                branch_results.get(branch_id)
+                if isinstance(branch_results, Mapping)
+                else response
+            )
+            item_request = {
+                "schema_version": request.get("schema_version"),
+                "client_session_id": request.get("client_session_id"),
+                "request_seq": request.get("request_seq"),
+                "request_id": request.get("request_id"),
+                "operation": "emulate_actions",
+                "instance_id": request.get("instance_id"),
+                "parent_branch_id": item.get("parent_branch_id"),
+                "branch_id": branch_id,
+                "rng_id": item.get("rng_id"),
+                "decision_point_id": item.get("decision_point_id"),
+                "action_id": item.get("action_id"),
+            }
+            self._record_selected_action(
+                item_request,
+                source_branch_id=item.get("parent_branch_id"),
+                result=branch_result if isinstance(branch_result, Mapping) else None,
+                error=error,
             )
 
     async def cancel_branches(
@@ -368,6 +477,7 @@ class AsyncTrainingApiClient(ApiContract):
             self._consume_sequence(token)
             if token.operation == "close_instance" and exc.response.get("status") == "faulted":
                 self._instance_id = None
+                self._max_emulate_actions_items = None
                 self._audit.clear()
             if fault_kind in _FATAL_CONSUMING_SESSION_REJECTIONS:
                 self._session_invalid = True
@@ -423,8 +533,11 @@ class AsyncTrainingApiClient(ApiContract):
         return response
 
     async def _mark_protocol_uncertain(self, request: Mapping[str, object]) -> None:
-        await self._connection.invalidate()
+        # Preserve the exact recovery token before the first cancellation point. RL may
+        # already have consumed this request, so connection teardown must not be able to
+        # erase the only exact-replay path.
         self._remember_pending(RetryRequest.from_message(request))
+        await self._connection.invalidate()
 
     def _ensure_fresh_request_allowed(self) -> None:
         if self._session_invalid:

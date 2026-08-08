@@ -18,12 +18,14 @@ class _Connection:
         self.messages: list[dict] = []
         self.fail_operation_once: str | None = None
         self.cancel_operation_once: str | None = None
+        self.protocol_invalid_operation_once: str | None = None
+        self.cancel_invalidate_once = False
         self.change_epoch_on_next = False
 
     @staticmethod
     def _response(request: dict, **fields) -> dict:
         return {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -64,11 +66,12 @@ class _Connection:
                 request,
                 status="completed",
                 instance_id="inst-001",
+                max_emulate_actions_items=64,
                 decision_point_id="decision-1",
                 masked_emulator_dto={"state": "initial"},
             )
         if operation == "get_decision":
-            return self._response(
+            response = self._response(
                 request,
                 status="completed",
                 instance_id=request["instance_id"],
@@ -79,6 +82,10 @@ class _Connection:
                     "legal_actions": [{"action_id": "action-1"}],
                 },
             )
+            if self.protocol_invalid_operation_once == operation:
+                self.protocol_invalid_operation_once = None
+                response["branch_id"] = "unexpected-branch"
+            return response
         if operation == "commit_action":
             return self._response(
                 request,
@@ -100,7 +107,9 @@ class _Connection:
         raise AssertionError(f"unexpected operation: {operation}")
 
     async def invalidate(self) -> None:
-        pass
+        if self.cancel_invalidate_once:
+            self.cancel_invalidate_once = False
+            raise asyncio.CancelledError()
 
     async def close(self) -> None:
         pass
@@ -216,6 +225,30 @@ class AsyncClientRetryRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["event"], "selection")
         self.assertEqual(events[0]["client_error"]["type"], "CancelledError")
         self.assertEqual(client.pending_retry.request_seq, 2)
+
+    async def test_protocol_error_cancellation_during_invalidate_keeps_retry_token(self) -> None:
+        connection = _Connection()
+        client = AsyncTrainingApiClient(connection)
+        instance_id = await client.start_instance(
+            {"instance_type": "combat"}, timeout_s=1.0
+        )
+        self.assertEqual(client.next_request_seq, 2)
+
+        connection.protocol_invalid_operation_once = "get_decision"
+        connection.cancel_invalidate_once = True
+        with self.assertRaises(asyncio.CancelledError):
+            await client.get_decision(instance_id, timeout_s=1.0)
+
+        retry = client.pending_retry
+        self.assertIsNotNone(retry)
+        assert retry is not None
+        self.assertEqual(retry.operation, "get_decision")
+        self.assertEqual(retry.request_seq, 2)
+        self.assertEqual(retry.to_message(), connection.messages[-1])
+        self.assertEqual(client.next_request_seq, 2)
+
+        with self.assertRaisesRegex(RuntimeError, "unresolved request"):
+            await client.get_decision(instance_id, timeout_s=1.0)
 
 
 if __name__ == "__main__":

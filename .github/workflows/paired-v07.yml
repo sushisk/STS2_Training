@@ -1,0 +1,40 @@
+name: paired-v07-exact-pair
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  training-hosted-contract:
+    # This required job is intentionally repo-local. The legacy workflow name is
+    # retained for tooling compatibility, but this job is not evidence that a
+    # particular Training/RL commit pair passed trusted cross-repository integration.
+    name: training-hosted-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out Training
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Run hosted unit and contract regression tests
+        run: python -m pytest -q -m "not integration"
+
+      - name: Explain paired validation boundary
+        if: always()
+        run: |
+          echo "This required check proves only Training repo-local hosted unit/contract regressions."
+          echo "It does not attest an exact Training/RL commit pair."
+          echo "Real-Emulator paired validation remains separate and must not be treated as a trusted release gate until it runs through an isolated exact-pair orchestrator."
