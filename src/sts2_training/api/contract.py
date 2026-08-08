@@ -375,6 +375,14 @@ class ApiContract:
                     f"invalid branch status for {branch_id!r}: {branch_status!r}"
                 )
 
+        # Once RL has confirmed cancellation or release, the Branch can no longer be
+        # selected as a parent. Retaining its deep-copied Decision payload would make
+        # audit memory grow with the total number of speculative Branches ever created.
+        if operation in {"cancel_branches", "release_branches"}:
+            instance_id = request.get("instance_id")
+            if isinstance(instance_id, str) and instance_id:
+                self._audit.forget(instance_id, branch_ids)
+
     def _validate_selected_action_response(
         self, request: Mapping[str, Any], response: Mapping[str, Any]
     ) -> None:
