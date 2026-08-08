@@ -37,7 +37,7 @@ class DecisionPayloadValidationTest(unittest.TestCase):
             self._response({"legal_actions": [{"action_id": "a-1"}]})
         )
 
-    def test_run_terminal_without_legal_actions_is_accepted_when_outcome_present(self) -> None:
+    def test_run_terminal_without_actions_accepts_outcome(self) -> None:
         self.contract._validate_decision_payload(
             self._response({"run_terminal": True, "outcome": "victory"})
         )
