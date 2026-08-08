@@ -28,6 +28,12 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertEqual(value_fn.evaluate(dto), DEFAULT_WEIGHTS["victory_bonus"])
 
+    def test_unknown_transition_victory_is_not_treated_as_defeat(self) -> None:
+        value_fn = HeuristicValueFunction()
+        dto = {"transition": {"kind": "combat_completed", "victory": None}}
+
+        self.assertNotEqual(value_fn.evaluate(dto), DEFAULT_WEIGHTS["defeat_penalty"])
+
     def test_higher_hp_ratio_scores_better(self) -> None:
         value_fn = HeuristicValueFunction()
         healthy = {"hp": 80, "maxHp": 100, "enemies": []}
@@ -57,6 +63,29 @@ class HeuristicValueFunctionTest(unittest.TestCase):
         blocked = {**base, "block": 20}
 
         self.assertGreater(value_fn.evaluate(blocked), value_fn.evaluate(base))
+
+    def test_block_is_consumed_once_across_multiple_enemy_attacks(self) -> None:
+        value_fn = HeuristicValueFunction(
+            weights={
+                "player_hp_ratio": 0.0,
+                "player_block": 0.0,
+                "enemy_hp_ratio": 0.0,
+                "predicted_incoming_damage": -1.0,
+                "enemies_alive": 0.0,
+                "buff_debuff_score": 0.0,
+            }
+        )
+        dto = {
+            "hp": 50,
+            "maxHp": 50,
+            "block": 10,
+            "enemies": [
+                {"hp": 10, "maxHp": 10, "isAlive": True, "intent": {"attackDamage": 10}},
+                {"hp": 10, "maxHp": 10, "isAlive": True, "intent": {"attackDamage": 10}},
+            ],
+        }
+
+        self.assertEqual(value_fn.evaluate(dto), -10.0)
 
     def test_missing_fields_do_not_raise(self) -> None:
         value_fn = HeuristicValueFunction()
