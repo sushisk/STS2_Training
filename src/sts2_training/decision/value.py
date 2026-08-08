@@ -75,7 +75,7 @@ class HeuristicValueFunction(ValueModel):
     def _extract_features(self, dto: Mapping[str, Any]) -> dict[str, float]:
         hp = _num(dto.get("hp"))
         max_hp = max(1.0, _num(dto.get("maxHp"), default=1.0))
-        block = _num(dto.get("block"))
+        block = max(0.0, _num(dto.get("block")))
 
         enemies = [
             e for e in (dto.get("enemies") or []) if isinstance(e, Mapping) and e.get("isAlive", True)
@@ -83,15 +83,17 @@ class HeuristicValueFunction(ValueModel):
         enemy_hp = sum(max(0.0, _num(e.get("hp"))) for e in enemies)
         enemy_max_hp = sum(max(1.0, _num(e.get("maxHp"), default=1.0)) for e in enemies) or 1.0
 
-        incoming = 0.0
+        incoming_before_block = 0.0
         for enemy in enemies:
             intent = enemy.get("intent") or {}
             if not isinstance(intent, Mapping):
                 continue
             damage = intent.get("attackDamage")
-            if damage is not None:
-                repeats = intent.get("attackRepeats", 1) or 1
-                incoming += max(0.0, _num(damage) * _num(repeats) - block)
+            if damage is None:
+                continue
+            repeats = max(0.0, _num(intent.get("attackRepeats"), default=1.0))
+            incoming_before_block += max(0.0, _num(damage) * repeats)
+        incoming = max(0.0, incoming_before_block - block)
 
         buff_debuff = 0.0
         for power in dto.get("playerPowers") or []:
@@ -116,8 +118,12 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
     if outcome in ("victory", "defeat"):
         return outcome
     transition = dto.get("transition")
-    if isinstance(transition, Mapping) and "victory" in transition:
-        return "victory" if transition["victory"] else "defeat"
+    if isinstance(transition, Mapping):
+        victory = transition.get("victory")
+        if victory is True:
+            return "victory"
+        if victory is False:
+            return "defeat"
     return None
 
 
