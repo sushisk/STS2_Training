@@ -8,11 +8,11 @@ to hit the ~5ms/batch latency budget this is designed around; the default
 
 `PriorHeuristicPolicy` is the no-model default: the same `action_type`
 category-priority idea as `selection.heuristic_selector.HeuristicCombatSelector`,
-but ranking a list of top-k candidates (with a prior score each) instead of
-picking one, since beam search needs multiple candidate actions per node to
-actually branch on. It exists so `BeamSearchEngine`/`CombatDecisionEngine` are
-runnable and testable before any trained policy checkpoint exists - swap in a
-real model by implementing `PolicyModel`.
+but ranking a list of top-k candidates instead of picking one, since beam
+search needs multiple candidate actions per node to actually branch on. It
+exists so `BeamSearchEngine`/`CombatDecisionEngine` are runnable and testable
+before any trained policy checkpoint exists - swap in a real model by
+implementing `PolicyModel`.
 """
 
 from __future__ import annotations
@@ -47,8 +47,6 @@ class ActionCandidate:
     """One action a `PolicyModel` proposes for beam search to branch on."""
 
     action_id: str
-    prior: float = 0.0
-    action_type: str | None = None
 
 
 class PolicyModel(ABC):
@@ -120,12 +118,4 @@ class PriorHeuristicPolicy(PolicyModel):
                 self._rng.shuffle(candidates)
             ordered.extend(candidates)
 
-        total = len(ordered)
-        return [
-            ActionCandidate(
-                action_id=action["action_id"],
-                prior=(total - index) / total,
-                action_type=action.get("action_type"),
-            )
-            for index, action in enumerate(ordered[:top_k])
-        ]
+        return [ActionCandidate(action_id=action["action_id"]) for action in ordered[:top_k]]
