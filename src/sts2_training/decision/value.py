@@ -19,7 +19,6 @@ checkpoint exists - swap in a real model by implementing `ValueModel`.
 from __future__ import annotations
 
 import math
-from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -37,12 +36,16 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 }
 
 
-class ValueModel(ABC):
-    """Scores one `masked_emulator_dto`; higher is better for Training."""
+class ValueModel:
+    """Scores one `masked_emulator_dto`; higher is better for Training.
 
-    @abstractmethod
+    Implement `evaluate` for scalar inference, or override `evaluate_batch`
+    directly for a batch-only learned model. Batch-only implementations do not
+    need a dummy scalar method just to satisfy an abstract base class.
+    """
+
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
-        raise NotImplementedError
+        raise NotImplementedError("ValueModel must override evaluate or evaluate_batch")
 
     def evaluate_batch(self, dtos: Sequence[Mapping[str, Any]]) -> list[float]:
         """Batched counterpart of `evaluate`, one entry per dto, in order.
@@ -139,9 +142,14 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
 
 
 def _num(value: Any, *, default: float = 0.0) -> float:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("heuristic input numbers must be finite numeric values")
+    try:
         number = float(value)
-        if not math.isfinite(number):
-            raise ValueError("heuristic input numbers must be finite")
-        return number
-    return default
+    except OverflowError as exc:
+        raise ValueError("heuristic input numbers must be finite numeric values") from exc
+    if not math.isfinite(number):
+        raise ValueError("heuristic input numbers must be finite numeric values")
+    return number
