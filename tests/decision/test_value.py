@@ -34,6 +34,29 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertNotEqual(value_fn.evaluate(dto), DEFAULT_WEIGHTS["defeat_penalty"])
 
+    def test_combat_terminal_minimal_semantic_shape_is_honored(self) -> None:
+        # Minimal semantic fields relevant to terminal scoring. Real RL payloads also
+        # include dto_version/mask_version and may include additional combat state.
+        value_fn = HeuristicValueFunction()
+        victory = {"legal_actions": [], "terminal": True, "outcome": "victory", "hp": 4, "maxHp": 80}
+        defeat = {"legal_actions": [], "terminal": True, "outcome": "defeat", "hp": 0, "maxHp": 80}
+        healthy_nonterminal = {"hp": 80, "maxHp": 80, "enemies": []}
+
+        self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
+        self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
+        self.assertGreater(value_fn.evaluate(victory), value_fn.evaluate(healthy_nonterminal))
+
+    def test_whole_run_terminal_minimal_semantic_shape_is_honored(self) -> None:
+        # This is the Branch terminal shortcut's minimal semantic shape. Whole Run root
+        # terminal payloads also include boundary/legal_actions/room_context/history,
+        # and build_masked_emulator_dto adds dto_version/mask_version in both cases.
+        value_fn = HeuristicValueFunction()
+        victory = {"run_terminal": True, "outcome": "victory"}
+        defeat = {"run_terminal": True, "outcome": "defeat"}
+
+        self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
+        self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
+
     def test_higher_hp_ratio_scores_better(self) -> None:
         value_fn = HeuristicValueFunction()
         healthy = {"hp": 80, "maxHp": 100, "enemies": []}
