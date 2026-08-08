@@ -91,6 +91,24 @@ class HeuristicValueFunctionTest(unittest.TestCase):
         value_fn = HeuristicValueFunction()
         self.assertIsInstance(value_fn.evaluate({}), float)
 
+    def test_malformed_nested_containers_fail_closed(self) -> None:
+        value_fn = HeuristicValueFunction()
+        malformed = (
+            {"enemies": {}},
+            {"enemies": [42]},
+            {"enemies": [{"isAlive": "yes"}]},
+            {"enemies": [{"isAlive": True, "intent": []}]},
+            {"playerPowers": {}},
+            {"playerPowers": [None]},
+            {"playerPowers": [{"type": 123, "amount": 1}]},
+            {"transition": []},
+        )
+
+        for dto in malformed:
+            with self.subTest(dto=dto):
+                with self.assertRaisesRegex(ValueError, "heuristic input"):
+                    value_fn.evaluate(dto)
+
     def test_evaluate_batch_default_matches_looping_evaluate(self) -> None:
         value_fn = HeuristicValueFunction()
         dtos = [{"hp": 10, "maxHp": 10}, {"hp": 5, "maxHp": 10}]
