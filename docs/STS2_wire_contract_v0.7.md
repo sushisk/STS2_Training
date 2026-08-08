@@ -204,6 +204,46 @@ validation. Any missing result, extra result, or correlation mismatch observed b
 Training is an `ApiProtocolError`; completion is uncertain and the exact request remains
 pending for retry.
 
+## Terminal outcome invariant
+
+`terminal` and `run_terminal`, when present, are booleans. A terminal decision payload
+must carry the final run/combat verdict explicitly. Whenever
+`masked_emulator_dto.terminal == true` (Combat) or
+`masked_emulator_dto.run_terminal == true` (Whole Run),
+`masked_emulator_dto.outcome` is required and must be exactly one of:
+
+```text
+victory
+defeat
+```
+
+The invariant is bidirectional: a non-terminal decision payload must not carry a
+top-level `outcome` field. This prevents a stale `victory`/`defeat` value from making a
+normal search node look terminal to a value function that gives terminal scores dominant
+weight.
+
+Missing, `null`, or any other terminal outcome is a protocol violation. RL treats such a
+state as a producer/coordinator invariant failure rather than emitting a successful
+terminal payload, and Training rejects it with `ApiProtocolError` instead of silently
+degrading terminal scoring.
+
+A terminal decision has no selectable actions. If `legal_actions` is present on a
+terminal payload it must therefore be the empty list. Combat terminal responses always
+use `terminal: true` with `legal_actions: []`. Whole Run has two legitimate terminal
+shapes: the root response still carries normal root context such as `boundary`,
+`legal_actions: []`, `room_context`, and `history`; the Branch terminal shortcut may omit
+`legal_actions` and contain only the terminal semantic fields plus the normal masked DTO
+metadata. `build_masked_emulator_dto()` adds `dto_version` and `mask_version` to both
+shapes, so examples that omit those fields are only minimal semantic examples, not
+byte-for-byte wire fixtures.
+
+Terminal Branches are re-readable through `get_decision()` in both Combat and Whole Run;
+the response must preserve the same terminal marker and validated `outcome` until the
+Branch is cancelled/released or the instance is otherwise invalidated.
+
+This requirement is part of the still-in-development v0.7 lockstep contract and does not
+require a version bump within this unmerged v0.7 rollout.
+
 ## Retry and at-most-once semantics
 
 The existing single in-flight sequencing rules apply to the batch as a whole.
