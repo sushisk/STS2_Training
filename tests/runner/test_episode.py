@@ -82,10 +82,15 @@ class _FakeConnection:
 
 
 def _decision(decision_point_id: str, *, legal_actions=None, **dto_extra) -> dict:
-    return {
-        "decision_point_id": decision_point_id,
-        "masked_emulator_dto": {"legal_actions": legal_actions if legal_actions is not None else [_ACTION], **dto_extra},
-    }
+    resolved_legal_actions = legal_actions if legal_actions is not None else [_ACTION]
+    dto = {"legal_actions": resolved_legal_actions, **dto_extra}
+    # The wire contract requires a terminal marker (+ outcome) on any dto with empty
+    # legal_actions, and forbids outcome otherwise - default one in so callers can
+    # just say legal_actions=[] without repeating terminal=True everywhere.
+    if not resolved_legal_actions and "terminal" not in dto and "run_terminal" not in dto:
+        dto["terminal"] = True
+        dto.setdefault("outcome", "victory")
+    return {"decision_point_id": decision_point_id, "masked_emulator_dto": dto}
 
 
 class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
