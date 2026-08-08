@@ -56,10 +56,10 @@ class CombatDecisionEngine:
         fallback_selector: HeuristicCombatSelector | None = None,
     ) -> None:
         self._client = client
-        self._policy = policy if policy is not None else PriorHeuristicPolicy()
-        self._value_fn = value_fn if value_fn is not None else HeuristicValueFunction()
+        policy_model = policy if policy is not None else PriorHeuristicPolicy()
+        value_model = value_fn if value_fn is not None else HeuristicValueFunction()
         self._beam = BeamSearchEngine(
-            client, policy=self._policy, value_fn=self._value_fn, config=beam_config
+            client, policy=policy_model, value_fn=value_model, config=beam_config
         )
         self._fallback = (
             fallback_selector if fallback_selector is not None else HeuristicCombatSelector()
