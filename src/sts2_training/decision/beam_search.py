@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -203,7 +204,6 @@ class BeamSearchEngine:
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
         reason = "max_depth"
-        search_error: BaseException | None = None
 
         try:
             for depth in range(cfg.max_depth):
@@ -260,15 +260,13 @@ class BeamSearchEngine:
                 stats.depths_completed += 1
 
             finished.extend(beam)
-        except BaseException as exc:
-            search_error = exc
-            raise
         finally:
+            active_error = sys.exception()
             t0 = time.monotonic()
             try:
                 await self._cleanup(instance_id, all_branch_ids, deadline=overall_deadline)
             except Exception:
-                if search_error is None:
+                if active_error is None:
                     raise
                 _LOG.exception(
                     "beam search cleanup also failed while propagating a search error "
@@ -465,7 +463,16 @@ class BeamSearchEngine:
             )
             return
 
-        await self._cleanup_call("cancel_branches", instance_id, branch_ids, deadline)
+        cancelled = await self._cleanup_call(
+            "cancel_branches", instance_id, branch_ids, deadline
+        )
+        if not cancelled:
+            _LOG.warning(
+                "skipping beam search branch release for instance_id=%s because "
+                "cancellation did not complete",
+                instance_id,
+            )
+            return
         if _client_unusable(self._client):
             _LOG.warning(
                 "skipping beam search branch release for instance_id=%s after cancellation failure",
@@ -480,7 +487,7 @@ class BeamSearchEngine:
         instance_id: str,
         branch_ids: list[str],
         deadline: float,
-    ) -> None:
+    ) -> bool:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _LOG.warning(
@@ -488,7 +495,7 @@ class BeamSearchEngine:
                 operation,
                 instance_id,
             )
-            return
+            return False
 
         try:
             await getattr(self._client, operation)(
@@ -504,6 +511,7 @@ class BeamSearchEngine:
                 len(branch_ids),
                 exc_info=True,
             )
+            return False
         except TransportError as exc:
             if exc.completion_uncertain or _client_unusable(self._client):
                 raise
@@ -514,6 +522,8 @@ class BeamSearchEngine:
                 len(branch_ids),
                 exc_info=True,
             )
+            return False
+        return True
 
 
 def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
