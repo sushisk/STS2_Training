@@ -104,3 +104,17 @@ into heuristic decisions. `PolicyModel`/`ValueModel` are abstract bases with run
 heuristic defaults so the pipeline works end-to-end before any trained checkpoint exists -
 see `src/sts2_training/decision/how_to_use.md` for the full usage guide, config knobs, and
 how to plug in real models.
+
+## Runner: top-level entry points
+
+`sts2_training.runner` starts an instance and drives it to completion on top of
+`CombatDecisionEngine`, via three entry points sharing one loop (`EpisodeRunner`):
+`start_combat_from_state` (Combat from a fully-specified board, `CombatScenario`),
+`start_new_run` (a normal, from-scratch Whole Run, `NewRunConfig`), and
+`start_run_from_state` (Whole Run resumed from a snapshot, `RunSnapshot` - currently
+always raises `RunSnapshotRestoreNotSupportedError` pending RL-side support). Each
+module doubles as a CLI (`python -m sts2_training.runner.start_new_run --help`).
+`search_mode`/`beam_max_depth` (or `--search-mode`/`--beam-depth` on the CLI) pick a
+named beam search preset (see `sts2_training.decision.search_modes`) without hand-
+constructing a `BeamSearchConfig`. See `src/sts2_training/runner/how_to_use.md` for
+the full guide.
