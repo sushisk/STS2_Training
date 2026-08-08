@@ -10,7 +10,9 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner
+from sts2_training.decision.engine import CombatDecisionEngine
+from sts2_training.decision.search_modes import SEARCH_MODES
+from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner, build_engine
 
 _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
 
@@ -161,49 +163,32 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
 
 class BuildEngineTest(unittest.TestCase):
     def test_no_args_builds_a_default_engine(self) -> None:
-        from sts2_training.decision.engine import CombatDecisionEngine
-        from sts2_training.runner.episode import build_engine
-
         engine = build_engine(client=object())
 
         self.assertIsInstance(engine, CombatDecisionEngine)
 
     def test_search_mode_and_beam_max_depth_configure_the_built_engine(self) -> None:
-        from sts2_training.runner.episode import build_engine
-
         engine = build_engine(client=object(), search_mode="deep", beam_max_depth=9)
 
         self.assertEqual(engine.beam_search.config.max_depth, 9)
 
     def test_named_mode_alone_is_applied(self) -> None:
-        from sts2_training.decision.search_modes import SEARCH_MODES
-        from sts2_training.runner.episode import build_engine
-
         engine = build_engine(client=object(), search_mode="wide")
 
         self.assertEqual(engine.beam_search.config.beam_width, SEARCH_MODES["wide"].beam_width)
 
     def test_explicit_engine_is_returned_as_is(self) -> None:
-        from sts2_training.decision.engine import CombatDecisionEngine
-        from sts2_training.runner.episode import build_engine
-
         given = CombatDecisionEngine(client=object())
 
         self.assertIs(build_engine(client=object(), engine=given), given)
 
     def test_engine_combined_with_search_mode_raises(self) -> None:
-        from sts2_training.decision.engine import CombatDecisionEngine
-        from sts2_training.runner.episode import build_engine
-
         given = CombatDecisionEngine(client=object())
 
         with self.assertRaises(ValueError):
             build_engine(client=object(), engine=given, search_mode="deep")
 
     def test_engine_combined_with_beam_max_depth_raises(self) -> None:
-        from sts2_training.decision.engine import CombatDecisionEngine
-        from sts2_training.runner.episode import build_engine
-
         given = CombatDecisionEngine(client=object())
 
         with self.assertRaises(ValueError):

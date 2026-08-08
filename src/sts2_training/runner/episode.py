@@ -101,10 +101,6 @@ class EpisodeRunner:
         self._client = client
         self._engine = engine or CombatDecisionEngine(client)
 
-    @property
-    def engine(self) -> CombatDecisionEngine:
-        return self._engine
-
     async def run(
         self,
         instance_id: str,

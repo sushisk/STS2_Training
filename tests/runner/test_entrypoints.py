@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import unittest
 
+from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario, RunSnapshot
 from sts2_training.runner.start_combat_from_state import start_combat_from_state
 from sts2_training.runner.start_new_run import start_new_run
@@ -82,8 +83,6 @@ class StartCombatFromStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.start_instance_calls, [])
 
     async def test_engine_and_search_mode_together_is_rejected(self) -> None:
-        from sts2_training.decision.engine import CombatDecisionEngine
-
         client = _FakeClient()
         engine = CombatDecisionEngine(client)
 

@@ -24,7 +24,7 @@ from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.search_modes import SEARCH_MODES
-from sts2_training.runner.episode import EpisodeResult, EpisodeRunner
+from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.scenario import RunSnapshot
 
 __all__ = ["RunSnapshotRestoreNotSupportedError", "start_run_from_state"]
