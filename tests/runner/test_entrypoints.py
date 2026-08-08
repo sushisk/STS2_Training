@@ -1,7 +1,6 @@
 """Coverage for the three top-level entry points: each one's job is only to build
-the right `instance_config` and hand off to `EpisodeRunner` - the loop itself is
-covered by `test_episode.py`, so these tests just assert `start_instance` receives
-the expected config and an `EpisodeResult` comes back.
+the right `instance_config` and hand off to `EpisodeRunner` (loop itself covered by
+`test_episode.py`), so these just assert `start_instance` gets the expected config.
 """
 
 from __future__ import annotations

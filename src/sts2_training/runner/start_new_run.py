@@ -44,12 +44,10 @@ async def start_new_run(
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
 ) -> EpisodeResult:
-    """`seed=None` (the default) picks a fresh random seed - via `rng` if given,
-    otherwise the module-level `random` - so repeated calls produce different runs.
-    Pass an explicit `seed` to pin a specific, reproducible run instead.
-    `search_mode`/`beam_max_depth` select the beam search config (see
-    `decision.search_modes`) - pass `engine` instead for full manual control
-    (mutually exclusive with the other two, see `episode.build_engine`).
+    """`seed=None` (default) picks a fresh random seed via `rng` (or module-level
+    `random`) so repeated calls produce different runs; pass `seed` to pin one.
+    `search_mode`/`beam_max_depth` select the beam config; pass `engine` instead for
+    full manual control (mutually exclusive, see `episode.build_engine`).
     """
     if seed is None:
         seed = (rng or random).randint(1, 2**31 - 1)

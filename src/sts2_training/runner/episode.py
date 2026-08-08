@@ -1,17 +1,12 @@
-"""`EpisodeRunner`: the one "drive an already-started instance to completion" loop
-shared by every entry point in this package (`start_combat_from_state`,
-`start_run_from_state`, `start_new_run`).
+"""`EpisodeRunner`: the "drive an already-started instance to completion" loop
+shared by every entry point in this package.
 
-The three entry points differ only in HOW an instance gets created (what
-`instance_config` they build - see `scenario.py`); once `start_instance` has
-returned an `instance_id`, driving it to completion is identical regardless of
-`instance_type`. `CombatDecisionEngine` (see `sts2_training.decision`) already
-generalizes over this: Beam Search only ever activates for `card`/`potion`/`system`
-decisions, and everything else (including Whole Run's `map_select`/`event_choice`/
-`shop_choice`/`rest_choice`/`reward_select` boundaries) falls through to
-`HeuristicCombatSelector`, which classifies by `action_type` generically rather than
-assuming Combat. So this module adds no new decision logic - only the loop/lifecycle
-around it.
+The three entry points differ only in how an instance gets created (see
+`scenario.py`); once `start_instance` returns an `instance_id`, driving it to
+completion is identical regardless of `instance_type` - `CombatDecisionEngine`
+already generalizes over that (Beam Search only for `card`/`potion`/`system`,
+everything else falls through to `HeuristicCombatSelector`), so this module adds
+no new decision logic, only the loop/lifecycle around it.
 """
 
 from __future__ import annotations
@@ -39,15 +34,10 @@ def build_engine(
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
 ) -> CombatDecisionEngine:
-    """Resolves the engine each of the three top-level entry points should use.
-
-    - `engine` given: used as-is. Combining it with `search_mode`/`beam_max_depth` is
-      rejected (`ValueError`) rather than silently ignoring one of them - an explicit
-      engine already carries its own `BeamSearchConfig`.
-    - otherwise: a fresh `CombatDecisionEngine` built from `search_mode`/
-      `beam_max_depth` (see `decision.search_modes.resolve_search_mode` for how those
-      two combine - `beam_max_depth` overrides just the depth of whichever mode was
-      chosen).
+    """`engine` given -> used as-is; combining it with `search_mode`/`beam_max_depth`
+    raises rather than silently ignoring one. Otherwise builds a fresh
+    `CombatDecisionEngine` from `search_mode`/`beam_max_depth` (see
+    `decision.search_modes.resolve_search_mode`).
     """
     if engine is not None:
         if search_mode is not None or beam_max_depth is not None:
@@ -62,39 +52,32 @@ def build_engine(
 
 class EpisodeLimitExceeded(RuntimeError):
     """Raised when an episode exceeds `max_decisions` without reaching a terminal
-    state - a runaway-loop guard, not a normal outcome. `None` (the default) means
-    no limit."""
+    state - a runaway-loop guard. `None` (default) means no limit."""
 
 
 @dataclass(frozen=True)
 class EpisodeResult:
     """What actually happened when an instance was driven to completion.
 
-    `final_dto` is the raw `masked_emulator_dto` from the last response seen (empty
-    `legal_actions`, or a Whole Run `run_terminal` payload), even if that is the very
-    first response observed (an instance already terminal at the start of `run()`).
-    This module deliberately does not collapse it into a guessed `"victory"/"defeat"`
-    enum: `outcome` is present on both boundaries as of STS2_RL's
-    `agent/expose-terminal-outcome`, but reading it here would silently re-couple this
-    module to that wire detail - callers that need a definitive win/loss read
-    `final_dto["outcome"]` themselves.
+    `final_dto` is the raw `masked_emulator_dto` from the last response seen, even if
+    that's the very first one (an instance already terminal at the start of `run()`).
+    Not collapsed into a guessed `"victory"/"defeat"` enum - read `final_dto["outcome"]`
+    for that.
     """
 
     instance_id: str
     decisions_made: int
     final_dto: JsonObject
     elapsed_s: float
-    # Count of DecisionOutcome.source values seen ("beam_search"/"heuristic_fallback"/
-    # "forced_single_action"/"none") - a cheap health signal for how often beam search
-    # actually won out versus falling back, without needing to instrument the caller.
+    # Count of DecisionOutcome.source values seen - a cheap signal for how often beam
+    # search actually won out versus falling back.
     decision_sources: dict[str, int] = field(default_factory=dict)
 
 
 class EpisodeRunner:
-    """Construct one per `(client, engine)` pair and call `run()` once per instance -
-    unlike `CombatDecisionEngine`/`BeamSearchEngine`, this class holds no
-    instance-scoped state itself (no branch-id allocator to keep unique), so reuse
-    across multiple sequential instances on the same client is fine.
+    """Unlike `CombatDecisionEngine`/`BeamSearchEngine`, holds no instance-scoped
+    state (no branch-id allocator to keep unique), so one instance is fine to reuse
+    across multiple sequential episodes on the same client.
     """
 
     def __init__(self, client: Any, engine: CombatDecisionEngine | None = None) -> None:
@@ -109,13 +92,11 @@ class EpisodeRunner:
         max_decisions: int | None = None,
         close_timeout_s: float = 10.0,
     ) -> EpisodeResult:
-        """Repeatedly decide+commit until the instance reaches a state with no
-        `legal_actions` (Combat victory/defeat, or Whole Run `run_terminal`), then
-        best-effort `close_instance`s regardless of how the loop ended. Inlines
-        `CombatDecisionEngine.decide()` + `client.commit_action()` (equivalent to
-        `decide_and_commit()`) rather than calling that convenience method directly,
-        purely to capture `DecisionOutcome.source` for `EpisodeResult.decision_sources`
-        along the way.
+        """Repeatedly decide+commit until `legal_actions` is empty (Combat
+        victory/defeat, or Whole Run `run_terminal`), then best-effort
+        `close_instance` regardless of how the loop ended. Inlines
+        `decide()`+`commit_action()` (what `decide_and_commit()` does) just to
+        capture `DecisionOutcome.source` for `decision_sources` along the way.
         """
         t_start = time.monotonic()
         decisions_made = 0
@@ -127,11 +108,9 @@ class EpisodeRunner:
                 outcome = await self._engine.decide(instance_id, timeout_s=decision_timeout_s)
                 decision_sources[outcome.source] = decision_sources.get(outcome.source, 0) + 1
                 if outcome.chosen_action_id is None:
-                    # No legal_actions at all - instance was already terminal before
-                    # this iteration's decide() even ran, so there is nothing to
-                    # commit. Still capture the dto `decide()` already fetched (rather
-                    # than leaving `final_dto` at its {} default) so a scenario that
-                    # starts pre-terminal is reported accurately instead of empty.
+                    # Already terminal before this decide() - nothing to commit, but
+                    # still report the dto decide() fetched rather than leaving
+                    # final_dto at its {} default.
                     final_dto = outcome.decision.get("masked_emulator_dto") or {}
                     break
 

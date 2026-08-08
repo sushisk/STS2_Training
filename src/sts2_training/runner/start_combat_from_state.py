@@ -41,10 +41,9 @@ async def start_combat_from_state(
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
 ) -> EpisodeResult:
-    """`client` must not already have an active instance (same precondition as
-    `AsyncTrainingApiClient.start_instance`). `search_mode`/`beam_max_depth` select
-    the beam search config (see `decision.search_modes`) - pass `engine` instead for
-    full manual control (mutually exclusive with the other two, see `build_engine`).
+    """`client` must not already have an active instance. `search_mode`/
+    `beam_max_depth` select the beam config (see `decision.search_modes`); pass
+    `engine` instead for full manual control (mutually exclusive, see `build_engine`).
     """
     resolved_engine = build_engine(
         client, engine=engine, search_mode=search_mode, beam_max_depth=beam_max_depth

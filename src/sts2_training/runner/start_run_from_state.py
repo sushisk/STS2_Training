@@ -1,14 +1,11 @@
 """Entry point 2: resume a Whole Run instance from a fully-specified run snapshot
 (`RunSnapshot` - see `scenario.py`) and drive it to completion.
 
-KNOWN GAP (as of this writing): STS2_RL's `API/instance_whole_run.py::WholeRunInstance`
-does not yet consume a snapshot field from `instance_config` - it always calls
-`WholeRunSession.start_run(seed, character_id, ascension)`, i.e. a FRESH run, even
-though `WholeRunSession.load_state(snapshot_json)` already exists and could be wired to
-it (see `RunSnapshot`'s docstring). Calling `start_run_from_state()` therefore always
-raises `RunSnapshotRestoreNotSupportedError` rather than silently starting a fresh run
-while claiming to resume a specific one - this module's plumbing (config, CLI) is ready
-to use the moment that RL-side wiring lands; only the guard below needs removing.
+KNOWN GAP: STS2_RL's `WholeRunInstance` doesn't consume a snapshot field yet - it
+always starts a fresh run (see `RunSnapshot`'s docstring). `start_run_from_state()`
+always raises `RunSnapshotRestoreNotSupportedError` rather than silently starting
+fresh under a "resumed" label; the plumbing here is otherwise ready to use once that
+RL-side wiring lands.
 """
 
 from __future__ import annotations
@@ -31,8 +28,7 @@ __all__ = ["RunSnapshotRestoreNotSupportedError", "start_run_from_state"]
 
 
 class RunSnapshotRestoreNotSupportedError(NotImplementedError):
-    """Raised by `start_run_from_state()` until STS2_RL's `WholeRunInstance` wires
-    `instance_config["snapshot_json"]` into `WholeRunSession.load_state()` - see this
+    """Raised until STS2_RL's `WholeRunInstance` wires up snapshot restore - see this
     module's docstring."""
 
 
@@ -47,9 +43,8 @@ async def start_run_from_state(
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
 ) -> EpisodeResult:
-    """`search_mode`/`beam_max_depth` are accepted (not just `engine`) for signature
-    symmetry with the other two entry points, so callers/CLI scripts don't need to
-    special-case this one - unused until the guard below is lifted.
+    """`search_mode`/`beam_max_depth`/`engine` are accepted for signature symmetry
+    with the other two entry points - unused until the guard below is lifted.
     """
     raise RunSnapshotRestoreNotSupportedError(
         "STS2_RL's WholeRunInstance does not yet resume from RunSnapshot.snapshot_json "

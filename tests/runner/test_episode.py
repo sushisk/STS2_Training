@@ -1,8 +1,6 @@
-"""Coverage for `EpisodeRunner`'s decide+commit loop, against a scripted fake RL
-connection. Every decision here carries exactly one legal action, so
-`CombatDecisionEngine.decide()` always takes the `forced_single_action` path (see
-`engine.py`) - this test is about the loop/lifecycle around decisions, not about
-beam search itself (already covered by `tests/decision/test_beam_search.py`).
+"""Coverage for `EpisodeRunner`'s decide+commit loop. Every decision here carries
+exactly one legal action, so `decide()` always takes the `forced_single_action` path -
+this is about the loop/lifecycle, not beam search (see `test_beam_search.py`).
 """
 
 from __future__ import annotations
@@ -138,10 +136,9 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.close_instance_calls, 1)
 
     async def test_close_instance_skipped_when_session_invalid(self) -> None:
-        # `_close_best_effort` is exercised directly against a minimal stub rather than
-        # through `run()`, since a real AsyncTrainingApiClient with `session_invalid`
-        # already set rejects every operation up front (including get_decision), never
-        # reaching the close step this test is actually about.
+        # A real client with session_invalid already set rejects every operation up
+        # front (including get_decision), so this exercises _close_best_effort
+        # directly instead of going through run().
         class _StubClient:
             session_invalid = True
             pending_retry = None
