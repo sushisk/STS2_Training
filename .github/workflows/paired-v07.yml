@@ -17,6 +17,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       ATTESTATION_CONTEXT: paired-v07-exact-pair
+      TRUSTED_ATTESTATION_ISSUER: sushisk
+      TRUSTED_ATTESTATION_ISSUER_ID: '136587185'
     steps:
       - name: Verify trusted exact-pair attestation
         shell: bash
@@ -45,15 +47,23 @@ jobs:
             local repo="$1" sha="$2" payload
             payload="$(mktemp)"
             gh api "repos/${repo}/commits/${sha}/statuses?per_page=100" >"${payload}"
-            python - "${payload}" "${ATTESTATION_CONTEXT}" "${pair_description}" <<'PY'
+            python - "${payload}" "${ATTESTATION_CONTEXT}" "${pair_description}" "${TRUSTED_ATTESTATION_ISSUER}" "${TRUSTED_ATTESTATION_ISSUER_ID}" <<'PY'
           import json, sys
-          path, context, description = sys.argv[1:]
+          path, context, description, issuer_login, issuer_id = sys.argv[1:]
           with open(path, encoding='utf-8') as handle:
               statuses = json.load(handle)
           matching = [item for item in statuses if item.get('context') == context]
           if not matching:
               raise SystemExit(f"missing status context {context!r}")
           latest = matching[0]
+          creator = latest.get('creator') or {}
+          creator_login = creator.get('login')
+          creator_id = str(creator.get('id', ''))
+          if creator_login != issuer_login or creator_id != issuer_id:
+              raise SystemExit(
+                  f"latest {context!r} status has untrusted issuer: "
+                  f"login={creator_login!r} id={creator_id!r}"
+              )
           if latest.get('state') != 'success' or latest.get('description') != description:
               raise SystemExit(
                   f"latest {context!r} status does not attest current pair {description!r}: "
