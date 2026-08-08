@@ -32,6 +32,7 @@ _BRANCH_STATUS_VALUES = frozenset(
 # returns only after every Branch dispatched for the batch is terminal. queued/running
 # are therefore invalid per-item response states for this operation.
 _EMULATE_ACTIONS_BRANCH_STATUSES = frozenset({"completed", "partial", "faulted"})
+_TERMINAL_OUTCOMES = frozenset({"victory", "defeat"})
 
 
 class ApiProtocolError(RuntimeError):
@@ -446,6 +447,13 @@ class ApiContract:
         masked = response.get("masked_emulator_dto")
         if not isinstance(masked, dict):
             raise ApiProtocolError("masked_emulator_dto must be a dictionary")
+
+        if masked.get("terminal") is True or masked.get("run_terminal") is True:
+            outcome = masked.get("outcome")
+            if outcome not in _TERMINAL_OUTCOMES:
+                raise ApiProtocolError(
+                    "terminal masked_emulator_dto.outcome must be 'victory' or 'defeat'"
+                )
 
         legal_actions = masked.get("legal_actions")
         if legal_actions is None:

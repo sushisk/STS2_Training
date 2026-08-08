@@ -37,10 +37,16 @@ class DecisionPayloadValidationTest(unittest.TestCase):
             self._response({"legal_actions": [{"action_id": "a-1"}]})
         )
 
-    def test_run_terminal_without_legal_actions_is_accepted(self) -> None:
+    def test_run_terminal_without_legal_actions_is_accepted_when_outcome_present(self) -> None:
         self.contract._validate_decision_payload(
-            self._response({"run_terminal": True})
+            self._response({"run_terminal": True, "outcome": "victory"})
         )
+
+    def test_run_terminal_without_outcome_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ApiProtocolError, "outcome"):
+            self.contract._validate_decision_payload(
+                self._response({"run_terminal": True})
+            )
 
     def test_non_list_or_non_mapping_legal_actions_are_rejected(self) -> None:
         for legal_actions in ({"action_id": "a-1"}, ["a-1"]):

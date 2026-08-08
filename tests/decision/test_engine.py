@@ -230,7 +230,7 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
         connection = _FakeConnection()
         connection.root_decision = {
             "decision_point_id": "d-root",
-            "masked_emulator_dto": {"run_terminal": True},
+            "masked_emulator_dto": {"run_terminal": True, "outcome": "victory"},
         }
         client = await self._client(connection)
         engine = CombatDecisionEngine(client)
