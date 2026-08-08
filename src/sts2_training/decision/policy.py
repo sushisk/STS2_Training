@@ -107,9 +107,12 @@ class PriorHeuristicPolicy(PolicyModel):
         if not actions:
             return []
 
-        by_type = group_by_action_type(legal_actions)
-        present_types = {a.get("action_type") for a in actions}
-        other_types = sorted(t for t in present_types - set(_CATEGORY_PRIORITY) if t is not None)
+        by_type = group_by_action_type(actions)
+        other_types = sorted(
+            action_type
+            for action_type in by_type
+            if isinstance(action_type, str) and action_type not in _CATEGORY_PRIORITY
+        )
 
         ordered: list[JsonObject] = []
         for action_type in (*_CATEGORY_PRIORITY, *other_types):
