@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import math
-import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -204,6 +203,7 @@ class BeamSearchEngine:
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
         reason = "max_depth"
+        search_error: BaseException | None = None
 
         try:
             for depth in range(cfg.max_depth):
@@ -260,13 +260,18 @@ class BeamSearchEngine:
                 stats.depths_completed += 1
 
             finished.extend(beam)
+        except BaseException as exc:
+            # Capture only an exception raised by this search. `sys.exception()` is
+            # unsuitable here because it also exposes an unrelated exception being
+            # handled by the caller, which could make us swallow a cleanup failure.
+            search_error = exc
+            raise
         finally:
-            active_error = sys.exception()
             t0 = time.monotonic()
             try:
                 await self._cleanup(instance_id, all_branch_ids, deadline=overall_deadline)
             except Exception:
-                if active_error is None:
+                if search_error is None:
                     raise
                 _LOG.exception(
                     "beam search cleanup also failed while propagating a search error "
