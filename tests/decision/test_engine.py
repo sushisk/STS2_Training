@@ -43,7 +43,12 @@ class _FakeConnection:
         operation = request["operation"]
 
         if operation == "start_instance":
-            return {**_common(request), "status": "completed", "instance_id": "inst-001"}
+            return {
+                **_common(request),
+                "status": "completed",
+                "instance_id": "inst-001",
+                "max_emulate_actions_items": 64,
+            }
 
         if operation == "get_decision":
             return {
