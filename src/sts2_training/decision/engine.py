@@ -84,6 +84,10 @@ class CombatDecisionEngine:
         decision = await self._client.get_decision(
             instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
         )
+        decision_point_id = decision.get("decision_point_id")
+        if not isinstance(decision_point_id, str) or not decision_point_id:
+            raise RuntimeError("get_decision returned an invalid decision_point_id")
+
         dto = decision.get("masked_emulator_dto")
         if not isinstance(dto, Mapping):
             raise RuntimeError("get_decision returned an invalid masked_emulator_dto")
@@ -94,7 +98,25 @@ class CombatDecisionEngine:
         elif isinstance(raw_legal_actions, Sequence) and not isinstance(
             raw_legal_actions, (str, bytes)
         ):
-            legal_actions = available_actions(raw_legal_actions)
+            validated_actions: list[Mapping[str, Any]] = []
+            action_ids: set[str] = set()
+            for index, action in enumerate(raw_legal_actions):
+                if not isinstance(action, Mapping):
+                    raise RuntimeError(f"get_decision returned invalid legal_actions[{index}]")
+                action_id = action.get("action_id")
+                if not isinstance(action_id, str) or not action_id:
+                    raise RuntimeError(
+                        f"get_decision returned invalid legal_actions[{index}].action_id"
+                    )
+                if action_id in action_ids:
+                    raise RuntimeError(f"get_decision returned duplicate action_id {action_id!r}")
+                action_ids.add(action_id)
+                if "is_available" in action and not isinstance(action["is_available"], bool):
+                    raise RuntimeError(
+                        f"get_decision returned invalid legal_actions[{index}].is_available"
+                    )
+                validated_actions.append(action)
+            legal_actions = available_actions(validated_actions)
         else:
             raise RuntimeError("get_decision returned invalid legal_actions")
 
