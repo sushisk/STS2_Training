@@ -467,11 +467,11 @@ class ApiContract:
                 "non-terminal masked_emulator_dto must not include outcome"
             )
 
-        legal_actions = masked.get("legal_actions")
-        if legal_actions is None:
+        if "legal_actions" not in masked:
             if run_terminal:
                 return
             raise ApiProtocolError("masked_emulator_dto.legal_actions must be a list")
+        legal_actions = masked["legal_actions"]
         if not isinstance(legal_actions, list):
             raise ApiProtocolError("masked_emulator_dto.legal_actions must be a list")
         if is_terminal and legal_actions:
