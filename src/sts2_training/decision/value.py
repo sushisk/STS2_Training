@@ -112,6 +112,18 @@ class HeuristicValueFunction(ValueModel):
 
 
 def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
+    """`dto["outcome"]` (`"victory"`/`"defeat"`, lowercase) is populated by RL on both
+    a terminal Combat decision (`"terminal": True`) and a terminal Whole Run decision
+    (`"run_terminal": True`) - see STS2_RL's `API/instance_combat.py`::
+    `_decision_response_fields` and `API/instance_whole_run.py`'s
+    `_decision_response_fields`/`emulate_action`/`get_decision` (branch
+    `agent/expose-terminal-outcome`). Before that fix, neither boundary actually sent
+    an outcome field despite this function already checking for one - the terminal
+    bonus below was silently dead code against the real wire contract; `terminal`/
+    `run_terminal` themselves are not read here (this function only needs the win/
+    loss verdict), but their presence is what guarantees `outcome` is populated
+    whenever this check matters.
+    """
     outcome = dto.get("outcome")
     if outcome in ("victory", "defeat"):
         return outcome

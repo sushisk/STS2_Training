@@ -28,6 +28,35 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertEqual(value_fn.evaluate(dto), DEFAULT_WEIGHTS["victory_bonus"])
 
+    def test_real_combat_terminal_shape_from_rl_is_honored(self) -> None:
+        # Exact shape STS2_RL's API/instance_combat.py::_decision_response_fields
+        # sends at combat end (branch agent/expose-terminal-outcome) - `legal_actions`
+        # is `[]`, `terminal`/`outcome` sit alongside it. Before that RL-side fix,
+        # neither `terminal` nor `outcome` reached Training at all for a normal
+        # (non-faulted) combat conclusion, so this exact shape never actually occurred
+        # on the wire despite `_terminal_outcome` already checking for `outcome`.
+        value_fn = HeuristicValueFunction()
+        victory = {"legal_actions": [], "terminal": True, "outcome": "victory", "hp": 4, "maxHp": 80}
+        defeat = {"legal_actions": [], "terminal": True, "outcome": "defeat", "hp": 0, "maxHp": 80}
+        healthy_nonterminal = {"hp": 80, "maxHp": 80, "enemies": []}
+
+        self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
+        self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
+        self.assertGreater(value_fn.evaluate(victory), value_fn.evaluate(healthy_nonterminal))
+
+    def test_real_whole_run_terminal_shape_from_rl_is_honored(self) -> None:
+        # Exact shape STS2_RL's API/instance_whole_run.py sends at RUN_TERMINAL
+        # (branch agent/expose-terminal-outcome) - `run_terminal`/`outcome` together,
+        # no `legal_actions` key at all. Before that fix the payload was hardcoded to
+        # `{"run_terminal": True}` with no outcome, making a run victory and a run
+        # defeat indistinguishable to this value function.
+        value_fn = HeuristicValueFunction()
+        victory = {"run_terminal": True, "outcome": "victory"}
+        defeat = {"run_terminal": True, "outcome": "defeat"}
+
+        self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
+        self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
+
     def test_higher_hp_ratio_scores_better(self) -> None:
         value_fn = HeuristicValueFunction()
         healthy = {"hp": 80, "maxHp": 100, "enemies": []}
