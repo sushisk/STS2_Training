@@ -64,6 +64,7 @@ class _Connection:
                 request,
                 status="completed",
                 instance_id="inst-001",
+                max_emulate_actions_items=64,
                 decision_point_id="decision-1",
                 masked_emulator_dto={"state": "initial"},
             )
