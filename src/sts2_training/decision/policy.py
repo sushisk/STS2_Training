@@ -18,7 +18,6 @@ implementing `PolicyModel`.
 from __future__ import annotations
 
 import random
-from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -49,12 +48,16 @@ class ActionCandidate:
     action_id: str
 
 
-class PolicyModel(ABC):
+class PolicyModel:
     """Proposes candidate actions for one decision (`legal_actions` plus the
     full `masked_emulator_dto` they came from), best-first, capped at `top_k`.
+
+    Implement `propose` for scalar inference, or override `propose_batch`
+    directly for a batch-only learned model. A batch-only model does not need
+    to provide a dummy scalar implementation merely to satisfy an abstract
+    base-class contract.
     """
 
-    @abstractmethod
     def propose(
         self,
         legal_actions: Sequence[JsonObject],
@@ -62,7 +65,7 @@ class PolicyModel(ABC):
         *,
         top_k: int,
     ) -> list[ActionCandidate]:
-        raise NotImplementedError
+        raise NotImplementedError("PolicyModel must override propose or propose_batch")
 
     def propose_batch(
         self,
