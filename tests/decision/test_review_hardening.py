@@ -105,6 +105,18 @@ class _DecisionClient:
         }
 
 
+class _NonMappingDecisionClient(_DecisionClient):
+    async def get_decision(
+        self,
+        instance_id: str,
+        branch_id: str = "root",
+        *,
+        timeout_s: float,
+    ) -> Any:
+        self.get_calls += 1
+        return None
+
+
 class _MissingDecisionPointClient(_DecisionClient):
     async def get_decision(
         self,
@@ -117,6 +129,21 @@ class _MissingDecisionPointClient(_DecisionClient):
             instance_id, branch_id, timeout_s=timeout_s
         )
         decision.pop("decision_point_id")
+        return decision
+
+
+class _MissingLegalActionsClient(_DecisionClient):
+    async def get_decision(
+        self,
+        instance_id: str,
+        branch_id: str = "root",
+        *,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        decision = await super().get_decision(
+            instance_id, branch_id, timeout_s=timeout_s
+        )
+        decision["masked_emulator_dto"] = {}
         return decision
 
 
@@ -185,10 +212,22 @@ class CombatDecisionReviewTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "available legal action"):
             await engine.decide("inst-001", timeout_s=1.0)
 
+    async def test_non_mapping_decision_is_rejected_at_boundary(self) -> None:
+        engine = CombatDecisionEngine(_NonMappingDecisionClient())
+
+        with self.assertRaisesRegex(RuntimeError, "must return a mapping"):
+            await engine.decide("inst-001", timeout_s=1.0)
+
     async def test_missing_decision_point_id_is_rejected_at_boundary(self) -> None:
         engine = CombatDecisionEngine(_MissingDecisionPointClient())
 
         with self.assertRaisesRegex(RuntimeError, "decision_point_id"):
+            await engine.decide("inst-001", timeout_s=1.0)
+
+    async def test_missing_legal_actions_is_rejected_for_nonterminal_decision(self) -> None:
+        engine = CombatDecisionEngine(_MissingLegalActionsClient())
+
+        with self.assertRaisesRegex(RuntimeError, "invalid legal_actions"):
             await engine.decide("inst-001", timeout_s=1.0)
 
     async def test_malformed_legal_action_is_rejected_at_boundary(self) -> None:
