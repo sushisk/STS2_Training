@@ -28,13 +28,9 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertEqual(value_fn.evaluate(dto), DEFAULT_WEIGHTS["victory_bonus"])
 
-    def test_real_combat_terminal_shape_from_rl_is_honored(self) -> None:
-        # Exact shape STS2_RL's API/instance_combat.py::_decision_response_fields
-        # sends at combat end (branch agent/expose-terminal-outcome) - `legal_actions`
-        # is `[]`, `terminal`/`outcome` sit alongside it. Before that RL-side fix,
-        # neither `terminal` nor `outcome` reached Training at all for a normal
-        # (non-faulted) combat conclusion, so this exact shape never actually occurred
-        # on the wire despite `_terminal_outcome` already checking for `outcome`.
+    def test_combat_terminal_minimal_semantic_shape_is_honored(self) -> None:
+        # Minimal semantic fields relevant to terminal scoring. Real RL payloads also
+        # include dto_version/mask_version and may include additional combat state.
         value_fn = HeuristicValueFunction()
         victory = {"legal_actions": [], "terminal": True, "outcome": "victory", "hp": 4, "maxHp": 80}
         defeat = {"legal_actions": [], "terminal": True, "outcome": "defeat", "hp": 0, "maxHp": 80}
@@ -44,12 +40,10 @@ class HeuristicValueFunctionTest(unittest.TestCase):
         self.assertEqual(value_fn.evaluate(defeat), DEFAULT_WEIGHTS["defeat_penalty"])
         self.assertGreater(value_fn.evaluate(victory), value_fn.evaluate(healthy_nonterminal))
 
-    def test_real_whole_run_terminal_shape_from_rl_is_honored(self) -> None:
-        # Exact shape STS2_RL's API/instance_whole_run.py sends at RUN_TERMINAL
-        # (branch agent/expose-terminal-outcome) - `run_terminal`/`outcome` together,
-        # no `legal_actions` key at all. Before that fix the payload was hardcoded to
-        # `{"run_terminal": True}` with no outcome, making a run victory and a run
-        # defeat indistinguishable to this value function.
+    def test_whole_run_terminal_minimal_semantic_shape_is_honored(self) -> None:
+        # This is the Branch terminal shortcut's minimal semantic shape. Whole Run root
+        # terminal payloads also include boundary/legal_actions/room_context/history,
+        # and build_masked_emulator_dto adds dto_version/mask_version in both cases.
         value_fn = HeuristicValueFunction()
         victory = {"run_terminal": True, "outcome": "victory"}
         defeat = {"run_terminal": True, "outcome": "defeat"}
