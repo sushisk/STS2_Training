@@ -3,6 +3,8 @@
 `sts2_training.decision` は `AsyncTrainingApiClient` (DTO v0.7) の上で、
 Policy で候補を絞り、Beam Search で `emulate_actions` し、Value で盤面を評価して
 root の action を選ぶための薄い意思決定レイヤーです。
+`CombatDecisionEngine` は root 専用です。非 root Branch の decision を
+`commit_action` する API ではありません。
 
 ## 基本フロー
 
@@ -53,7 +55,7 @@ config = BeamSearchConfig(
     top_k_actions=4,
     max_depth=2,
     max_batch_size=64,          # ローカル上限。RL capability が小さければそちらを優先。
-    time_budget_ms=200.0,       # 指定する場合は正数。
+    time_budget_ms=200.0,       # 指定する場合は有限の正数。
     expand_partial=True,
     release_branches_on_finish=True,
 )
@@ -63,6 +65,7 @@ engine = CombatDecisionEngine(client, beam_config=config)
 
 `beam_searchable_action_types` の既定値は `system` / `card` / `potion` です。
 この判定は root だけでなく各 depth の次 decision に対しても行われます。
+明示的に `is_available=False` の action は探索可能性の判定から除外します。
 探索途中で reward / map / event など非 Combat の境界へ移った node は、それ以上
 branch せず、その時点の Value を持つ finished node として扱います。
 
@@ -94,16 +97,24 @@ class MyPolicy(PolicyModel):
 `ActionCandidate` は探索に必要な `action_id` だけを持ちます。使われない prior や
 action type の複製は持たせません。
 
+`BeamSearchEngine` は `propose_batch()` の batch cardinality、各 node の候補数、
+`ActionCandidate` 型、および `action_id` が現在 available な legal action であることを
+検証します。不正な model 出力は RL の batch reject に変換せず、`RuntimeError` として
+早期に表面化します。
+
 ## ValueModel
 
 `ValueModel` は各 `masked_emulator_dto` を「大きいほど良い」スカラーへ変換します。
 学習済みモデルでは `evaluate_batch()` を直接 override してください。
 
-`BeamSearchEngine` は `evaluate_batch()` の戻り件数が入力 DTO 件数と一致することを
-検証します。不一致は候補を黙って捨てず `RuntimeError` として表面化します。
+`BeamSearchEngine` は `evaluate_batch()` の戻り件数が入力 DTO 件数と一致することに加え、
+各値が有限な数値であることも検証します。不一致、`NaN`、`inf`、非数値は候補を黙って
+捨てず `RuntimeError` として表面化します。root 自体は最終候補にならないため、探索開始時の
+余計な singleton `evaluate()` 呼び出しは行いません。
 
 既定の `HeuristicValueFunction` は HP、block、敵 HP、予測被弾、Power などの簡易特徴を
-使います。block は複数敵の攻撃合計に対して一度だけ差し引かれます。
+使います。block は複数敵の攻撃合計に対して一度だけ差し引かれます。敵 HP 比率の分母には
+倒した敵の max HP も残すため、敵を倒した結果だけで進捗評価が逆向きになることを避けます。
 
 ## フォールバックと例外
 
@@ -111,18 +122,22 @@ action type の複製は持たせません。
 `HeuristicCombatSelector` へフォールバックします。
 
 - root が非 Combat 境界
-- `emulate_actions` batch が RL に reject された
+- `emulate_actions` batch が RL に reject され、かつ client session が引き続き fresh な場合
 - 制限時間内に探索候補を得られなかった
 
-一方、custom `PolicyModel` / `ValueModel` の予期しない例外は**握りつぶしません**。
-実装バグを「正常な heuristic decision」に変換すると、壊れた model deployment を
-検知できなくなるためです。Transport / protocol の例外も通常どおり caller へ伝播します。
+一方、custom `PolicyModel` / `ValueModel` の予期しない例外や不正出力は**握りつぶしません**。
+`ApiProtocolError` は completion-uncertain で exact replay が必要になるためフォールバックせず、
+`faulted` operation や session を invalid にした reject も caller へ伝播します。
+壊れた model / protocol / session を「正常な heuristic decision」に変換しないことを優先します。
 
 ## timeout
 
 `decide()` は `get_decision` 後の残り時間だけを Beam Search に渡します。
 `decide_and_commit()` はさらに同じ全体 budget の残り時間だけを `commit_action` に渡します。
-以前のように残り時間が無くても 50ms を水増しして API を呼ぶことはありません。
+残り時間が無いのに固定の猶予を水増しして API を呼ぶことはありません。
+
+Beam Search の branch cleanup も search に渡された全体 timeout の残り時間内だけで行います。
+cleanup 1 request の上限は 5 秒ですが、残り budget の方が短ければそちらを使います。
 
 ## Branch cleanup
 
@@ -131,9 +146,14 @@ action type の複製は持たせません。
 1. `cancel_branches`
 2. client が引き続き fresh request を送れる状態なら `release_branches`
 
-cancel が失敗しても session が有効なら release は別途試します。ただし
-`pending_retry` または `session_invalid` が立った場合は、新しい cleanup request を
-送ると session sequencing を壊すため中止します。
+既知の recoverable な reject、または completion が確実に uncertain ではない transport failure は
+best-effort cleanup としてログに残して続行します。一方、protocol error、faulted operation、
+completion-uncertain transport error、予期しない実装例外は、正常な探索結果を返すために
+握りつぶしません。すでに search/model 側の例外を伝播中なら、その元の例外を優先し、cleanup の
+二次障害はログに残します。
+
+`pending_retry` または `session_invalid` が立った場合は、新しい cleanup request を送ると
+session sequencing を壊すため中止します。
 
 ## 現在の既定実装について
 
