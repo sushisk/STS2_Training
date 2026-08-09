@@ -49,7 +49,8 @@ async def start_new_run(
     full manual control (mutually exclusive, see `episode.build_engine`).
     """
     if seed is None:
-        seed = (rng or random).randint(1, 2**31 - 1)
+        random_source = rng if rng is not None else random
+        seed = random_source.randint(1, 2**31 - 1)
     config = NewRunConfig(character_id=character_id, ascension=ascension, seed=seed)
     return await start_and_run(
         client,
