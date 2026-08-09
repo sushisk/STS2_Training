@@ -9,7 +9,8 @@ shape and where this plugs into the API client.
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from sts2_training.selection.action_classification import (
     CARD_ACTION_TYPE,
@@ -30,7 +31,20 @@ _CATEGORY_PRIORITY = (
 
 
 class NoAvailableActionError(RuntimeError):
-    """Raised when a decision has no action Training is willing to select."""
+    """Raised when a decision has no action Training is willing to select.
+
+    `decision` is optional context for callers that need to distinguish a genuine
+    terminal decision from a malformed/non-terminal decision with no selectable action.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        decision: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.decision = dict(decision) if decision is not None else None
 
 
 class HeuristicCombatSelector:

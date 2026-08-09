@@ -70,6 +70,11 @@ class CombatDecisionEngine:
         )
 
     @property
+    def client(self) -> Any:
+        """API client this engine is bound to for its entire branch-ID lifetime."""
+        return self._client
+
+    @property
     def beam_search(self) -> BeamSearchEngine:
         return self._beam
 
@@ -170,7 +175,10 @@ class CombatDecisionEngine:
             timeout_s=remaining,
         )
         if outcome.chosen_action_id is None:
-            raise NoAvailableActionError("no available legal_actions to select from")
+            raise NoAvailableActionError(
+                "no available legal_actions to select from",
+                decision=outcome.decision,
+            )
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:

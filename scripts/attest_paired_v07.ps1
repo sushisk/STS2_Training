@@ -7,9 +7,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $TrainingRepo = 'sushisk/STS2_Training'
-$TrainingPr = 19
+$TrainingPr = 22
 $RlRepo = 'sushisk/STS2_RL'
-$RlPr = 8
+$RlPr = 9
 
 function Invoke-Checked {
     param(
@@ -103,7 +103,11 @@ function Invoke-AdvisoryTestBody {
         }
 
         Write-Host 'Running advisory real-Emulator paired v0.7 integration...'
-        Invoke-Checked python -m pytest "$TrainingRoot/tests/integration/test_paired_rl_v07.py" -q
+        # The whole directory, not a single file: every real-Emulator paired test
+        # belongs here (currently the wire-protocol paired test plus the runner
+        # package's end-to-end episode test), and a future addition should not
+        # need this script edited to be picked up.
+        Invoke-Checked python -m pytest "$TrainingRoot/tests/integration" -q
     }
     finally {
         $env:PATH = $originalPath

@@ -1,9 +1,9 @@
 # STS2_Training API connection
 
-Training-side implementation for the `sushisk/STS2_RL` async TCP / DTO v0.6 contract.
+Training-side implementation for the `sushisk/STS2_RL` async TCP / DTO v0.7 contract.
 
 The supported path is now deliberately **async + TCP only**. The legacy synchronous
-`TrainingApiClient` / `LocalProcessTransport` path is retired for v0.6 because it cannot
+`TrainingApiClient` / `LocalProcessTransport` path is retired for v0.7 because it cannot
 participate in the session handshake and `server_epoch` safety model.
 
 ## TCP smoke test
@@ -72,7 +72,7 @@ the same epoch. If RL restarted, `TcpConnection` raises `ServerEpochChangedError
 `AsyncTrainingApiClient` becomes permanently invalid. Create a new client/session; do not
 retry the unresolved request into the new RL process.
 
-This is intentional: v0.6 guarantees at-most-once execution within one RL process epoch,
+This is intentional: v0.7 guarantees at-most-once execution within one RL process epoch,
 not durable exactly-once execution across emulator process restarts.
 
 ## Timeouts, cancellation, and response limits
@@ -104,3 +104,17 @@ into heuristic decisions. `PolicyModel`/`ValueModel` are abstract bases with run
 heuristic defaults so the pipeline works end-to-end before any trained checkpoint exists -
 see `src/sts2_training/decision/how_to_use.md` for the full usage guide, config knobs, and
 how to plug in real models.
+
+## Runner: top-level entry points
+
+`sts2_training.runner` starts an instance and drives it to completion on top of
+`CombatDecisionEngine`, via three entry points sharing one loop (`EpisodeRunner`):
+`start_combat_from_state` (Combat from a fully-specified board, `CombatScenario`),
+`start_new_run` (a normal, from-scratch Whole Run, `NewRunConfig`), and
+`start_run_from_state` (Whole Run resumed from a snapshot, `RunSnapshot` - currently
+always raises `RunSnapshotRestoreNotSupportedError` pending RL-side support). Each
+module doubles as a CLI (`python -m sts2_training.runner.start_new_run --help`).
+`search_mode`/`beam_max_depth` (or `--search-mode`/`--beam-depth` on the CLI) pick a
+named beam search preset (see `sts2_training.decision.search_modes`) without hand-
+constructing a `BeamSearchConfig`. See `src/sts2_training/runner/how_to_use.md` for
+the full guide.
