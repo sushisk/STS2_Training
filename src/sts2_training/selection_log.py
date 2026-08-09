@@ -52,12 +52,11 @@ class SelectionAudit:
         # state by batch size rather than total speculative selections.
         self._selection_request_id: str | None = None
         self._selection_branch_ids: set[str] = set()
-        # DTO v0.7 currently publishes max_emulate_actions_items only for Combat.
         # Whole Run's deployed resolve_action_id interprets root commit tokens as
         # positional ordinals even though its public legal_actions expose sparse opaque
-        # action_id values. Keep that instance-level compatibility fact so audit records
-        # can preserve the public selected ID while leaving request.action_id as the
-        # exact token that actually crossed the wire.
+        # action_id values. ApiContract supplies this instance-level compatibility fact
+        # explicitly when start_instance is accepted so audit semantics never have to
+        # infer it from an unrelated capability field.
         self._wire_commit_action_id_is_ordinal = False
 
     def _clear_transient(self) -> None:
@@ -75,21 +74,17 @@ class SelectionAudit:
         for branch_id in branch_ids:
             self._decisions.pop((instance_id, branch_id), None)
 
-    def remember(self, response: Mapping[str, Any]) -> None:
+    def remember(
+        self,
+        response: Mapping[str, Any],
+        *,
+        wire_commit_action_id_is_ordinal: bool | None = None,
+    ) -> None:
         if self._logger is None:
             return
+        if wire_commit_action_id_is_ordinal is not None:
+            self._wire_commit_action_id_is_ordinal = wire_commit_action_id_is_ordinal
         instance_id = response.get("instance_id")
-        if (
-            response.get("operation") == "start_instance"
-            and isinstance(instance_id, str)
-            and instance_id
-        ):
-            # Current v0.7 contract: Combat must publish the batch capability; Whole Run
-            # does not publish it. This is deliberately audit-only compatibility state,
-            # not a general instance-type inference for decision logic.
-            self._wire_commit_action_id_is_ordinal = (
-                response.get("max_emulate_actions_items") is None
-            )
         branch_id = response.get("branch_id", "root")
         decision_point_id = response.get("decision_point_id")
         identifiers = (instance_id, branch_id, decision_point_id)
