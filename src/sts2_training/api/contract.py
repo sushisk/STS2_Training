@@ -32,6 +32,7 @@ _BRANCH_STATUS_VALUES = frozenset(
 # returns only after every Branch dispatched for the batch is terminal. queued/running
 # are therefore invalid per-item response states for this operation.
 _EMULATE_ACTIONS_BRANCH_STATUSES = frozenset({"completed", "partial", "faulted"})
+_TERMINAL_OUTCOMES = frozenset({"victory", "defeat"})
 
 
 class ApiProtocolError(RuntimeError):
@@ -447,13 +448,40 @@ class ApiContract:
         if not isinstance(masked, dict):
             raise ApiProtocolError("masked_emulator_dto must be a dictionary")
 
-        legal_actions = masked.get("legal_actions")
-        if legal_actions is None:
-            if masked.get("run_terminal") is True:
+        for marker in ("terminal", "run_terminal"):
+            if marker in masked and not isinstance(masked[marker], bool):
+                raise ApiProtocolError(f"masked_emulator_dto.{marker} must be a boolean")
+
+        combat_terminal = masked.get("terminal") is True
+        run_terminal = masked.get("run_terminal") is True
+        is_terminal = combat_terminal or run_terminal
+        if combat_terminal and run_terminal:
+            raise ApiProtocolError(
+                "masked_emulator_dto.terminal and run_terminal are mutually exclusive"
+            )
+
+        if is_terminal:
+            outcome = masked.get("outcome")
+            if not isinstance(outcome, str) or outcome not in _TERMINAL_OUTCOMES:
+                raise ApiProtocolError(
+                    "terminal masked_emulator_dto.outcome must be 'victory' or 'defeat'"
+                )
+        elif "outcome" in masked:
+            raise ApiProtocolError(
+                "non-terminal masked_emulator_dto must not include outcome"
+            )
+
+        if "legal_actions" not in masked:
+            if run_terminal:
                 return
             raise ApiProtocolError("masked_emulator_dto.legal_actions must be a list")
+        legal_actions = masked["legal_actions"]
         if not isinstance(legal_actions, list):
             raise ApiProtocolError("masked_emulator_dto.legal_actions must be a list")
+        if is_terminal and legal_actions:
+            raise ApiProtocolError(
+                "terminal masked_emulator_dto.legal_actions must be empty"
+            )
 
         action_ids: set[str] = set()
         for index, action in enumerate(legal_actions):

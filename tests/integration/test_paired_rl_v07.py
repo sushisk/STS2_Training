@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import socket
-import subprocess
-import sys
-import time
-from pathlib import Path
 
 import pytest
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection, TransportError
 
+from _paired_rl_helpers import HOST as _HOST
+from _paired_rl_helpers import start_paired_rl as _start_paired_rl
+from _paired_rl_helpers import stop_paired_rl as _stop_paired_rl
+
 pytestmark = pytest.mark.integration
 
-_HOST = "127.0.0.1"
 _SERVER_MAX_MESSAGE_BYTES = 4096
 _PAIRED_MAX_EMULATE_ACTIONS_ITEMS = 16
 _LARGE_RESPONSE_LIMIT = 64 * 1024 * 1024
-_SERVER_HELPER = Path(__file__).with_name("_paired_rl_server_v07.py")
 
 
 def _combat_config() -> dict:
@@ -46,56 +42,6 @@ def _action_id(decision: dict) -> str:
         if params.get("cardId") == "DEFEND_IRONCLAD":
             return action["action_id"]
     return actions[0]["action_id"]
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((_HOST, 0))
-        return int(sock.getsockname()[1])
-
-
-def _start_paired_rl() -> tuple[subprocess.Popen[str], int]:
-    root_value = os.environ.get("STS2_RL_ROOT")
-    if not root_value:
-        pytest.skip("set STS2_RL_ROOT to the paired STS2_RL checkout")
-    root = Path(root_value).resolve()
-    if not (root / "API" / "tcp_server.py").is_file():
-        pytest.skip(f"STS2_RL_ROOT is not a usable RL checkout: {root}")
-
-    port = _free_port()
-    process = subprocess.Popen(
-        [sys.executable, str(_SERVER_HELPER), str(root), _HOST, str(port)],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            output = process.stdout.read() if process.stdout is not None else ""
-            raise AssertionError(f"paired RL exited before startup:\n{output}")
-        try:
-            with socket.create_connection((_HOST, port), timeout=0.2):
-                return process, port
-        except OSError:
-            time.sleep(0.1)
-
-    process.terminate()
-    output = process.communicate(timeout=5)[0]
-    raise AssertionError(f"paired RL did not start within 30s:\n{output}")
-
-
-def _stop_paired_rl(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
 
 
 async def _assert_request_size_boundary(port: int) -> None:
@@ -258,7 +204,7 @@ async def _exercise_paired_v07(port: int) -> None:
 
 
 def test_paired_rl_v07_multi_parent_mixed_fault_and_exact_replay() -> None:
-    process, port = _start_paired_rl()
+    process, port = _start_paired_rl(pytest.skip)
     try:
         asyncio.run(_exercise_paired_v07(port))
     finally:

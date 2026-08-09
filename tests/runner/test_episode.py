@@ -1,0 +1,359 @@
+"""Coverage for `EpisodeRunner`'s decide+commit loop. Every ordinary decision here
+carries exactly one legal action, so `decide()` takes the `forced_single_action` path -
+this is about the loop/lifecycle, not beam search (see `test_beam_search.py`).
+"""
+
+from __future__ import annotations
+
+import math
+import unittest
+
+from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.decision.engine import CombatDecisionEngine
+from sts2_training.decision.search_modes import SEARCH_MODES
+from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner, build_engine, start_and_run
+from sts2_training.selection.heuristic_selector import NoAvailableActionError
+
+_ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
+
+
+def _common(request: dict) -> dict:
+    return {
+        "schema_version": "0.7",
+        "server_epoch": "epoch-1",
+        "client_session_id": request["client_session_id"],
+        "request_seq": request["request_seq"],
+        "request_id": request["request_id"],
+        "operation": request["operation"],
+    }
+
+
+class _FakeConnection:
+    """`decisions[0]` is what `get_decision` returns before any commit;
+    `decisions[i + 1]` is what the i-th `commit_action` returns (and what a
+    subsequent `get_decision` would also see, tracked via `_index`)."""
+
+    client_session_id = "session-a"
+
+    def __init__(self, decisions: list[dict]) -> None:
+        self._decisions = decisions
+        self._index = 0
+        self.start_instance_calls = 0
+        self.close_instance_calls = 0
+        self.close_instance_instance_ids: list[str] = []
+
+    async def exchange(self, message: dict, *, deadline: float) -> dict:
+        request = dict(message)
+        operation = request["operation"]
+
+        if operation == "start_instance":
+            self.start_instance_calls += 1
+            return {
+                **_common(request),
+                "status": "completed",
+                "instance_id": "inst-001",
+                "max_emulate_actions_items": 64,
+            }
+        if operation == "get_decision":
+            return {
+                **_common(request),
+                "instance_id": request["instance_id"],
+                "status": "completed",
+                "branch_id": "root",
+                **self._decisions[self._index],
+            }
+        if operation == "commit_action":
+            self._index += 1
+            return {
+                **_common(request),
+                "instance_id": request["instance_id"],
+                "status": "completed",
+                "branch_id": "root",
+                **self._decisions[self._index],
+            }
+        if operation == "close_instance":
+            self.close_instance_calls += 1
+            self.close_instance_instance_ids.append(request["instance_id"])
+            return {**_common(request), "instance_id": request["instance_id"], "status": "completed"}
+
+        raise AssertionError(f"unexpected operation: {operation}")
+
+    async def invalidate(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+def _decision(decision_point_id: str, *, legal_actions=None, **dto_extra) -> dict:
+    resolved_legal_actions = legal_actions if legal_actions is not None else [_ACTION]
+    dto = {"legal_actions": resolved_legal_actions, **dto_extra}
+    # Most empty-action fixtures are terminal. Callers can pass terminal=False to
+    # exercise the protocol-valid but runner-invalid non-terminal no-action boundary.
+    if not resolved_legal_actions and "terminal" not in dto and "run_terminal" not in dto:
+        dto["terminal"] = True
+        dto.setdefault("outcome", "victory")
+    return {"decision_point_id": decision_point_id, "masked_emulator_dto": dto}
+
+
+class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
+    async def _client_and_connection(self, decisions: list[dict]) -> tuple[AsyncTrainingApiClient, _FakeConnection]:
+        connection = _FakeConnection(decisions)
+        client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+        await client.start_instance({"instance_type": "combat"}, timeout_s=1.0)
+        return client, connection
+
+    async def test_runs_until_terminal_and_closes_instance(self) -> None:
+        decisions = [
+            _decision("d0"),
+            _decision("d1"),
+            _decision("d2", legal_actions=[], outcome="victory"),
+        ]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        result = await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(result.decisions_made, 2)
+        self.assertEqual(result.final_dto["outcome"], "victory")
+        self.assertEqual(result.final_dto["legal_actions"], [])
+        self.assertEqual(connection.close_instance_calls, 1)
+        self.assertEqual(connection.close_instance_instance_ids, ["inst-001"])
+
+    async def test_already_terminal_at_start_makes_no_commit_and_preserves_terminal_dto(self) -> None:
+        decisions = [_decision("d0", legal_actions=[], outcome="defeat")]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        result = await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(result.decisions_made, 0)
+        self.assertEqual(result.final_dto["outcome"], "defeat")
+        self.assertEqual(result.final_dto["legal_actions"], [])
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_non_terminal_no_action_at_start_is_not_silently_successful(self) -> None:
+        decisions = [_decision("d0", legal_actions=[], terminal=False)]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        with self.assertRaises(NoAvailableActionError):
+            await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_non_terminal_no_action_after_commit_is_not_silently_successful(self) -> None:
+        decisions = [
+            _decision("d0"),
+            _decision("d1", legal_actions=[], terminal=False),
+        ]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        with self.assertRaises(NoAvailableActionError):
+            await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_falsey_non_mapping_commit_dto_is_rejected_and_instance_closed(self) -> None:
+        class _StubClient:
+            pending_retry = None
+            session_invalid = False
+
+            def __init__(self) -> None:
+                self.close_instance_calls = 0
+
+            async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
+                self.close_instance_calls += 1
+                return {"status": "completed"}
+
+        class _StubEngine:
+            def __init__(self, client) -> None:
+                self.client = client
+
+            async def decide_and_commit(self, instance_id: str, *, timeout_s: float):
+                return {"masked_emulator_dto": []}
+
+        client = _StubClient()
+        runner = EpisodeRunner(client, _StubEngine(client))  # type: ignore[arg-type]
+
+        with self.assertRaisesRegex(RuntimeError, "invalid masked_emulator_dto"):
+            await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(client.close_instance_calls, 1)
+
+    async def test_max_decisions_raises_but_still_closes_instance(self) -> None:
+        decisions = [_decision("d0"), _decision("d1"), _decision("d2"), _decision("d3", legal_actions=[])]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        with self.assertRaises(EpisodeLimitExceeded):
+            await runner.run("inst-001", decision_timeout_s=5.0, max_decisions=2)
+
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_invalid_run_timeouts_are_rejected_before_engine_or_close_calls(self) -> None:
+        class _StubClient:
+            pending_retry = None
+            session_invalid = False
+
+            def __init__(self) -> None:
+                self.close_instance_calls = 0
+
+            async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
+                self.close_instance_calls += 1
+                return {"status": "completed"}
+
+        for kwargs in (
+            {"decision_timeout_s": 0.0},
+            {"decision_timeout_s": math.nan},
+            {"decision_timeout_s": True},
+            {"decision_timeout_s": 1.0, "close_timeout_s": 0.0},
+        ):
+            with self.subTest(kwargs=kwargs):
+                client = _StubClient()
+                runner = EpisodeRunner(client)  # type: ignore[arg-type]
+                with self.assertRaises(ValueError):
+                    await runner.run("inst-001", **kwargs)  # type: ignore[arg-type]
+                self.assertEqual(client.close_instance_calls, 0)
+
+    async def test_close_instance_skipped_when_session_invalid(self) -> None:
+        # A real client with session_invalid already set rejects every operation up
+        # front (including get_decision), so this exercises _close_best_effort
+        # directly instead of going through run().
+        class _StubClient:
+            session_invalid = True
+            pending_retry = None
+
+            def __init__(self) -> None:
+                self.close_instance_calls = 0
+
+            async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
+                self.close_instance_calls += 1
+                return {"status": "completed"}
+
+        client = _StubClient()
+        runner = EpisodeRunner(client)  # type: ignore[arg-type]
+
+        await runner._close_best_effort("inst-001", 5.0)  # noqa: SLF001
+
+        self.assertEqual(client.close_instance_calls, 0)
+
+
+class EpisodeRunnerConstructionTest(unittest.TestCase):
+    def test_falsey_explicit_engine_is_preserved(self) -> None:
+        class _FalseyEngine(CombatDecisionEngine):
+            def __bool__(self) -> bool:
+                return False
+
+        client = object()
+        given = _FalseyEngine(client=client)
+        runner = EpisodeRunner(client=client, engine=given)
+
+        self.assertIs(runner._engine, given)  # noqa: SLF001
+
+    def test_engine_bound_to_different_client_is_rejected(self) -> None:
+        given = CombatDecisionEngine(client=object())
+
+        with self.assertRaisesRegex(ValueError, "same client"):
+            EpisodeRunner(client=object(), engine=given)
+
+
+class BuildEngineTest(unittest.TestCase):
+    def test_no_args_builds_a_default_engine(self) -> None:
+        engine = build_engine(client=object())
+
+        self.assertIsInstance(engine, CombatDecisionEngine)
+
+    def test_search_mode_and_beam_max_depth_configure_the_built_engine(self) -> None:
+        engine = build_engine(client=object(), search_mode="deep", beam_max_depth=9)
+
+        self.assertEqual(engine.beam_search.config.max_depth, 9)
+
+    def test_named_mode_alone_is_applied(self) -> None:
+        engine = build_engine(client=object(), search_mode="wide")
+
+        self.assertEqual(engine.beam_search.config.beam_width, SEARCH_MODES["wide"].beam_width)
+
+    def test_explicit_engine_is_returned_as_is(self) -> None:
+        client = object()
+        given = CombatDecisionEngine(client=client)
+
+        self.assertIs(build_engine(client=client, engine=given), given)
+
+    def test_explicit_engine_bound_to_other_client_is_rejected(self) -> None:
+        given = CombatDecisionEngine(client=object())
+
+        with self.assertRaisesRegex(ValueError, "same client"):
+            build_engine(client=object(), engine=given)
+
+    def test_engine_combined_with_search_mode_raises(self) -> None:
+        client = object()
+        given = CombatDecisionEngine(client=client)
+
+        with self.assertRaises(ValueError):
+            build_engine(client=client, engine=given, search_mode="deep")
+
+    def test_engine_combined_with_beam_max_depth_raises(self) -> None:
+        client = object()
+        given = CombatDecisionEngine(client=client)
+
+        with self.assertRaises(ValueError):
+            build_engine(client=client, engine=given, beam_max_depth=3)
+
+
+class StartAndRunTest(unittest.IsolatedAsyncioTestCase):
+    """Unlike `EpisodeRunnerTest`, starts from a fresh (not yet started) client -
+    `start_and_run` calls `start_instance` itself, which is the one extra step it
+    adds on top of `EpisodeRunner.run`.
+    """
+
+    async def test_starts_instance_and_runs_to_completion(self) -> None:
+        decisions = [_decision("d0"), _decision("d1", legal_actions=[], outcome="victory")]
+        connection = _FakeConnection(decisions)
+        client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+
+        result = await start_and_run(
+            client, {"instance_type": "combat"}, decision_timeout_s=5.0, search_mode="shallow"
+        )
+
+        self.assertEqual(result.instance_id, "inst-001")
+        self.assertEqual(result.decisions_made, 1)
+        self.assertEqual(result.final_dto["outcome"], "victory")
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_invalid_max_decisions_is_rejected_before_starting_instance(self) -> None:
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value):
+                connection = _FakeConnection([_decision("d0")])
+                client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+
+                with self.assertRaises(ValueError):
+                    await start_and_run(
+                        client,
+                        {"instance_type": "combat"},
+                        decision_timeout_s=5.0,
+                        max_decisions=value,  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(connection.start_instance_calls, 0)
+
+    async def test_invalid_timeouts_are_rejected_before_starting_instance(self) -> None:
+        for kwargs in (
+            {"start_timeout_s": 0.0, "decision_timeout_s": 5.0},
+            {"start_timeout_s": math.inf, "decision_timeout_s": 5.0},
+            {"start_timeout_s": 1.0, "decision_timeout_s": 0.0},
+            {"start_timeout_s": 1.0, "decision_timeout_s": math.nan},
+        ):
+            with self.subTest(kwargs=kwargs):
+                connection = _FakeConnection([_decision("d0")])
+                client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+
+                with self.assertRaises(ValueError):
+                    await start_and_run(client, {"instance_type": "combat"}, **kwargs)
+
+                self.assertEqual(connection.start_instance_calls, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

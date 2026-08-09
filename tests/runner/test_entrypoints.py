@@ -1,0 +1,187 @@
+"""Coverage for the three top-level entry points: each one's job is only to build
+the right `instance_config` and hand off to `EpisodeRunner` (loop itself covered by
+`test_episode.py`), so these just assert `start_instance` gets the expected config.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import tempfile
+import unittest
+from pathlib import Path
+
+from sts2_training.decision.engine import CombatDecisionEngine
+from sts2_training.runner.scenario import CombatScenario, EnemyScenario, RunSnapshot
+from sts2_training.runner.start_combat_from_state import start_combat_from_state
+from sts2_training.runner.start_new_run import start_new_run
+from sts2_training.runner.start_run_from_state import (
+    RunSnapshotRestoreNotSupportedError,
+    _run as _run_snapshot_cli,
+    start_run_from_state,
+)
+
+
+class _FakeClient:
+    """Records `start_instance` calls; immediately reports the instance terminal so
+    `EpisodeRunner.run()` makes zero decisions and returns right away."""
+
+    def __init__(self) -> None:
+        self.start_instance_calls: list[dict] = []
+        self.close_instance_calls = 0
+        self.pending_retry = None
+        self.session_invalid = False
+
+    async def start_instance(self, instance_config: dict, *, timeout_s: float) -> str:
+        self.start_instance_calls.append(dict(instance_config))
+        return "inst-001"
+
+    async def get_decision(self, instance_id: str, branch_id: str = "root", *, timeout_s: float) -> dict:
+        return {
+            "decision_point_id": "d0",
+            "masked_emulator_dto": {
+                "terminal": True,
+                "outcome": "victory",
+                "legal_actions": [],
+            },
+        }
+
+    async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
+        self.close_instance_calls += 1
+        return {"status": "completed"}
+
+
+def _scenario() -> CombatScenario:
+    return CombatScenario(
+        character_id="IRONCLAD",
+        player_hp=50,
+        player_max_hp=80,
+        hand=["STRIKE_IRONCLAD"],
+        draw_pile=[],
+        discard_pile=[],
+        enemies=[EnemyScenario(monster_id="CALCIFIED_CULTIST", hp=48)],
+    )
+
+
+class StartCombatFromStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_builds_combat_instance_config_and_runs_to_completion(self) -> None:
+        client = _FakeClient()
+
+        result = await start_combat_from_state(client, _scenario(), decision_timeout_s=5.0)
+
+        self.assertEqual(len(client.start_instance_calls), 1)
+        self.assertEqual(client.start_instance_calls[0]["instance_type"], "combat")
+        self.assertEqual(client.start_instance_calls[0]["character_id"], "IRONCLAD")
+        self.assertEqual(result.instance_id, "inst-001")
+        self.assertEqual(result.decisions_made, 0)
+        self.assertEqual(result.final_dto["outcome"], "victory")
+        self.assertEqual(client.close_instance_calls, 1)
+
+    async def test_search_mode_selects_the_beam_config_used(self) -> None:
+        client = _FakeClient()
+
+        result = await start_combat_from_state(
+            client, _scenario(), decision_timeout_s=5.0, search_mode="deep", beam_max_depth=7
+        )
+
+        self.assertEqual(result.instance_id, "inst-001")  # reaches the RL round trip fine
+
+    async def test_unknown_search_mode_raises_before_touching_the_client(self) -> None:
+        client = _FakeClient()
+
+        with self.assertRaises(ValueError):
+            await start_combat_from_state(client, _scenario(), decision_timeout_s=5.0, search_mode="nonexistent")
+
+        self.assertEqual(client.start_instance_calls, [])
+
+    async def test_engine_and_search_mode_together_is_rejected(self) -> None:
+        client = _FakeClient()
+        engine = CombatDecisionEngine(client)
+
+        with self.assertRaises(ValueError):
+            await start_combat_from_state(client, _scenario(), decision_timeout_s=5.0, engine=engine, search_mode="deep")
+
+
+class StartNewRunTest(unittest.IsolatedAsyncioTestCase):
+    async def test_builds_whole_run_instance_config_and_runs_to_completion(self) -> None:
+        client = _FakeClient()
+
+        result = await start_new_run(client, character_id="IRONCLAD", ascension=2, seed=7, decision_timeout_s=5.0)
+
+        self.assertEqual(
+            client.start_instance_calls[0],
+            {"instance_type": "whole_run", "character_id": "IRONCLAD", "ascension": 2, "seed": 7},
+        )
+        self.assertEqual(result.instance_id, "inst-001")
+
+    async def test_omitted_seed_uses_supplied_rng_deterministically(self) -> None:
+        client = _FakeClient()
+        rng = random.Random(12345)
+        expected_rng = random.Random(12345)
+        expected = [expected_rng.randint(1, 2**31 - 1) for _ in range(2)]
+
+        await start_new_run(client, character_id="IRONCLAD", rng=rng, decision_timeout_s=5.0)
+        await start_new_run(client, character_id="IRONCLAD", rng=rng, decision_timeout_s=5.0)
+
+        self.assertEqual([call["seed"] for call in client.start_instance_calls], expected)
+
+    async def test_falsey_supplied_rng_is_not_replaced_by_module_random(self) -> None:
+        class _FalseyRandom(random.Random):
+            def __bool__(self) -> bool:
+                return False
+
+            def randint(self, a: int, b: int) -> int:
+                self.assert_bounds = (a, b)
+                return 123456789
+
+        client = _FakeClient()
+        rng = _FalseyRandom()
+
+        await start_new_run(client, character_id="IRONCLAD", rng=rng, decision_timeout_s=5.0)
+
+        self.assertEqual(client.start_instance_calls[0]["seed"], 123456789)
+        self.assertEqual(rng.assert_bounds, (1, 2**31 - 1))
+
+
+class StartRunFromStateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_raises_before_touching_the_client(self) -> None:
+        client = _FakeClient()
+        snapshot = RunSnapshot(character_id="IRONCLAD", ascension=0, seed=1, snapshot_json="{...}")
+
+        with self.assertRaises(RunSnapshotRestoreNotSupportedError):
+            await start_run_from_state(client, snapshot, decision_timeout_s=5.0)
+
+        self.assertEqual(client.start_instance_calls, [])
+
+    async def test_cli_path_raises_unsupported_before_network_io(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_path = Path(temp_dir) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "character_id": "IRONCLAD",
+                        "ascension": 0,
+                        "seed": 1,
+                        "snapshot_json": "{...}",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                snapshot=snapshot_path,
+                host="does-not-resolve.invalid",
+                port=1,
+                connect_timeout=0.001,
+                decision_timeout=5.0,
+                max_decisions=None,
+                search_mode=None,
+                beam_depth=None,
+            )
+
+            with self.assertRaises(RunSnapshotRestoreNotSupportedError):
+                await _run_snapshot_cli(args)
+
+
+if __name__ == "__main__":
+    unittest.main()
