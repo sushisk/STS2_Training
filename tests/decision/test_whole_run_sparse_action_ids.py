@@ -11,7 +11,8 @@ class _ChooseSecond:
 
 
 class _FakeClient:
-    def __init__(self, *, emulate_supported: bool) -> None:
+    def __init__(self, *, instance_type: str, emulate_supported: bool) -> None:
+        self.instance_type = instance_type
         self.max_emulate_actions_items = 64 if emulate_supported else None
         self.committed_action_id: str | None = None
 
@@ -61,7 +62,7 @@ class _FakeClient:
 
 class WholeRunSparseActionIdTest(unittest.IsolatedAsyncioTestCase):
     async def test_whole_run_sparse_public_id_is_committed_by_position(self) -> None:
-        client = _FakeClient(emulate_supported=False)
+        client = _FakeClient(instance_type="whole_run", emulate_supported=False)
         engine = CombatDecisionEngine(client, fallback_selector=_ChooseSecond())
 
         await engine.decide_and_commit("inst-001", timeout_s=1.0)
@@ -71,7 +72,15 @@ class WholeRunSparseActionIdTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.committed_action_id, "1")
 
     async def test_combat_keeps_public_action_id_unchanged(self) -> None:
-        client = _FakeClient(emulate_supported=True)
+        client = _FakeClient(instance_type="combat", emulate_supported=True)
+        engine = CombatDecisionEngine(client, fallback_selector=_ChooseSecond())
+
+        await engine.decide_and_commit("inst-001", timeout_s=1.0)
+
+        self.assertEqual(client.committed_action_id, "3")
+
+    async def test_missing_emulate_capability_alone_does_not_enable_ordinal_commit(self) -> None:
+        client = _FakeClient(instance_type="future_mode", emulate_supported=False)
         engine = CombatDecisionEngine(client, fallback_selector=_ChooseSecond())
 
         await engine.decide_and_commit("inst-001", timeout_s=1.0)
