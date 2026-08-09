@@ -10,7 +10,17 @@ Three entry points sharing one loop (`EpisodeRunner`):
 
 All three accept `search_mode`/`beam_max_depth` to pick the beam config (see
 `decision.search_modes`) without hand-constructing a `BeamSearchConfig`.
+
+The executable `start_*` modules are lazy exports. Importing them eagerly here would
+preload the target before `python -m sts2_training.runner.start_*` executes it, causing
+runpy's "found in sys.modules" RuntimeWarning and executing the module in a second
+namespace.
 """
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 from sts2_training.decision.search_modes import DEFAULT_SEARCH_MODE, SEARCH_MODES, resolve_search_mode
 from sts2_training.runner.episode import (
@@ -21,12 +31,22 @@ from sts2_training.runner.episode import (
     start_and_run,
 )
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario, NewRunConfig, RunSnapshot
-from sts2_training.runner.start_combat_from_state import start_combat_from_state
-from sts2_training.runner.start_new_run import start_new_run
-from sts2_training.runner.start_run_from_state import (
-    RunSnapshotRestoreNotSupportedError,
-    start_run_from_state,
-)
+
+_LAZY_EXPORTS = {
+    "RunSnapshotRestoreNotSupportedError": (
+        "sts2_training.runner.start_run_from_state",
+        "RunSnapshotRestoreNotSupportedError",
+    ),
+    "start_combat_from_state": (
+        "sts2_training.runner.start_combat_from_state",
+        "start_combat_from_state",
+    ),
+    "start_new_run": ("sts2_training.runner.start_new_run", "start_new_run"),
+    "start_run_from_state": (
+        "sts2_training.runner.start_run_from_state",
+        "start_run_from_state",
+    ),
+}
 
 __all__ = [
     "CombatScenario",
@@ -46,3 +66,17 @@ __all__ = [
     "start_new_run",
     "start_run_from_state",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute_name = target
+    value = getattr(import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
