@@ -2,6 +2,9 @@
 concurrently against one RL server, each through `start_new_run`, and logs every
 selection Training makes - the committed action AND every beam-search-explored-
 but-unchosen branch - to its own JSONL file via `selection_log.JsonlSelectionLogger`.
+A successfully and completely logged run appends one `self_play_run_result` record
+with the run seed/configuration and terminal outcome so each file carries its own
+Run-level Win/Lose label.
 
 This does not add any new decision logic. The policy driving these runs is still
 `CombatDecisionEngine`'s heuristic default (`PriorHeuristicPolicy` + beam search for
@@ -105,6 +108,29 @@ def _seed_for_index(batch_seed: int, index: int) -> int:
     return ((batch_seed - 1 + index) % _MAX_GAME_SEED) + 1
 
 
+def _run_result_event(
+    *,
+    run_id: str,
+    seed: int,
+    character_id: str,
+    ascension: int,
+    episode: EpisodeResult,
+) -> dict[str, Any]:
+    """Build the terminal per-run record that labels a complete self-play log."""
+    return {
+        "event": "self_play_run_result",
+        "run_id": run_id,
+        "seed": seed,
+        "character_id": character_id,
+        "ascension": ascension,
+        "instance_id": episode.instance_id,
+        "decisions_made": episode.decisions_made,
+        "elapsed_s": episode.elapsed_s,
+        "outcome": episode.final_dto.get("outcome"),
+        "final_dto": episode.final_dto,
+    }
+
+
 class _TrackingSelectionLogger:
     """Remember logger write failures that SelectionAudit intentionally swallows.
 
@@ -174,6 +200,22 @@ async def _run_one(
             max_decisions=max_decisions,
             engine=engine,
         )
+        # SelectionAudit deliberately swallows logger failures so gameplay can continue.
+        # Do not append a terminal "complete" record to a log already known to have a
+        # hole. A failure while writing this final record is tracked and reported below.
+        if tracked_logger.error is None:
+            try:
+                tracked_logger(
+                    _run_result_event(
+                        run_id=run_id,
+                        seed=seed,
+                        character_id=character_id,
+                        ascension=ascension,
+                        episode=episode,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - tracked logger owns failure reporting
+                pass
     except Exception as exc:  # noqa: BLE001 - one run's failure must not sink the batch
         _LOG.exception("self-play run %s failed", run_id)
         episode = None
