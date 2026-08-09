@@ -1,19 +1,18 @@
 # runner の使い方
 
 `sts2_training.runner` は、`sts2_training.decision.CombatDecisionEngine` の上に載る
-**「instanceを起動して、終わるまで動かす」全体の管理役**です。3つの入り口(起動の仕方が
-異なるだけ)と、それらが共有する1つの実行ループから構成されます。
+**「instanceを起動して、終わるまで動かす」全体の管理役**です。2つの入り口（起動の仕方が
+異なるだけ）と、それらが共有する1つの実行ループから構成されます。
 
 ```text
 start_combat_from_state(CombatScenario)   完全な盤面を渡してCombatを開始
-start_run_from_state(RunSnapshot)         完全な盤面を渡してrunを再開(現状未対応、後述)
 start_new_run(NewRunConfig)               通常のゲームスタート(deckなし、character+seedのみ)
         │
         ▼
    client.start_instance(instance_config)
         │
         ▼
-   EpisodeRunner.run()   ← 3つの入り口が共有する唯一のループ
+   EpisodeRunner.run()   ← 2つの入り口が共有する唯一のループ
         │  decide() -> commit_action() を繰り返す
         │  (CombatDecisionEngineが内部でbeam search / heuristic fallbackを選択)
         ▼
@@ -34,14 +33,15 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 | クラス | 用途 | 必須フィールド |
 |---|---|---|
 | `CombatScenario` | 特定盤面からCombat開始 | character_id, player_hp, player_max_hp, hand, draw_pile, discard_pile, enemies |
-| `RunSnapshot` | 特定盤面からrun再開 | character_id, ascension, seed, snapshot_json |
 | `NewRunConfig` | 通常のゲームスタート | character_id のみ(ascension/seedはデフォルトあり) |
 
-`CombatScenario`/`RunSnapshot`は**デフォルト値を持たない必須フィールド**を意図的に
-多く持っています。「完全な盤面情報」を渡し忘れた場合、`RL`側に不完全なリクエストが
-届く前に、コンストラクタ呼び出しの時点で`TypeError`になるようにするためです。
-`CombatScenario`の出力はSTS2_RLの`build_scenario_from_spec()`(
-`Common/schemas/combat_scenario_input_schema.json`)のwire shapeに合わせます。runner側では
+`CombatScenario`は**デフォルト値を持たない必須フィールド**を意図的に多く持っています。
+「完全な盤面情報」を渡し忘れた場合、`RL`側に不完全なリクエストが届く前に、コンストラクタ
+呼び出しの時点で`TypeError`になるようにするためです。`NewRunConfig`は盤面を渡さない
+通常開始用なので、`ascension`と`seed`にデフォルトがあります。
+
+`CombatScenario`の出力はSTS2_RLの`build_scenario_from_spec()`
+(`Common/schemas/combat_scenario_input_schema.json`)のwire shapeに合わせます。runner側では
 `potions=["FIRE_POTION", None, "BLOCK_POTION"]`のようなbelt順の短縮形を
 `[{"slot": 0, "potion_id": ...}, {"slot": 2, "potion_id": ...}]`へ、
 `player_powers={"STRENGTH": 2}`や`EnemyScenario(..., powers={...})`を
@@ -62,15 +62,13 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 - `build_engine(client, *, engine=None, search_mode=None, beam_max_depth=None)`:
   `search_mode`/`beam_max_depth`から`CombatDecisionEngine`を組み立てる小さなヘルパー。
 - `start_and_run(client, instance_config, ...)`: `build_engine` + `start_instance` +
-  `EpisodeRunner.run`をまとめた本体。3つの`start_*`入り口はそれぞれの`instance_config`
+  `EpisodeRunner.run`をまとめた本体。2つの`start_*`入り口はそれぞれの`instance_config`
   を組み立ててこれに委譲するだけです。
 
-### `start_combat_from_state.py` / `start_run_from_state.py` / `start_new_run.py`
+### `start_combat_from_state.py` / `start_new_run.py`
 
-各モジュールは対応する`instance_config`の準備とCLIを持ちます。現在未対応の
-`start_run_from_state`だけは、誤って新規runを開始しないため`start_instance`へ委譲せず
-明示的に失敗します。CLIの共通部分(`--host`等の引数・結果のJSON出力)は`_cli.py`に
-集約されています。
+各モジュールは対応する`instance_config`の準備とCLIを持ちます。CLIの共通部分
+(`--host`等の引数・結果のJSON出力)は`_cli.py`に集約されています。
 
 ```python
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
@@ -102,7 +100,7 @@ python -m sts2_training.runner.start_combat_from_state \
 
 ## 探索モードの選択(`search_mode` / `beam_max_depth`)
 
-3つの入り口すべてが`search_mode`(プリセット名)と`beam_max_depth`(深さだけの上書き)
+2つの入り口はいずれも`search_mode`(プリセット名)と`beam_max_depth`(深さだけの上書き)
 を受け取れます。内部で`decision.search_modes.resolve_search_mode`を呼び、
 `CombatDecisionEngine`に渡す`BeamSearchConfig`を組み立てます(プリセット一覧は
 `decision/how_to_use.md`参照)。
@@ -133,20 +131,9 @@ my_engine = CombatDecisionEngine(client, beam_config=resolve_search_mode("wide",
 result = await start_combat_from_state(client, scenario, engine=my_engine)
 ```
 
-## `start_run_from_state`の既知の制約(現状未対応)
+## 2つの入り口の使い分けまとめ
 
-STS2_RLの`API/instance_whole_run.py`の`WholeRunInstance`は、`instance_config`から
-snapshotを読み取る仕組みをまだ持っていません(`WholeRunSession.load_state()`自体は
-存在しますが配線されていません)。そのため`start_run_from_state()`は呼ぶと必ず
-`RunSnapshotRestoreNotSupportedError`を送出します - 「本当は新規runなのに再開したと
-誤解してしまう」事故を防ぐため、黙って新規runを開始する代わりに明示的に失敗させて
-います。CLIもこのguardをローカルで発火させ、未対応の間はTCP接続を試みません。
-STS2_RL側の対応が入ったら、このguardを外して`start_and_run`へ接続するのが残作業です。
-
-## 3つの入り口の使い分けまとめ
-
-| 入り口 | いつ使うか | 現状 |
-|---|---|---|
-| `start_combat_from_state` | 特定の戦闘盤面からの評価・デバッグ・特定シナリオでの学習 | 動作可能 |
-| `start_run_from_state` | 特定のrun状態(周回中の特定地点)からの再開 | STS2_RL側の対応待ち |
-| `start_new_run` | 通常のフルラン(データ収集の基本形) | 動作可能 |
+| 入り口 | いつ使うか |
+|---|---|
+| `start_combat_from_state` | 特定の戦闘盤面からの評価・デバッグ・特定シナリオでの学習 |
+| `start_new_run` | 通常のフルラン(データ収集の基本形) |
