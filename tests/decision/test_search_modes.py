@@ -19,10 +19,11 @@ class ResolveSearchModeTest(unittest.TestCase):
 
     def test_named_mode_resolves_to_isolated_preset(self) -> None:
         resolved = resolve_search_mode("deep")
+        exposed = SEARCH_MODES["deep"]
 
-        self.assertIsNot(resolved, SEARCH_MODES["deep"])
-        self.assertEqual(resolved, SEARCH_MODES["deep"])
-        self.assertIsNot(resolved.simulation_options, SEARCH_MODES["deep"].simulation_options)
+        self.assertIsNot(resolved, exposed)
+        self.assertEqual(resolved, exposed)
+        self.assertIsNot(resolved.simulation_options, exposed.simulation_options)
 
     def test_mutating_resolved_named_mode_does_not_corrupt_preset(self) -> None:
         resolved = resolve_search_mode("deep")
@@ -35,6 +36,24 @@ class ResolveSearchModeTest(unittest.TestCase):
 
         self.assertEqual(SEARCH_MODES["deep"].max_depth, original_depth)
         self.assertEqual(SEARCH_MODES["deep"].simulation_options, original_options)
+
+    def test_mutating_public_registry_value_does_not_corrupt_private_preset(self) -> None:
+        exposed = SEARCH_MODES["deep"]
+        exposed.max_depth = 99
+        assert exposed.simulation_options is not None
+        exposed.simulation_options["stop_condition"] = "combat_end"
+
+        fresh = SEARCH_MODES["deep"]
+        resolved = resolve_search_mode("deep")
+
+        self.assertNotEqual(fresh.max_depth, 99)
+        self.assertNotEqual(resolved.max_depth, 99)
+        self.assertNotEqual(fresh.simulation_options, exposed.simulation_options)
+        self.assertEqual(resolved, fresh)
+
+    def test_public_registry_cannot_be_reassigned(self) -> None:
+        with self.assertRaises(TypeError):
+            SEARCH_MODES["deep"] = BeamSearchConfig(max_depth=99)  # type: ignore[index]
 
     def test_unknown_mode_name_raises(self) -> None:
         with self.assertRaises(ValueError):
