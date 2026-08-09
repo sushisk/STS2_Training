@@ -207,6 +207,39 @@ def test_whole_run_sparse_commit_records_public_action_id_and_preserves_wire_tok
     assert events[1]["selected_action_id"] == "5"
 
 
+def test_whole_run_sparse_public_action_id_survives_selection_recovery() -> None:
+    events: list[dict] = []
+    audit = SelectionAudit(events.append)
+    start = _decision(
+        decision_point_id="decision-1",
+        boundary="reward",
+        room_context={"room_id": 7},
+        legal_actions=_sparse_actions("1", "3"),
+    )
+    start["operation"] = "start_instance"
+    audit.remember(start)
+
+    request = {**_commit_request(), "action_id": "1"}
+    audit.record_action(
+        request,
+        source_branch_id="root",
+        result=None,
+        error=RuntimeError("completion uncertain"),
+    )
+    audit.record_action(
+        request,
+        source_branch_id="root",
+        result=_decision(
+            decision_point_id="decision-2",
+            boundary="map_select",
+            room_context={"room_id": 7},
+        ),
+    )
+
+    assert [event["event"] for event in events] == ["selection", "selection_recovery"]
+    assert [event["selected_action_id"] for event in events] == ["3", "3"]
+
+
 def test_combat_numeric_public_action_id_is_not_treated_as_an_ordinal() -> None:
     events: list[dict] = []
     audit = SelectionAudit(events.append)
