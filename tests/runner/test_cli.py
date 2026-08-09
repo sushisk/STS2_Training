@@ -36,6 +36,23 @@ class AddCommonArgumentsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["--log-level", "NOISY"])
 
+    def test_invalid_port_is_rejected(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_common_arguments(parser)
+
+        for value in ("0", "65536", "not-a-port"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                parser.parse_args(["--port", value])
+
+    def test_non_positive_or_non_finite_timeouts_are_rejected(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_common_arguments(parser)
+
+        for option in ("--connect-timeout", "--decision-timeout"):
+            for value in ("0", "-1", "nan", "inf"):
+                with self.subTest(option=option, value=value), self.assertRaises(SystemExit):
+                    parser.parse_args([option, value])
+
     def test_non_positive_max_decisions_is_rejected(self) -> None:
         parser = argparse.ArgumentParser()
         add_common_arguments(parser)
