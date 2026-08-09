@@ -86,28 +86,6 @@ class CombatDecisionEngine:
     ) -> DecisionOutcome:
         deadline = _deadline_from_timeout(timeout_s)
 
-        # TODO(self-play smoke test, 2026-08-09): this always re-fetches the decision
-        # even when the prior commit_action response already carried the next one.
-        # Suspected to interact badly with STS2_RL's Whole Run instance, where
-        # `commit_action` re-derives `legal_actions` from live session state at commit
-        # time (API/instance_whole_run.py's `_root_view()`) rather than reusing the
-        # snapshot `get_decision` handed out - if that view can change shape between
-        # two reads with nothing committed in between (e.g. an RNG-regenerated reward
-        # boundary), this redundant call could be why a heuristic-selected action_id is
-        # sometimes rejected as "not among current legal actions" by the time
-        # commit_action fires.
-        #
-        # CONFIRMED reproducible against a real RL server (two separate self-play runs,
-        # 2026-08-09): a Whole Run failed this way at decision 44 and again at decision
-        # 19 of a fresh run, both times immediately after a successful commit_action,
-        # with zero emulate_actions calls involved in the second repro - so this is
-        # independent of beam search/emulate_actions, purely a get_decision/
-        # commit_action re-derivation race on the Whole Run side. Still needs one more
-        # targeted repro (call get_decision twice in a row with nothing committed in
-        # between, real RL server, diff the two legal_actions payloads) to nail down the
-        # exact trigger before deciding whether the fix belongs here (stop re-fetching
-        # when the prior response already has the next decision) or in STS2_RL's
-        # `_root_view()` (pin the view at decision_point_id issuance).
         raw_decision = await self._client.get_decision(
             instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
         )
@@ -208,9 +186,44 @@ class CombatDecisionEngine:
         return await self._client.commit_action(
             instance_id,
             outcome.decision["decision_point_id"],
-            outcome.chosen_action_id,
+            _commit_action_id(self._client, outcome),
             timeout_s=remaining,
         )
+
+
+def _commit_action_id(client: Any, outcome: DecisionOutcome) -> str:
+    """Return the action token the currently deployed RL server expects on commit.
+
+    Combat instances publish ``max_emulate_actions_items`` and consume the opaque
+    ``action_id`` exactly as advertised by the DTO contract. Whole Run instances do not
+    publish that capability. Their current STS2_RL ``_View.resolve_action_id`` instead
+    interprets the public token as a positional index into ``legal_actions_raw`` even
+    though ``mask_legal_actions`` publishes the Emulator's sparse ActionId unchanged.
+
+    Until that server-side mismatch can be removed without breaking deployed Whole Run
+    servers, translate only the no-emulate-actions instance path at the final wire
+    boundary. Selection still happens against the public sparse ID; only commit uses the
+    ordinal required by the current Whole Run implementation.
+    """
+    chosen_action_id = outcome.chosen_action_id
+    if chosen_action_id is None:
+        raise RuntimeError("cannot commit an empty action_id")
+    if getattr(client, "max_emulate_actions_items", None) is not None:
+        return chosen_action_id
+
+    dto = outcome.decision.get("masked_emulator_dto")
+    if not isinstance(dto, Mapping):
+        raise RuntimeError("decision is missing masked_emulator_dto for Whole Run commit")
+    raw_legal_actions = dto.get("legal_actions")
+    if not isinstance(raw_legal_actions, Sequence) or isinstance(raw_legal_actions, (str, bytes)):
+        raise RuntimeError("decision is missing legal_actions for Whole Run commit")
+
+    for index, action in enumerate(raw_legal_actions):
+        if isinstance(action, Mapping) and action.get("action_id") == chosen_action_id:
+            return str(index)
+    raise RuntimeError(
+        f"selected action_id {chosen_action_id!r} is not present in the decision legal_actions"
+    )
 
 
 def _beam_result_is_actionable(result: BeamSearchResult) -> bool:
