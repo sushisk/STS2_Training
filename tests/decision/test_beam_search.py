@@ -38,6 +38,8 @@ class _FakeConnection:
         self.messages: list[dict] = []
         self.decisions: dict[str, dict] = {}
         self.emulate_results: dict[tuple[str, str], dict] = {}
+        # None mirrors a Whole Run instance, which never publishes this capability.
+        self.max_emulate_actions_items: int | None = 64
         self.reject_emulate_actions = False
         # 1-indexed emulate_actions call number at which rejection starts (for testing
         # a chunk failing partway through a depth's batch); None = never reject.
@@ -52,12 +54,14 @@ class _FakeConnection:
         operation = request["operation"]
 
         if operation == "start_instance":
-            return {
+            response = {
                 **_common(request),
                 "status": "completed",
                 "instance_id": "inst-001",
-                "max_emulate_actions_items": 64,
             }
+            if self.max_emulate_actions_items is not None:
+                response["max_emulate_actions_items"] = self.max_emulate_actions_items
+            return response
 
         if operation == "get_decision":
             decision = self.decisions[request["branch_id"]]
@@ -361,6 +365,23 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result.best_root_action_id)
         self.assertEqual(result.reason, "not_beam_searchable")
+        self.assertEqual([m["operation"] for m in connection.messages], ["start_instance"])
+
+    async def test_instance_without_emulate_actions_capability_is_not_beam_searched(self) -> None:
+        # Whole Run instances never publish max_emulate_actions_items (see
+        # AsyncTrainingApiClient._accept_start_instance) - combat's own protocol
+        # validation requires the capability for instance_type "combat", so this uses
+        # a non-combat instance_type instead of the shared `_client()` helper.
+        connection = _FakeConnection()
+        connection.max_emulate_actions_items = None
+        client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+        await client.start_instance({"instance_type": "whole_run"}, timeout_s=1.0)
+        engine = self._engine(client, max_depth=1)
+
+        result = await engine.search("inst-001", _root_decision(_COMBAT_ACTIONS), timeout_s=5.0)
+
+        self.assertIsNone(result.best_root_action_id)
+        self.assertEqual(result.reason, "emulate_actions_not_supported")
         self.assertEqual([m["operation"] for m in connection.messages], ["start_instance"])
 
     async def test_no_legal_actions_short_circuits(self) -> None:

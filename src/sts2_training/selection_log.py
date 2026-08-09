@@ -52,20 +52,38 @@ class SelectionAudit:
         # state by batch size rather than total speculative selections.
         self._selection_request_id: str | None = None
         self._selection_branch_ids: set[str] = set()
+        # Whole Run's deployed resolve_action_id interprets root commit tokens as
+        # positional ordinals even though its public legal_actions expose sparse opaque
+        # action_id values. ApiContract supplies this instance-level compatibility fact
+        # explicitly when start_instance is accepted so audit semantics never have to
+        # infer it from an unrelated capability field.
+        self._wire_commit_action_id_is_ordinal = False
 
-    def clear(self) -> None:
+    def _clear_transient(self) -> None:
+        """Drop decision/replay state while preserving active-instance wire quirks."""
         self._decisions.clear()
         self._selection_request_id = None
         self._selection_branch_ids.clear()
+
+    def clear(self) -> None:
+        self._clear_transient()
+        self._wire_commit_action_id_is_ordinal = False
 
     def forget(self, instance_id: str, branch_ids: Sequence[str]) -> None:
         """Drop cached Decisions for Branches that can no longer be selected."""
         for branch_id in branch_ids:
             self._decisions.pop((instance_id, branch_id), None)
 
-    def remember(self, response: Mapping[str, Any]) -> None:
+    def remember(
+        self,
+        response: Mapping[str, Any],
+        *,
+        wire_commit_action_id_is_ordinal: bool | None = None,
+    ) -> None:
         if self._logger is None:
             return
+        if wire_commit_action_id_is_ordinal is not None:
+            self._wire_commit_action_id_is_ordinal = wire_commit_action_id_is_ordinal
         instance_id = response.get("instance_id")
         branch_id = response.get("branch_id", "root")
         decision_point_id = response.get("decision_point_id")
@@ -122,6 +140,11 @@ class SelectionAudit:
 
         identity = _selection_identity(event_request, source_branch_id)
         is_retry_of_selection = self._is_recovery(identity)
+        selected_action_id = _selected_public_action_id(
+            received,
+            event_request,
+            wire_commit_action_id_is_ordinal=self._wire_commit_action_id_is_ordinal,
+        )
 
         # Completion-uncertain first attempts remain auditable. Exact replay is recorded
         # as recovery for the same logical selection; Branch ID distinguishes siblings
@@ -131,6 +154,10 @@ class SelectionAudit:
             "received": received,
             "request": event_request,
             "result": dict(result) if result is not None else None,
+            # Keep request.action_id byte-for-byte faithful to the wire request. This
+            # separate field is the opaque public ID from received.legal_actions and is
+            # therefore the stable label self-play consumers should train against.
+            "selected_action_id": selected_action_id,
         }
         if operation == "commit_action" and result is not None:
             event.update(_root_outcomes(received, result))
@@ -159,7 +186,10 @@ class SelectionAudit:
                 and result.get("status") == "completed"
             )
             if root_committed:
-                self.clear()
+                # Root commit invalidates all cached Branch Decisions, but the active
+                # instance remains the same. Preserve its wire-ID compatibility mode for
+                # the next Decision instead of resetting it as close/start would.
+                self._clear_transient()
             remembered_result = dict(result)
             # emulate_actions item results omit instance_id; restore it from the
             # normalized request so next-depth audit lookup retains its observation.
@@ -172,6 +202,49 @@ def _masked_dto(response: Mapping[str, Any] | None) -> Mapping[str, Any]:
         return {}
     value = response.get("masked_emulator_dto")
     return value if isinstance(value, Mapping) else {}
+
+
+def _selected_public_action_id(
+    received: Mapping[str, Any] | None,
+    request: Mapping[str, Any],
+    *,
+    wire_commit_action_id_is_ordinal: bool,
+) -> str | None:
+    """Resolve the selected opaque public ID without rewriting the wire request.
+
+    Normal Combat/emulation requests send the public action_id directly. The currently
+    deployed Whole Run root commit path is the exception: Training temporarily sends the
+    action's ordinal because RL's _View.resolve_action_id treats the token as a list
+    index. Audit data must still label the selection with the sparse public ID exposed in
+    received.masked_emulator_dto.legal_actions.
+    """
+    actions = _masked_dto(received).get("legal_actions")
+    if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes)):
+        return None
+    requested_action_id = request.get("action_id")
+    if not isinstance(requested_action_id, str) or not requested_action_id:
+        return None
+
+    if request.get("operation") == "commit_action" and wire_commit_action_id_is_ordinal:
+        try:
+            index = int(requested_action_id)
+        except ValueError:
+            return None
+        if index < 0 or index >= len(actions):
+            return None
+        selected = actions[index]
+        if not isinstance(selected, Mapping):
+            return None
+        public_action_id = selected.get("action_id")
+        return public_action_id if isinstance(public_action_id, str) and public_action_id else None
+
+    for action in actions:
+        if not isinstance(action, Mapping):
+            continue
+        public_action_id = action.get("action_id")
+        if public_action_id == requested_action_id:
+            return requested_action_id
+    return None
 
 
 def _root_outcomes(
