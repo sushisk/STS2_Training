@@ -1,10 +1,9 @@
-"""`instance_config` builders for the three top-level ways to start an instance:
-`CombatScenario`, `RunSnapshot`, `NewRunConfig` (see `how_to_use.md`).
+"""`instance_config` builders for the two top-level ways to start an instance:
+`CombatScenario` and `NewRunConfig` (see `how_to_use.md`).
 
-`CombatScenario`/`RunSnapshot` leave their board-defining fields with no default, so
-an incomplete scenario is a `TypeError` at the call site rather than a
-silently-incomplete request to RL. `NewRunConfig` has no board to supply and defaults
-accordingly.
+`CombatScenario` leaves its board-defining fields with no default, so an incomplete
+scenario is a `TypeError` at the call site rather than a silently-incomplete request
+to RL. `NewRunConfig` has no board to supply and defaults accordingly.
 
 `CombatScenario`/`EnemyScenario` serialize to STS2_RL's
 `Combat/battle_emulator.py:build_scenario_from_spec()` input shape. Convenience forms
@@ -168,40 +167,10 @@ class CombatScenario:
 
 
 @dataclass(frozen=True)
-class RunSnapshot:
-    """A complete Whole Run board state to resume from. `snapshot_json` is
-    `WholeRunSession.save_state()`'s opaque output on the RL side - this dataclass
-    just carries it plus the identity fields RL needs, not its shape.
-
-    KNOWN GAP: `WholeRunInstance` doesn't consume a snapshot field yet - it always
-    starts a fresh run. `start_run_from_state()` refuses to run until that lands
-    rather than silently starting fresh under a "resumed" label - see that module.
-    """
-
-    character_id: str
-    ascension: int
-    seed: int
-    snapshot_json: str
-
-    def __post_init__(self) -> None:
-        if not self.snapshot_json:
-            raise ValueError("RunSnapshot.snapshot_json must not be empty")
-
-    def to_instance_config(self) -> JsonObject:
-        return {
-            "instance_type": "whole_run",
-            "character_id": self.character_id,
-            "ascension": self.ascension,
-            "seed": self.seed,
-            "snapshot_json": self.snapshot_json,
-        }
-
-
-@dataclass(frozen=True)
 class NewRunConfig:
-    """A normal, from-scratch game start - the only one of the three with no board
-    to supply. `seed=None` means omit it; `start_new_run()` is what fills in a fresh
-    random seed by default, not this dataclass (kept a pure mapping).
+    """A normal, from-scratch game start with no board to supply. `seed=None` means
+    omit it; `start_new_run()` is what fills in a fresh random seed by default, not
+    this dataclass (kept a pure mapping).
     """
 
     character_id: str

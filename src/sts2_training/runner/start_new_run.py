@@ -1,4 +1,4 @@
-"""Entry point 3: start a normal, from-scratch Whole Run (`NewRunConfig` - see
+"""Entry point 2: start a normal, from-scratch Whole Run (`NewRunConfig` - see
 `scenario.py`) and drive it to completion.
 
 Programmatic use::
