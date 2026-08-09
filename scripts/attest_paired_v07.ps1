@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $TrainingRepo = 'sushisk/STS2_Training'
-$TrainingPr = 19
+$TrainingPr = 22
 $RlRepo = 'sushisk/STS2_RL'
 $RlPr = 8
 
