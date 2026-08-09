@@ -10,7 +10,8 @@ card/potion/system, `HeuristicCombatSelector` - explicitly built as placeholder
 reward choices). The point of this module is only to drive many such runs at once
 and capture what happened, as bootstrap training data (Run-level Win/Lose labels)
 for a future board/deck evaluation model. Each run's generated game seed is embedded
-in its run ID / JSONL filename so collected trajectories are reproducible.
+in its run ID / JSONL filename and also seeds the random fallback selector, so the
+game setup and fallback-policy choices can be replayed deterministically.
 
 CLI use::
 
@@ -38,11 +39,13 @@ from pathlib import Path
 from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
+from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.search_modes import resolve_search_mode
 from sts2_training.runner._cli import _positive_int, add_common_arguments, configure_logging
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.start_new_run import start_new_run
+from sts2_training.selection.heuristic_selector import HeuristicCombatSelector
 from sts2_training.selection_log import JsonlSelectionLogger
 
 __all__ = ["SelfPlayRunResult", "run_self_play_batch"]
@@ -151,6 +154,11 @@ async def _run_one(
         connection = connection_factory()
         client = AsyncTrainingApiClient(connection, selection_logger=tracked_logger)
         await connection.connect()
+        engine = CombatDecisionEngine(
+            client,
+            beam_config=resolve_search_mode(search_mode, max_depth=beam_max_depth),
+            fallback_selector=HeuristicCombatSelector(random.Random(seed)),
+        )
         episode = await start_new_run(
             client,
             character_id=character_id,
@@ -158,8 +166,7 @@ async def _run_one(
             seed=seed,
             decision_timeout_s=decision_timeout_s,
             max_decisions=max_decisions,
-            search_mode=search_mode,
-            beam_max_depth=beam_max_depth,
+            engine=engine,
         )
     except Exception as exc:  # noqa: BLE001 - one run's failure must not sink the batch
         _LOG.exception("self-play run %s failed", run_id)
@@ -210,7 +217,8 @@ async def run_self_play_batch(
     connect_timeout_s)`) and JSONL file under `output_dir`. Shared configuration is
     validated before any connection is opened. Runtime and logging failures are
     captured per run so one bad interaction does not discard the rest of the batch.
-    A fresh game seed is generated up front for every run and embedded in its run ID.
+    A fresh game seed is generated up front for every run, embedded in its run ID,
+    and reused to seed the fallback selector for deterministic replay.
     """
     _validate_positive_int("num_runs", num_runs)
     _validate_positive_int("concurrency", concurrency)
