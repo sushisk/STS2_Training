@@ -9,12 +9,13 @@ card/potion/system, `HeuristicCombatSelector` - explicitly built as placeholder
 "initial data-collection stage" logic - for everything else, e.g. map/shop/rest/
 reward choices). The point of this module is only to drive many such runs at once
 and capture what happened, as bootstrap training data (Run-level Win/Lose labels)
-for a future board/deck evaluation model.
+for a future board/deck evaluation model. Each run's generated game seed is embedded
+in its run ID / JSONL filename so collected trajectories are reproducible.
 
 CLI use::
 
-    python -m sts2_training.runner.self_play \\
-        --host 127.0.0.1 --port 8765 --character-id IRONCLAD \\
+    python -m sts2_training.runner.self_play \
+        --host 127.0.0.1 --port 8765 --character-id IRONCLAD \
         --num-runs 50 --concurrency 8 --output-dir data/self_play
 """
 
@@ -25,6 +26,7 @@ import asyncio
 import json
 import logging
 import math
+import random
 import re
 import sys
 import time
@@ -126,6 +128,7 @@ async def _close_client_best_effort(client: AsyncTrainingApiClient, run_id: str)
 async def _run_one(
     run_id: str,
     *,
+    seed: int,
     connection_factory: Callable[[], Any],
     character_id: str,
     ascension: int,
@@ -152,6 +155,7 @@ async def _run_one(
             client,
             character_id=character_id,
             ascension=ascension,
+            seed=seed,
             decision_timeout_s=decision_timeout_s,
             max_decisions=max_decisions,
             search_mode=search_mode,
@@ -206,6 +210,7 @@ async def run_self_play_batch(
     connect_timeout_s)`) and JSONL file under `output_dir`. Shared configuration is
     validated before any connection is opened. Runtime and logging failures are
     captured per run so one bad interaction does not discard the rest of the batch.
+    A fresh game seed is generated up front for every run and embedded in its run ID.
     """
     _validate_positive_int("num_runs", num_runs)
     _validate_positive_int("concurrency", concurrency)
@@ -243,9 +248,11 @@ async def run_self_play_batch(
                 index = next_index
                 next_index += 1
 
-            run_id = f"{batch_tag}-{index:05d}-{uuid.uuid4().hex[:8]}"
+            seed = random.randint(1, 2**31 - 1)
+            run_id = f"{batch_tag}-{index:05d}-seed-{seed}-{uuid.uuid4().hex[:8]}"
             results[index] = await _run_one(
                 run_id,
+                seed=seed,
                 connection_factory=factory,
                 character_id=character_id,
                 ascension=ascension,
