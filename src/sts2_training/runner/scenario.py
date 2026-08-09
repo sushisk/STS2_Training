@@ -6,11 +6,12 @@ an incomplete scenario is a `TypeError` at the call site rather than a
 silently-incomplete request to RL. `NewRunConfig` has no board to supply and defaults
 accordingly.
 
-`CombatScenario`/`EnemyScenario` field coverage mirrors STS2_RL's
-`Combat/battle_emulator.py:build_scenario_from_spec()`; anything not modeled directly
-(pending_choice, per-card upgrades, ...) can still go through `extra`, merged in
-verbatim. `extra` may not override fields modeled explicitly by `CombatScenario` or
-the fixed `instance_type` discriminator.
+`CombatScenario`/`EnemyScenario` serialize to STS2_RL's
+`Combat/battle_emulator.py:build_scenario_from_spec()` input shape. Convenience forms
+for potion slots and power stacks are normalized to the wire shape before the config is
+sent. Anything not modeled directly (pending_choice, per-card upgrades, ...) can still
+go through `extra`, merged in verbatim. `extra` may not override fields modeled
+explicitly by `CombatScenario` or the fixed `instance_type` discriminator.
 """
 
 from __future__ import annotations
@@ -20,18 +21,64 @@ from dataclasses import dataclass, field, fields
 from typing import Any
 
 JsonObject = dict[str, Any]
+PotionSpec = str | Mapping[str, Any] | None
+PowerStacks = Mapping[str, Any] | Sequence[Mapping[str, Any]]
+
+
+def _serialize_potions(potions: Sequence[PotionSpec]) -> list[JsonObject]:
+    """Normalize potion-belt shorthand to RL's ``{slot, potion_id}`` records.
+
+    Strings use their sequence index as the slot and ``None`` represents an empty slot.
+    Mapping entries are copied verbatim for callers that already have RL-shaped potion
+    records.
+    """
+    result: list[JsonObject] = []
+    for slot, potion in enumerate(potions):
+        if potion is None:
+            continue
+        if isinstance(potion, str):
+            result.append({"slot": slot, "potion_id": potion})
+            continue
+        if isinstance(potion, Mapping):
+            result.append(dict(potion))
+            continue
+        raise TypeError("CombatScenario.potions entries must be strings, mappings, or None")
+    return result
+
+
+def _serialize_power_stacks(powers: PowerStacks) -> list[JsonObject]:
+    """Normalize ``{power_id: amount}`` shorthand to RL power-stack records.
+
+    A sequence of mappings is already the exact/advanced form and is copied verbatim.
+    A single ``{power_id/id, amount}`` mapping is also accepted as one exact stack.
+    """
+    if isinstance(powers, Mapping):
+        if "amount" in powers and ("power_id" in powers or "id" in powers):
+            return [dict(powers)]
+        return [
+            {"power_id": str(power_id), "amount": amount}
+            for power_id, amount in powers.items()
+        ]
+    return [dict(power) for power in powers]
 
 
 @dataclass(frozen=True)
 class EnemyScenario:
-    """One living enemy in a `CombatScenario`. `monster_id`/`hp` are the only fields
-    `build_scenario_from_spec` requires per enemy; the rest default on the RL side."""
+    """One living enemy in a `CombatScenario`.
+
+    ``powers={"STRENGTH": 2}`` is a convenience shorthand; a sequence of RL-shaped
+    power-stack mappings is accepted when associated-card or other exact stack state is
+    needed.
+    """
 
     monster_id: str
     hp: int
     max_hp: int | None = None
     block: int = 0
-    powers: Mapping[str, int] = field(default_factory=dict)
+    slot_name: str | None = None
+    frog_knight_has_beetle_charged: bool | None = None
+    waterfall_giant_current_pressure_gun_damage: int | None = None
+    powers: PowerStacks = field(default_factory=dict)
 
     def to_dict(self) -> JsonObject:
         payload: JsonObject = {"monster_id": self.monster_id, "hp": self.hp}
@@ -39,8 +86,16 @@ class EnemyScenario:
             payload["max_hp"] = self.max_hp
         if self.block:
             payload["block"] = self.block
+        if self.slot_name is not None:
+            payload["slot_name"] = self.slot_name
+        if self.frog_knight_has_beetle_charged is not None:
+            payload["frog_knight_has_beetle_charged"] = self.frog_knight_has_beetle_charged
+        if self.waterfall_giant_current_pressure_gun_damage is not None:
+            payload["waterfall_giant_current_pressure_gun_damage"] = (
+                self.waterfall_giant_current_pressure_gun_damage
+            )
         if self.powers:
-            payload["powers"] = dict(self.powers)
+            payload["powers"] = _serialize_power_stacks(self.powers)
         return payload
 
 
@@ -50,6 +105,10 @@ class CombatScenario:
     decision needs to not work from a partial picture: who's playing, their HP, full
     deck (as three piles), and the enemies. Optional fields are state that can
     legitimately be empty rather than missing.
+
+    ``potions`` accepts belt-order string IDs (use ``None`` for an empty slot) or
+    already-shaped ``{slot, potion_id}`` mappings. ``player_powers`` accepts a simple
+    ``{power_id: amount}`` shorthand or a sequence of RL-shaped power-stack mappings.
     """
 
     character_id: str
@@ -65,8 +124,8 @@ class CombatScenario:
     energy: int | None = None
     stars: int | None = None
     relics: Sequence[str] = field(default_factory=tuple)
-    potions: Sequence[str] = field(default_factory=tuple)
-    player_powers: Mapping[str, int] = field(default_factory=dict)
+    potions: Sequence[PotionSpec] = field(default_factory=tuple)
+    player_powers: PowerStacks = field(default_factory=dict)
     seed: int = 1
     # Escape hatch for schema fields not modeled above (orbs, pending_choice,
     # per-card upgrades, ...) - merged into instance_config verbatim.
@@ -98,8 +157,8 @@ class CombatScenario:
             "discard_pile": list(self.discard_pile),
             "exhaust_pile": list(self.exhaust_pile),
             "relics": list(self.relics),
-            "potions": list(self.potions),
-            "player_powers": dict(self.player_powers),
+            "potions": _serialize_potions(self.potions),
+            "player_powers": _serialize_power_stacks(self.player_powers),
             "enemies": [e.to_dict() for e in self.enemies],
             "seed": self.seed,
             **({"energy": self.energy} if self.energy is not None else {}),
