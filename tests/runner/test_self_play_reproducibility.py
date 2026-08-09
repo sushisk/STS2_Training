@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import random
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from sts2_training.runner.episode import EpisodeResult
+from sts2_training.runner.self_play import _MAX_GAME_SEED, run_self_play_batch
+
+
+class _Connection:
+    client_session_id = "session-test"
+
+    async def connect(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class SelfPlayReproducibilityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_generated_seed_is_recorded_and_seeds_fallback_policy(self) -> None:
+        episode = EpisodeResult(
+            instance_id="instance-1",
+            decisions_made=0,
+            final_dto={"terminal": True, "outcome": "victory"},
+            elapsed_s=0.0,
+        )
+        fake_engine = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch("sts2_training.runner.self_play.random.randint", return_value=123456),
+                mock.patch(
+                    "sts2_training.runner.self_play.HeuristicCombatSelector"
+                ) as selector_cls,
+                mock.patch(
+                    "sts2_training.runner.self_play.CombatDecisionEngine",
+                    return_value=fake_engine,
+                ) as engine_cls,
+                mock.patch(
+                    "sts2_training.runner.self_play.start_new_run",
+                    new=mock.AsyncMock(return_value=episode),
+                ) as start_new_run,
+            ):
+                results = await run_self_play_batch(
+                    character_id="IRONCLAD",
+                    num_runs=1,
+                    connection_factory=_Connection,
+                    output_dir=Path(tmp),
+                )
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("-seed-123456-", results[0].run_id)
+        start_new_run.assert_awaited_once()
+        self.assertEqual(start_new_run.await_args.kwargs["seed"], 123456)
+        self.assertIs(start_new_run.await_args.kwargs["engine"], fake_engine)
+
+        selector_cls.assert_called_once()
+        seeded_rng = selector_cls.call_args.args[0]
+        self.assertIsInstance(seeded_rng, random.Random)
+        self.assertEqual(seeded_rng.random(), random.Random(123456).random())
+        self.assertIs(engine_cls.call_args.kwargs["fallback_selector"], selector_cls.return_value)
+
+    async def test_batch_seeds_are_unique_and_wrap_at_game_seed_limit(self) -> None:
+        episode = EpisodeResult(
+            instance_id="instance-1",
+            decisions_made=0,
+            final_dto={"terminal": True, "outcome": "victory"},
+            elapsed_s=0.0,
+        )
+        start_new_run = mock.AsyncMock(return_value=episode)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch(
+                    "sts2_training.runner.self_play.random.randint",
+                    return_value=_MAX_GAME_SEED - 1,
+                ),
+                mock.patch(
+                    "sts2_training.runner.self_play.CombatDecisionEngine",
+                    return_value=object(),
+                ),
+                mock.patch(
+                    "sts2_training.runner.self_play.start_new_run",
+                    new=start_new_run,
+                ),
+            ):
+                results = await run_self_play_batch(
+                    character_id="IRONCLAD",
+                    num_runs=3,
+                    concurrency=3,
+                    connection_factory=_Connection,
+                    output_dir=Path(tmp),
+                )
+
+        expected_seeds = {_MAX_GAME_SEED - 1, _MAX_GAME_SEED, 1}
+        seeds = {call.kwargs["seed"] for call in start_new_run.await_args_list}
+        self.assertEqual(seeds, expected_seeds)
+        self.assertEqual(len(results), 3)
+        for seed in expected_seeds:
+            self.assertTrue(any(f"-seed-{seed}-" in result.run_id for result in results))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -36,6 +36,8 @@ _LAZY_EXPORTS = {
         "start_combat_from_state",
     ),
     "start_new_run": ("sts2_training.runner.start_new_run", "start_new_run"),
+    "SelfPlayRunResult": ("sts2_training.runner.self_play", "SelfPlayRunResult"),
+    "run_self_play_batch": ("sts2_training.runner.self_play", "run_self_play_batch"),
 }
 
 __all__ = [
@@ -47,8 +49,10 @@ __all__ = [
     "EpisodeRunner",
     "NewRunConfig",
     "SEARCH_MODES",
+    "SelfPlayRunResult",
     "build_engine",
     "resolve_search_mode",
+    "run_self_play_batch",
     "start_and_run",
     "start_combat_from_state",
     "start_new_run",
