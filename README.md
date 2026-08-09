@@ -1,9 +1,9 @@
 # STS2_Training API connection
 
-Training-side implementation for the `sushisk/STS2_RL` async TCP / DTO v0.6 contract.
+Training-side implementation for the `sushisk/STS2_RL` async TCP / DTO v0.7 contract.
 
 The supported path is now deliberately **async + TCP only**. The legacy synchronous
-`TrainingApiClient` / `LocalProcessTransport` path is retired for v0.6 because it cannot
+`TrainingApiClient` / `LocalProcessTransport` path is retired for v0.7 because it cannot
 participate in the session handshake and `server_epoch` safety model.
 
 ## TCP smoke test
@@ -72,7 +72,7 @@ the same epoch. If RL restarted, `TcpConnection` raises `ServerEpochChangedError
 `AsyncTrainingApiClient` becomes permanently invalid. Create a new client/session; do not
 retry the unresolved request into the new RL process.
 
-This is intentional: v0.6 guarantees at-most-once execution within one RL process epoch,
+This is intentional: v0.7 guarantees at-most-once execution within one RL process epoch,
 not durable exactly-once execution across emulator process restarts.
 
 ## Timeouts, cancellation, and response limits
