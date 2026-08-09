@@ -46,6 +46,8 @@ class CombatScenarioTest(unittest.TestCase):
         self.assertEqual(config["player_hp"], 50)
         self.assertEqual(config["hand"], ["STRIKE_IRONCLAD"])
         self.assertEqual(config["enemies"], [{"monster_id": "CALCIFIED_CULTIST", "hp": 48}])
+        self.assertEqual(config["potions"], [])
+        self.assertEqual(config["player_powers"], [])
         self.assertNotIn("energy", config)
         self.assertNotIn("stars", config)
 
@@ -60,12 +62,68 @@ class CombatScenarioTest(unittest.TestCase):
 
         self.assertEqual(config["pending_choice"], {"foo": "bar"})
 
-    def test_enemy_optional_fields_included_only_when_set(self) -> None:
-        enemy = EnemyScenario(monster_id="LOUSE_RED", hp=10, max_hp=12, block=3, powers={"STRENGTH": 1})
+    def test_potion_ids_are_serialized_with_belt_slots(self) -> None:
+        config = _minimal_scenario(potions=["FIRE_POTION", None, "BLOCK_POTION"]).to_instance_config()
+
+        self.assertEqual(
+            config["potions"],
+            [
+                {"slot": 0, "potion_id": "FIRE_POTION"},
+                {"slot": 2, "potion_id": "BLOCK_POTION"},
+            ],
+        )
+
+    def test_rl_shaped_potion_records_are_preserved(self) -> None:
+        potion = {"slot": 2, "potion_id": "BLOCK_POTION"}
+
+        config = _minimal_scenario(potions=[potion]).to_instance_config()
+
+        self.assertEqual(config["potions"], [potion])
+        self.assertIsNot(config["potions"][0], potion)
+
+    def test_player_power_shorthand_is_serialized_to_stack_records(self) -> None:
+        config = _minimal_scenario(player_powers={"STRENGTH": 2, "DEXTERITY": -1}).to_instance_config()
+
+        self.assertEqual(
+            config["player_powers"],
+            [
+                {"power_id": "STRENGTH", "amount": 2},
+                {"power_id": "DEXTERITY", "amount": -1},
+            ],
+        )
+
+    def test_exact_player_power_records_are_preserved(self) -> None:
+        stack = {"power_id": "NIGHTMARE_POWER", "amount": 1, "associated_card": {"card_id": "STRIKE_IRONCLAD"}}
+
+        config = _minimal_scenario(player_powers=[stack]).to_instance_config()
+
+        self.assertEqual(config["player_powers"], [stack])
+        self.assertIsNot(config["player_powers"][0], stack)
+
+    def test_enemy_optional_fields_use_rl_wire_shape(self) -> None:
+        enemy = EnemyScenario(
+            monster_id="LOUSE_RED",
+            hp=10,
+            max_hp=12,
+            block=3,
+            slot_name="LEFT",
+            frog_knight_has_beetle_charged=False,
+            waterfall_giant_current_pressure_gun_damage=0,
+            powers={"STRENGTH": 1},
+        )
 
         self.assertEqual(
             enemy.to_dict(),
-            {"monster_id": "LOUSE_RED", "hp": 10, "max_hp": 12, "block": 3, "powers": {"STRENGTH": 1}},
+            {
+                "monster_id": "LOUSE_RED",
+                "hp": 10,
+                "max_hp": 12,
+                "block": 3,
+                "slot_name": "LEFT",
+                "frog_knight_has_beetle_charged": False,
+                "waterfall_giant_current_pressure_gun_damage": 0,
+                "powers": [{"power_id": "STRENGTH", "amount": 1}],
+            },
         )
 
     def test_enemy_minimal_fields_only(self) -> None:
