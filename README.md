@@ -118,3 +118,22 @@ module doubles as a CLI (`python -m sts2_training.runner.start_new_run --help`).
 named beam search preset (see `sts2_training.decision.search_modes`) without hand-
 constructing a `BeamSearchConfig`. See `src/sts2_training/runner/how_to_use.md` for
 the full guide.
+
+### Self-play data collection
+
+`sts2_training.runner.run_self_play_batch` drives many `start_new_run` Whole Runs
+concurrently (bounded by `concurrency`, one `TcpConnection` per run) and logs every
+selection Training makes - the committed action and every beam-search-explored-but-
+unchosen branch - to its own JSONL file via `selection_log.JsonlSelectionLogger`. It
+adds no new decision logic; the policy is still `CombatDecisionEngine`'s heuristic
+default, deliberately random for non-combat boundaries (map/shop/rest/reward) per
+`HeuristicCombatSelector`'s own "initial data-collection stage" placeholder design.
+This is a bootstrap data source for a future board/deck evaluation model (Run-level
+Win/Lose labels). One run failing is captured per-run rather than aborting the batch.
+CLI:
+
+```sh
+python -m sts2_training.runner.self_play \
+    --host 127.0.0.1 --port 8765 --character-id IRONCLAD \
+    --num-runs 50 --concurrency 8 --output-dir data/self_play
+```

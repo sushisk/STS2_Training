@@ -46,6 +46,8 @@ _LAZY_EXPORTS = {
         "sts2_training.runner.start_run_from_state",
         "start_run_from_state",
     ),
+    "SelfPlayRunResult": ("sts2_training.runner.self_play", "SelfPlayRunResult"),
+    "run_self_play_batch": ("sts2_training.runner.self_play", "run_self_play_batch"),
 }
 
 __all__ = [
@@ -59,8 +61,10 @@ __all__ = [
     "RunSnapshot",
     "RunSnapshotRestoreNotSupportedError",
     "SEARCH_MODES",
+    "SelfPlayRunResult",
     "build_engine",
     "resolve_search_mode",
+    "run_self_play_batch",
     "start_and_run",
     "start_combat_from_state",
     "start_new_run",
