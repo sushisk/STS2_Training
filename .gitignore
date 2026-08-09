@@ -15,4 +15,4 @@ dist/
 .coverage
 htmlcov/
 
-data/
+/data/
