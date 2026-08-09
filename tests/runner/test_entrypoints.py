@@ -5,6 +5,7 @@ the right `instance_config` and hand off to `EpisodeRunner` (loop itself covered
 
 from __future__ import annotations
 
+import random
 import unittest
 
 from sts2_training.decision.engine import CombatDecisionEngine
@@ -32,7 +33,14 @@ class _FakeClient:
         return "inst-001"
 
     async def get_decision(self, instance_id: str, branch_id: str = "root", *, timeout_s: float) -> dict:
-        return {"decision_point_id": "d0", "masked_emulator_dto": {"legal_actions": []}}
+        return {
+            "decision_point_id": "d0",
+            "masked_emulator_dto": {
+                "terminal": True,
+                "outcome": "victory",
+                "legal_actions": [],
+            },
+        }
 
     async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
         self.close_instance_calls += 1
@@ -62,6 +70,7 @@ class StartCombatFromStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.start_instance_calls[0]["character_id"], "IRONCLAD")
         self.assertEqual(result.instance_id, "inst-001")
         self.assertEqual(result.decisions_made, 0)
+        self.assertEqual(result.final_dto["outcome"], "victory")
         self.assertEqual(client.close_instance_calls, 1)
 
     async def test_search_mode_selects_the_beam_config_used(self) -> None:
@@ -101,17 +110,33 @@ class StartNewRunTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.instance_id, "inst-001")
 
-    async def test_omitted_seed_is_filled_in_randomly_and_varies(self) -> None:
+    async def test_omitted_seed_uses_supplied_rng_deterministically(self) -> None:
         client = _FakeClient()
+        rng = random.Random(12345)
+        expected_rng = random.Random(12345)
+        expected = [expected_rng.randint(1, 2**31 - 1) for _ in range(2)]
 
-        await start_new_run(client, character_id="IRONCLAD", decision_timeout_s=5.0)
-        await start_new_run(client, character_id="IRONCLAD", decision_timeout_s=5.0)
+        await start_new_run(client, character_id="IRONCLAD", rng=rng, decision_timeout_s=5.0)
+        await start_new_run(client, character_id="IRONCLAD", rng=rng, decision_timeout_s=5.0)
 
-        seeds = [call["seed"] for call in client.start_instance_calls]
-        self.assertEqual(len(seeds), 2)
-        for seed in seeds:
-            self.assertIsInstance(seed, int)
-        self.assertNotEqual(seeds[0], seeds[1])
+        self.assertEqual([call["seed"] for call in client.start_instance_calls], expected)
+
+    async def test_falsey_supplied_rng_is_not_replaced_by_module_random(self) -> None:
+        class _FalseyRandom(random.Random):
+            def __bool__(self) -> bool:
+                return False
+
+            def randint(self, a: int, b: int) -> int:
+                self.assert_bounds = (a, b)
+                return 123456789
+
+        client = _FakeClient()
+        rng = _FalseyRandom()
+
+        await start_new_run(client, character_id="IRONCLAD", rng=rng, decision_timeout_s=5.0)
+
+        self.assertEqual(client.start_instance_calls[0]["seed"], 123456789)
+        self.assertEqual(rng.assert_bounds, (1, 2**31 - 1))
 
 
 class StartRunFromStateTest(unittest.IsolatedAsyncioTestCase):
