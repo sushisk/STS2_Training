@@ -97,7 +97,7 @@ engine = CombatDecisionEngine(client, beam_config=resolve_search_mode("deep"))
 engine = CombatDecisionEngine(client, beam_config=resolve_search_mode("wide", max_depth=5))
 ```
 
-`runner`パッケージの3つの入り口(`start_combat_from_state`等)は、`engine`を渡す
+`runner`パッケージの2つの入り口(`start_combat_from_state` / `start_new_run`)は、`engine`を渡す
 代わりに`search_mode`/`beam_max_depth`をそのまま受け取れます(内部で
 `resolve_search_mode`を呼びます) - 詳細は`runner/how_to_use.md`。
 
