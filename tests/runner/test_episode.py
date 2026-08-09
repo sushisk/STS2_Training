@@ -1,5 +1,5 @@
-"""Coverage for `EpisodeRunner`'s decide+commit loop. Every decision here carries
-exactly one legal action, so `decide()` always takes the `forced_single_action` path -
+"""Coverage for `EpisodeRunner`'s decide+commit loop. Every ordinary decision here
+carries exactly one legal action, so `decide()` takes the `forced_single_action` path -
 this is about the loop/lifecycle, not beam search (see `test_beam_search.py`).
 """
 
@@ -11,6 +11,7 @@ from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.search_modes import SEARCH_MODES
 from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner, build_engine, start_and_run
+from sts2_training.selection.heuristic_selector import NoAvailableActionError
 
 _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
 
@@ -36,6 +37,7 @@ class _FakeConnection:
     def __init__(self, decisions: list[dict]) -> None:
         self._decisions = decisions
         self._index = 0
+        self.start_instance_calls = 0
         self.close_instance_calls = 0
         self.close_instance_instance_ids: list[str] = []
 
@@ -44,6 +46,7 @@ class _FakeConnection:
         operation = request["operation"]
 
         if operation == "start_instance":
+            self.start_instance_calls += 1
             return {
                 **_common(request),
                 "status": "completed",
@@ -84,9 +87,8 @@ class _FakeConnection:
 def _decision(decision_point_id: str, *, legal_actions=None, **dto_extra) -> dict:
     resolved_legal_actions = legal_actions if legal_actions is not None else [_ACTION]
     dto = {"legal_actions": resolved_legal_actions, **dto_extra}
-    # The wire contract requires a terminal marker (+ outcome) on any dto with empty
-    # legal_actions, and forbids outcome otherwise - default one in so callers can
-    # just say legal_actions=[] without repeating terminal=True everywhere.
+    # Most empty-action fixtures are terminal. Callers can pass terminal=False to
+    # exercise the protocol-valid but runner-invalid non-terminal no-action boundary.
     if not resolved_legal_actions and "terminal" not in dto and "run_terminal" not in dto:
         dto["terminal"] = True
         dto.setdefault("outcome", "victory")
@@ -117,7 +119,7 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.close_instance_calls, 1)
         self.assertEqual(connection.close_instance_instance_ids, ["inst-001"])
 
-    async def test_already_terminal_at_start_makes_no_commit(self) -> None:
+    async def test_already_terminal_at_start_makes_no_commit_and_preserves_terminal_dto(self) -> None:
         decisions = [_decision("d0", legal_actions=[], outcome="defeat")]
         client, connection = await self._client_and_connection(decisions)
         runner = EpisodeRunner(client)
@@ -125,7 +127,31 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         result = await runner.run("inst-001", decision_timeout_s=5.0)
 
         self.assertEqual(result.decisions_made, 0)
-        self.assertEqual(result.final_dto, {})
+        self.assertEqual(result.final_dto["outcome"], "defeat")
+        self.assertEqual(result.final_dto["legal_actions"], [])
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_non_terminal_no_action_at_start_is_not_silently_successful(self) -> None:
+        decisions = [_decision("d0", legal_actions=[], terminal=False)]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        with self.assertRaises(NoAvailableActionError):
+            await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_non_terminal_no_action_after_commit_is_not_silently_successful(self) -> None:
+        decisions = [
+            _decision("d0"),
+            _decision("d1", legal_actions=[], terminal=False),
+        ]
+        client, connection = await self._client_and_connection(decisions)
+        runner = EpisodeRunner(client)
+
+        with self.assertRaises(NoAvailableActionError):
+            await runner.run("inst-001", decision_timeout_s=5.0)
+
         self.assertEqual(connection.close_instance_calls, 1)
 
     async def test_max_decisions_raises_but_still_closes_instance(self) -> None:
@@ -159,6 +185,18 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         await runner._close_best_effort("inst-001", 5.0)  # noqa: SLF001
 
         self.assertEqual(client.close_instance_calls, 0)
+
+
+class EpisodeRunnerConstructionTest(unittest.TestCase):
+    def test_falsey_explicit_engine_is_preserved(self) -> None:
+        class _FalseyEngine(CombatDecisionEngine):
+            def __bool__(self) -> bool:
+                return False
+
+        given = _FalseyEngine(client=object())
+        runner = EpisodeRunner(client=object(), engine=given)
+
+        self.assertIs(runner._engine, given)  # noqa: SLF001
 
 
 class BuildEngineTest(unittest.TestCase):
@@ -214,6 +252,22 @@ class StartAndRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.decisions_made, 1)
         self.assertEqual(result.final_dto["outcome"], "victory")
         self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_invalid_max_decisions_is_rejected_before_starting_instance(self) -> None:
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value):
+                connection = _FakeConnection([_decision("d0")])
+                client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+
+                with self.assertRaises(ValueError):
+                    await start_and_run(
+                        client,
+                        {"instance_type": "combat"},
+                        decision_timeout_s=5.0,
+                        max_decisions=value,  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(connection.start_instance_calls, 0)
 
 
 if __name__ == "__main__":
