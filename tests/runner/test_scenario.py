@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sts2_training.runner.scenario import CombatScenario, EnemyScenario, NewRunConfig, RunSnapshot
+from sts2_training.runner.scenario import CombatScenario, EnemyScenario, NewRunConfig
 
 
 def _minimal_scenario(**overrides) -> CombatScenario:
@@ -130,26 +130,6 @@ class CombatScenarioTest(unittest.TestCase):
         enemy = EnemyScenario(monster_id="LOUSE_RED", hp=10)
 
         self.assertEqual(enemy.to_dict(), {"monster_id": "LOUSE_RED", "hp": 10})
-
-
-class RunSnapshotTest(unittest.TestCase):
-    def test_empty_snapshot_json_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            RunSnapshot(character_id="IRONCLAD", ascension=0, seed=1, snapshot_json="")
-
-    def test_to_instance_config_shape(self) -> None:
-        snapshot = RunSnapshot(character_id="IRONCLAD", ascension=5, seed=42, snapshot_json="{...}")
-
-        self.assertEqual(
-            snapshot.to_instance_config(),
-            {
-                "instance_type": "whole_run",
-                "character_id": "IRONCLAD",
-                "ascension": 5,
-                "seed": 42,
-                "snapshot_json": "{...}",
-            },
-        )
 
 
 class NewRunConfigTest(unittest.TestCase):
