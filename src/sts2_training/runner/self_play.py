@@ -52,6 +52,7 @@ __all__ = ["SelfPlayRunResult", "run_self_play_batch"]
 
 _LOG = logging.getLogger(__name__)
 _FILENAME_UNSAFE = re.compile(r"[^a-z0-9._-]+")
+_MAX_GAME_SEED = 2**31 - 1
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,11 @@ def _filename_component(value: str) -> str:
     """Return a path-safe, human-readable component for a run filename."""
     normalized = _FILENAME_UNSAFE.sub("-", value.strip().lower()).strip("._-")
     return normalized or "character"
+
+
+def _seed_for_index(batch_seed: int, index: int) -> int:
+    """Map a batch seed plus zero-based run index to a unique valid game seed."""
+    return ((batch_seed - 1 + index) % _MAX_GAME_SEED) + 1
 
 
 class _TrackingSelectionLogger:
@@ -217,10 +223,12 @@ async def run_self_play_batch(
     connect_timeout_s)`) and JSONL file under `output_dir`. Shared configuration is
     validated before any connection is opened. Runtime and logging failures are
     captured per run so one bad interaction does not discard the rest of the batch.
-    A fresh game seed is generated up front for every run, embedded in its run ID,
-    and reused to seed the fallback selector for deterministic replay.
+    One random batch seed is expanded to unique per-run game seeds, each embedded in
+    its run ID and reused to seed the fallback selector for deterministic replay.
     """
     _validate_positive_int("num_runs", num_runs)
+    if num_runs > _MAX_GAME_SEED:
+        raise ValueError(f"num_runs must be <= {_MAX_GAME_SEED} to keep game seeds unique")
     _validate_positive_int("concurrency", concurrency)
     if not isinstance(character_id, str) or not character_id.strip():
         raise ValueError("character_id must be a non-empty string")
@@ -243,6 +251,7 @@ async def run_self_play_batch(
 
     output_dir = Path(output_dir)
     batch_tag = f"{_filename_component(character_id)}-{int(time.time())}"
+    batch_seed = random.randint(1, _MAX_GAME_SEED)
     results: list[SelfPlayRunResult | None] = [None] * num_runs
     next_index = 0
     index_lock = asyncio.Lock()
@@ -256,7 +265,7 @@ async def run_self_play_batch(
                 index = next_index
                 next_index += 1
 
-            seed = random.randint(1, 2**31 - 1)
+            seed = _seed_for_index(batch_seed, index)
             run_id = f"{batch_tag}-{index:05d}-seed-{seed}-{uuid.uuid4().hex[:8]}"
             results[index] = await _run_one(
                 run_id,
