@@ -68,6 +68,8 @@ class ApiContract:
         self._validate_non_empty_str(self._client_session_id, "client_session_id")
         self._audit = SelectionAudit(selection_logger)
         self._instance_id: str | None = None
+        self._instance_type: str | None = None
+        self._pending_start_instance_type: str | None = None
         self._max_emulate_actions_items: int | None = None
 
     @property
@@ -77,6 +79,11 @@ class ApiContract:
     @property
     def instance_id(self) -> str | None:
         return self._instance_id
+
+    @property
+    def instance_type(self) -> str | None:
+        """Requested type for the active instance, when one has been accepted."""
+        return self._instance_type
 
     @property
     def max_emulate_actions_items(self) -> int | None:
@@ -96,6 +103,10 @@ class ApiContract:
         }
 
     def _build_start_instance(self, request_seq: int, instance_config: Mapping[str, Any]) -> JsonObject:
+        instance_type = instance_config.get("instance_type")
+        self._pending_start_instance_type = (
+            instance_type if isinstance(instance_type, str) and instance_type else None
+        )
         return self._new_request(request_seq, "start_instance", instance_config=dict(instance_config))
 
     def _accept_start_instance(self, response: Mapping[str, Any]) -> str:
@@ -107,9 +118,14 @@ class ApiContract:
         ):
             raise ApiProtocolError("max_emulate_actions_items must be a positive integer")
         self._instance_id = instance_id
+        self._instance_type = self._pending_start_instance_type
+        self._pending_start_instance_type = None
         self._max_emulate_actions_items = max_items
         self._audit.clear()
-        self._audit.remember(response)
+        self._audit.remember(
+            response,
+            wire_commit_action_id_is_ordinal=self._instance_type == "whole_run",
+        )
         return instance_id
 
     def _build_get_decision(self, request_seq: int, instance_id: str, branch_id: str) -> JsonObject:
@@ -316,6 +332,8 @@ class ApiContract:
     def _accept_close_instance(self, response: JsonObject) -> JsonObject:
         self._require_status(response, {"completed"})
         self._instance_id = None
+        self._instance_type = None
+        self._pending_start_instance_type = None
         self._max_emulate_actions_items = None
         self._audit.clear()
         return response
