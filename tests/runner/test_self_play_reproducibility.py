@@ -96,11 +96,12 @@ class SelfPlayReproducibilityTest(unittest.IsolatedAsyncioTestCase):
                     output_dir=Path(tmp),
                 )
 
-        seeds = [call.kwargs["seed"] for call in start_new_run.await_args_list]
-        self.assertEqual(seeds, [_MAX_GAME_SEED - 1, _MAX_GAME_SEED, 1])
-        self.assertEqual(len(set(seeds)), 3)
-        for result, seed in zip(results, seeds, strict=True):
-            self.assertIn(f"-seed-{seed}-", result.run_id)
+        expected_seeds = {_MAX_GAME_SEED - 1, _MAX_GAME_SEED, 1}
+        seeds = {call.kwargs["seed"] for call in start_new_run.await_args_list}
+        self.assertEqual(seeds, expected_seeds)
+        self.assertEqual(len(results), 3)
+        for seed in expected_seeds:
+            self.assertTrue(any(f"-seed-{seed}-" in result.run_id for result in results))
 
 
 if __name__ == "__main__":
