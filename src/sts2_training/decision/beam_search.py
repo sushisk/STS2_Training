@@ -183,14 +183,11 @@ class BeamSearchEngine:
         root_legal_actions = root_dto.get("legal_actions")
         if not root_legal_actions:
             return BeamSearchResult(None, None, None, "no_legal_actions", stats)
-        # `max_emulate_actions_items` is only published for instance types that support
-        # emulate_actions at all (see AsyncTrainingApiClient._accept_start_instance) - a
-        # Whole Run instance always has it as None. Checking `action_type` alone is not
-        # enough: a Whole Run decision point can carry an action_type this engine would
-        # otherwise treat as beam-searchable (e.g. "system"), but RL rejects
-        # emulate_actions for that instance_type outright, so every attempt would waste a
-        # full round trip before falling back anyway.
-        if getattr(self._client, "max_emulate_actions_items", None) is None:
+        # Whole Run currently rejects emulate_actions outright. Gate it by the explicit
+        # instance type captured from start_instance rather than by the unrelated
+        # max_emulate_actions_items capacity field: a future capability change must not
+        # silently change which wire protocol this engine believes it is speaking.
+        if getattr(self._client, "instance_type", None) == "whole_run":
             return BeamSearchResult(None, None, None, "emulate_actions_not_supported", stats)
         if not _is_beam_searchable(root_dto, cfg.beam_searchable_action_types):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
