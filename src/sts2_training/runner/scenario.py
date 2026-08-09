@@ -9,13 +9,14 @@ accordingly.
 `CombatScenario`/`EnemyScenario` field coverage mirrors STS2_RL's
 `Combat/battle_emulator.py:build_scenario_from_spec()`; anything not modeled directly
 (pending_choice, per-card upgrades, ...) can still go through `extra`, merged in
-verbatim.
+verbatim. `extra` may not override fields modeled explicitly by `CombatScenario` or
+the fixed `instance_type` discriminator.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 JsonObject = dict[str, Any]
@@ -74,6 +75,16 @@ class CombatScenario:
     def __post_init__(self) -> None:
         if not self.enemies:
             raise ValueError("CombatScenario.enemies must not be empty (no living enemies)")
+
+        modeled_keys = {item.name for item in fields(self) if item.name != "extra"}
+        overlap = modeled_keys.intersection(self.extra)
+        if "instance_type" in self.extra:
+            overlap.add("instance_type")
+        if overlap:
+            raise ValueError(
+                "CombatScenario.extra is only for unmodeled fields and must not override: "
+                f"{sorted(overlap)}"
+            )
 
     def to_instance_config(self) -> JsonObject:
         return {
