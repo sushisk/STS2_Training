@@ -196,6 +196,8 @@ def _root_outcomes(
         if run_result is None:
             run_result = after.get("run_outcome")
         if run_result is None:
+            run_result = after.get("outcome")
+        if run_result is None:
             run_result = {
                 "boundary": after_boundary,
                 "room_context": after.get("room_context"),
