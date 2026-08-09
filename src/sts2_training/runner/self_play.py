@@ -14,8 +14,8 @@ in its run ID / JSONL filename so collected trajectories are reproducible.
 
 CLI use::
 
-    python -m sts2_training.runner.self_play \
-        --host 127.0.0.1 --port 8765 --character-id IRONCLAD \
+    python -m sts2_training.runner.self_play \\
+        --host 127.0.0.1 --port 8765 --character-id IRONCLAD \\
         --num-runs 50 --concurrency 8 --output-dir data/self_play
 """
 
