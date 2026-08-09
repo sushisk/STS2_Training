@@ -164,8 +164,7 @@ def test_whole_run_sparse_commit_records_public_action_id_and_preserves_wire_tok
         legal_actions=_sparse_actions("1", "3"),
     )
     start["operation"] = "start_instance"
-    # Whole Run intentionally omits max_emulate_actions_items in DTO v0.7.
-    audit.remember(start)
+    audit.remember(start, wire_commit_action_id_is_ordinal=True)
 
     # The selected public action is "3", but the deployed Whole Run server consumes
     # ordinal "1" at the commit_action wire boundary. The direct public ID "1" also
@@ -217,7 +216,7 @@ def test_whole_run_sparse_public_action_id_survives_selection_recovery() -> None
         legal_actions=_sparse_actions("1", "3"),
     )
     start["operation"] = "start_instance"
-    audit.remember(start)
+    audit.remember(start, wire_commit_action_id_is_ordinal=True)
 
     request = {**_commit_request(), "action_id": "1"}
     audit.record_action(
@@ -255,7 +254,7 @@ def test_combat_numeric_public_action_id_is_not_treated_as_an_ordinal() -> None:
             "max_emulate_actions_items": 64,
         }
     )
-    audit.remember(start)
+    audit.remember(start, wire_commit_action_id_is_ordinal=False)
 
     audit.record_action(
         {**_commit_request(), "action_id": "1"},
