@@ -46,13 +46,21 @@ def start_paired_rl(skip):
     port = free_port()
     log_fd, log_path = tempfile.mkstemp(prefix="paired_rl_", suffix=".log")
     log_file = os.fdopen(log_fd, "w", encoding="utf-8")
-    process = subprocess.Popen(
-        [sys.executable, str(_SERVER_HELPER), str(root), HOST, str(port)],
-        cwd=root,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(_SERVER_HELPER), str(root), HOST, str(port)],
+            cwd=root,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except BaseException:
+        log_file.close()
+        try:
+            os.remove(log_path)
+        except OSError:
+            pass
+        raise
     log_file.close()  # the child holds its own duplicated handle from here
     process.paired_rl_log_path = log_path  # type: ignore[attr-defined]
 
@@ -65,16 +73,18 @@ def start_paired_rl(skip):
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise AssertionError(f"paired RL exited before startup:\n{_read_log()}")
+            output = _read_log()
+            stop_paired_rl(process)
+            raise AssertionError(f"paired RL exited before startup:\n{output}")
         try:
             with socket.create_connection((HOST, port), timeout=0.2):
                 return process, port
         except OSError:
             time.sleep(0.1)
 
-    process.terminate()
-    process.wait(timeout=5)
-    raise AssertionError(f"paired RL did not start within 30s:\n{_read_log()}")
+    output = _read_log()
+    stop_paired_rl(process)
+    raise AssertionError(f"paired RL did not start within 30s:\n{output}")
 
 
 def stop_paired_rl(process: subprocess.Popen[str]) -> None:
