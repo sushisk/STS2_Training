@@ -86,6 +86,19 @@ class CombatDecisionEngine:
     ) -> DecisionOutcome:
         deadline = _deadline_from_timeout(timeout_s)
 
+        # TODO(self-play smoke test, 2026-08-09): this always re-fetches the decision
+        # even when the prior commit_action response already carried the next one.
+        # Suspected (not yet confirmed) to interact badly with STS2_RL's Whole Run
+        # instance, where `commit_action` re-derives `legal_actions` from live session
+        # state at commit time (API/instance_whole_run.py's `_root_view()`) rather than
+        # reusing the snapshot `get_decision` handed out - if that view can change
+        # shape between two reads with nothing committed in between (e.g. an RNG-
+        # regenerated reward boundary), this redundant call could be why a
+        # heuristic-selected action_id is sometimes rejected as "not among current
+        # legal actions" by the time commit_action fires. Needs a targeted repro
+        # (call get_decision twice in a row against a real RL server, diff the two
+        # legal_actions payloads) before deciding whether the fix belongs here or in
+        # STS2_RL's `_root_view()`.
         raw_decision = await self._client.get_decision(
             instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
         )
