@@ -162,16 +162,20 @@ async def _run_one(
         episode = None
         error = _format_error(exc)
     finally:
-        if client is not None:
-            await _close_client_best_effort(client, run_id)
-        if logger is not None:
-            try:
-                logger.close()
-            except Exception as exc:  # noqa: BLE001 - contain the failure to this run
-                _LOG.exception("self-play run %s: selection log close failed", run_id)
-                if error is None:
-                    episode = None
-                    error = f"SelectionLogCloseError: {_format_error(exc)}"
+        try:
+            if client is not None:
+                await _close_client_best_effort(client, run_id)
+        finally:
+            # Even cancellation during transport cleanup must not leave the JSONL
+            # stream open or skip its final flush/close attempt.
+            if logger is not None:
+                try:
+                    logger.close()
+                except Exception as exc:  # noqa: BLE001 - contain the failure to this run
+                    _LOG.exception("self-play run %s: selection log close failed", run_id)
+                    if error is None:
+                        episode = None
+                        error = f"SelectionLogCloseError: {_format_error(exc)}"
 
     if tracked_logger is not None and tracked_logger.error is not None and error is None:
         episode = None
