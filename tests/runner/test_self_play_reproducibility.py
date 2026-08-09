@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from sts2_training.runner.episode import EpisodeResult
-from sts2_training.runner.self_play import run_self_play_batch
+from sts2_training.runner.self_play import _MAX_GAME_SEED, run_self_play_batch
 
 
 class _Connection:
@@ -63,6 +63,44 @@ class SelfPlayReproducibilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(seeded_rng, random.Random)
         self.assertEqual(seeded_rng.random(), random.Random(123456).random())
         self.assertIs(engine_cls.call_args.kwargs["fallback_selector"], selector_cls.return_value)
+
+    async def test_batch_seeds_are_unique_and_wrap_at_game_seed_limit(self) -> None:
+        episode = EpisodeResult(
+            instance_id="instance-1",
+            decisions_made=0,
+            final_dto={"terminal": True, "outcome": "victory"},
+            elapsed_s=0.0,
+        )
+        start_new_run = mock.AsyncMock(return_value=episode)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch(
+                    "sts2_training.runner.self_play.random.randint",
+                    return_value=_MAX_GAME_SEED - 1,
+                ),
+                mock.patch(
+                    "sts2_training.runner.self_play.CombatDecisionEngine",
+                    return_value=object(),
+                ),
+                mock.patch(
+                    "sts2_training.runner.self_play.start_new_run",
+                    new=start_new_run,
+                ),
+            ):
+                results = await run_self_play_batch(
+                    character_id="IRONCLAD",
+                    num_runs=3,
+                    concurrency=3,
+                    connection_factory=_Connection,
+                    output_dir=Path(tmp),
+                )
+
+        seeds = [call.kwargs["seed"] for call in start_new_run.await_args_list]
+        self.assertEqual(seeds, [_MAX_GAME_SEED - 1, _MAX_GAME_SEED, 1])
+        self.assertEqual(len(set(seeds)), 3)
+        for result, seed in zip(results, seeds, strict=True):
+            self.assertIn(f"-seed-{seed}-", result.run_id)
 
 
 if __name__ == "__main__":
