@@ -5,8 +5,12 @@ the right `instance_config` and hand off to `EpisodeRunner` (loop itself covered
 
 from __future__ import annotations
 
+import argparse
+import json
 import random
+import tempfile
 import unittest
+from pathlib import Path
 
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario, RunSnapshot
@@ -14,6 +18,7 @@ from sts2_training.runner.start_combat_from_state import start_combat_from_state
 from sts2_training.runner.start_new_run import start_new_run
 from sts2_training.runner.start_run_from_state import (
     RunSnapshotRestoreNotSupportedError,
+    _run as _run_snapshot_cli,
     start_run_from_state,
 )
 
@@ -148,6 +153,34 @@ class StartRunFromStateTest(unittest.IsolatedAsyncioTestCase):
             await start_run_from_state(client, snapshot, decision_timeout_s=5.0)
 
         self.assertEqual(client.start_instance_calls, [])
+
+    async def test_cli_path_raises_unsupported_before_network_io(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_path = Path(temp_dir) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "character_id": "IRONCLAD",
+                        "ascension": 0,
+                        "seed": 1,
+                        "snapshot_json": "{...}",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                snapshot=snapshot_path,
+                host="does-not-resolve.invalid",
+                port=1,
+                connect_timeout=0.001,
+                decision_timeout=5.0,
+                max_decisions=None,
+                search_mode=None,
+                beam_depth=None,
+            )
+
+            with self.assertRaises(RunSnapshotRestoreNotSupportedError):
+                await _run_snapshot_cli(args)
 
 
 if __name__ == "__main__":
