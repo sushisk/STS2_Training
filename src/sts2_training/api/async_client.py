@@ -183,6 +183,13 @@ class AsyncTrainingApiClient(ApiContract):
         *,
         timeout_s: float,
     ) -> str:
+        if (
+            instance_config.get("instance_type") == "whole_run"
+            and "snapshot_json" in instance_config
+        ):
+            raise ValueError(
+                "whole_run snapshot restore is not supported; do not pass snapshot_json"
+            )
         async with self._operation_deadline(timeout_s) as deadline:
             self._ensure_fresh_request_allowed()
             if self.instance_id is not None:
