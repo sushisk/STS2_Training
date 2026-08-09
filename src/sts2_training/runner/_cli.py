@@ -15,12 +15,22 @@ from sts2_training.runner.episode import EpisodeResult
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--connect-timeout", type=float, default=5.0)
     parser.add_argument("--decision-timeout", type=float, default=30.0)
-    parser.add_argument("--max-decisions", type=int, default=None)
+    parser.add_argument("--max-decisions", type=_positive_int, default=None)
     parser.add_argument(
         "--search-mode",
         choices=sorted(SEARCH_MODES),
@@ -29,7 +39,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--beam-depth",
-        type=int,
+        type=_positive_int,
         default=None,
         help="override just the beam search depth of --search-mode",
     )
