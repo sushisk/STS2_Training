@@ -17,7 +17,7 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
         │  decide() -> commit_action() を繰り返す
         │  (CombatDecisionEngineが内部でbeam search / heuristic fallbackを選択)
         ▼
-   終端(legal_actionsが空)に到達したら close_instance して EpisodeResult を返す
+   terminal/run_terminal の明示的な終端に到達したら close_instance して EpisodeResult を返す
 ```
 
 `instance_config`の組み立て方が違うだけで、起動後にinstanceを終端まで動かす処理は
@@ -40,17 +40,22 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 `CombatScenario`/`RunSnapshot`は**デフォルト値を持たない必須フィールド**を意図的に
 多く持っています。「完全な盤面情報」を渡し忘れた場合、`RL`側に不完全なリクエストが
 届く前に、コンストラクタ呼び出しの時点で`TypeError`になるようにするためです。
-`CombatScenario`のフィールドはSTS2_RLの`build_scenario_from_spec()`(
-`Common/schemas/combat_scenario_input_schema.json`)に対応しており、モデル化していない
-フィールド(pending_choice、カード個別のアップグレード情報等)は`extra`引数でそのまま
-マージできます。
+`CombatScenario`の出力はSTS2_RLの`build_scenario_from_spec()`(
+`Common/schemas/combat_scenario_input_schema.json`)のwire shapeに合わせます。runner側では
+`potions=["FIRE_POTION", None, "BLOCK_POTION"]`のようなbelt順の短縮形を
+`[{"slot": 0, "potion_id": ...}, {"slot": 2, "potion_id": ...}]`へ、
+`player_powers={"STRENGTH": 2}`や`EnemyScenario(..., powers={...})`を
+`[{"power_id": "STRENGTH", "amount": 2}]`へ変換します。すでにRL shapeのmapping/listを
+持っている場合はそのexact formも渡せます。モデル化していないフィールド
+(`pending_choice`、カード個別のアップグレード情報等)は`extra`引数でそのままマージできます。
 
 ### `episode.py` — 共有の実行ループ
 
-- `EpisodeRunner.run(instance_id, decision_timeout_s=...)`: `legal_actions`が空になる
-  (Combat勝敗確定、またはWhole Runの`run_terminal`)まで`decide_and_commit()`を繰り返し、
-  成功・失敗・タイムアウトいずれの場合も`finally`で`close_instance`をベストエフォートで
-  呼びます(`client`に`pending_retry`/`session_invalid`が残っている場合はスキップ)。
+- `EpisodeRunner.run(instance_id, decision_timeout_s=...)`: Combatの`terminal: true`または
+  Whole Runの`run_terminal: true`が明示されるまで`decide_and_commit()`を繰り返し、成功・
+  失敗・タイムアウトいずれの場合も`finally`で`close_instance`をベストエフォートで呼びます
+  (`client`に`pending_retry`/`session_invalid`が残っている場合はスキップ)。非終端なのに
+  selectableな`legal_actions`が空なら成功扱いにはせず`NoAvailableActionError`でfail closedします。
   戻り値`EpisodeResult`の`final_dto`が最後に観測した`masked_emulator_dto`です - 勝敗は
   `final_dto["outcome"]`を直接読んでください。暴走防止用に`max_decisions`を指定でき、
   超過すると`EpisodeLimitExceeded`が送出されます(それでも`close_instance`は呼ばれます)。
@@ -62,9 +67,10 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 
 ### `start_combat_from_state.py` / `start_run_from_state.py` / `start_new_run.py`
 
-各モジュールは「対応する`instance_config`を組み立てて`start_and_run`に渡す」という
-薄い管理役と、それを呼び出すCLIの両方を持っています。CLIの共通部分(`--host`等の
-引数・結果のJSON出力)は`_cli.py`に集約されています。
+各モジュールは対応する`instance_config`の準備とCLIを持ちます。現在未対応の
+`start_run_from_state`だけは、誤って新規runを開始しないため`start_instance`へ委譲せず
+明示的に失敗します。CLIの共通部分(`--host`等の引数・結果のJSON出力)は`_cli.py`に
+集約されています。
 
 ```python
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
@@ -134,8 +140,8 @@ snapshotを読み取る仕組みをまだ持っていません(`WholeRunSession.
 存在しますが配線されていません)。そのため`start_run_from_state()`は呼ぶと必ず
 `RunSnapshotRestoreNotSupportedError`を送出します - 「本当は新規runなのに再開したと
 誤解してしまう」事故を防ぐため、黙って新規runを開始する代わりに明示的に失敗させて
-います。設定の組み立て・CLIの配線自体は完成しているので、STS2_RL側の対応が入り次第、
-このガードを外すだけで動くようになります。
+います。CLIもこのguardをローカルで発火させ、未対応の間はTCP接続を試みません。
+STS2_RL側の対応が入ったら、このguardを外して`start_and_run`へ接続するのが残作業です。
 
 ## 3つの入り口の使い分けまとめ
 
