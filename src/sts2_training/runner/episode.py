@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,29 @@ JsonObject = dict[str, Any]
 _LOG = logging.getLogger(__name__)
 
 __all__ = ["EpisodeLimitExceeded", "EpisodeResult", "EpisodeRunner", "build_engine", "start_and_run"]
+
+
+def _validate_max_decisions(max_decisions: int | None) -> None:
+    if max_decisions is not None and (
+        isinstance(max_decisions, bool)
+        or not isinstance(max_decisions, int)
+        or max_decisions <= 0
+    ):
+        raise ValueError("max_decisions must be a positive integer or None")
+
+
+def _is_terminal_dto(dto: Mapping[str, Any]) -> bool:
+    return dto.get("terminal") is True or dto.get("run_terminal") is True
+
+
+def _terminal_dto_from_no_action(error: NoAvailableActionError) -> JsonObject | None:
+    decision = error.decision
+    if not isinstance(decision, Mapping):
+        return None
+    dto = decision.get("masked_emulator_dto")
+    if not isinstance(dto, Mapping) or not _is_terminal_dto(dto):
+        return None
+    return dict(dto)
 
 
 def build_engine(
@@ -52,7 +76,7 @@ def build_engine(
 
 
 class EpisodeLimitExceeded(RuntimeError):
-    """Raised when an episode exceeds `max_decisions` without reaching a terminal
+    """Raised when an episode reaches `max_decisions` without reaching a terminal
     state - a runaway-loop guard. `None` (default) means no limit."""
 
 
@@ -60,9 +84,10 @@ class EpisodeLimitExceeded(RuntimeError):
 class EpisodeResult:
     """What actually happened when an instance was driven to completion.
 
-    `final_dto` is the raw `masked_emulator_dto` from the last response seen - not
-    collapsed into a guessed `"victory"/"defeat"` enum, read `final_dto["outcome"]`
-    for that. `{}` if the instance was already terminal before the first decision.
+    `final_dto` is the raw terminal `masked_emulator_dto` last observed - not
+    collapsed into a guessed `"victory"/"defeat"` enum; read `final_dto["outcome"]`
+    for that. This includes an instance that was already terminal before the first
+    commit.
     """
 
     instance_id: str
@@ -79,7 +104,7 @@ class EpisodeRunner:
 
     def __init__(self, client: Any, engine: CombatDecisionEngine | None = None) -> None:
         self._client = client
-        self._engine = engine or CombatDecisionEngine(client)
+        self._engine = engine if engine is not None else CombatDecisionEngine(client)
 
     async def run(
         self,
@@ -89,10 +114,11 @@ class EpisodeRunner:
         max_decisions: int | None = None,
         close_timeout_s: float = 10.0,
     ) -> EpisodeResult:
-        """Repeatedly `decide_and_commit` until `legal_actions` is empty (Combat
-        victory/defeat, or Whole Run `run_terminal`), then best-effort
-        `close_instance` regardless of how the loop ended.
+        """Repeatedly `decide_and_commit` until an explicit Combat/Whole Run terminal
+        marker is observed, then best-effort `close_instance` regardless of how the
+        loop ended. A non-terminal decision with no selectable action fails closed.
         """
+        _validate_max_decisions(max_decisions)
         t_start = time.monotonic()
         decisions_made = 0
         final_dto: JsonObject = {}
@@ -103,16 +129,28 @@ class EpisodeRunner:
                     response = await self._engine.decide_and_commit(
                         instance_id, timeout_s=decision_timeout_s
                     )
-                except NoAvailableActionError:
-                    break  # already terminal before this decision - nothing to commit
+                except NoAvailableActionError as exc:
+                    terminal_dto = _terminal_dto_from_no_action(exc)
+                    if terminal_dto is None:
+                        raise
+                    final_dto = terminal_dto
+                    break
+
                 decisions_made += 1
                 final_dto = response.get("masked_emulator_dto") or {}
+                if not isinstance(final_dto, dict):
+                    raise RuntimeError("commit_action returned an invalid masked_emulator_dto")
 
-                if not final_dto.get("legal_actions"):
+                if _is_terminal_dto(final_dto):
                     break
+                if not final_dto.get("legal_actions"):
+                    raise NoAvailableActionError(
+                        "non-terminal decision has no legal_actions to select from",
+                        decision=response,
+                    )
                 if max_decisions is not None and decisions_made >= max_decisions:
                     raise EpisodeLimitExceeded(
-                        f"instance_id={instance_id} exceeded max_decisions={max_decisions} "
+                        f"instance_id={instance_id} reached max_decisions={max_decisions} "
                         "without reaching a terminal state"
                     )
         finally:
@@ -156,6 +194,7 @@ async def start_and_run(
     behind every `start_*` entry point in this package; each just supplies its own
     `instance_config` (see `scenario.py`).
     """
+    _validate_max_decisions(max_decisions)
     resolved_engine = build_engine(
         client, engine=engine, search_mode=search_mode, beam_max_depth=beam_max_depth
     )
