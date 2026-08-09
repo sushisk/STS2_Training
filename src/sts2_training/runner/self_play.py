@@ -24,18 +24,21 @@ import argparse
 import asyncio
 import json
 import logging
+import math
+import re
 import sys
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision.beam_search import BeamSearchConfig
-from sts2_training.runner._cli import add_common_arguments, configure_logging
+from sts2_training.decision.search_modes import resolve_search_mode
+from sts2_training.runner._cli import _positive_int, add_common_arguments, configure_logging
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.start_new_run import start_new_run
 from sts2_training.selection_log import JsonlSelectionLogger
@@ -43,12 +46,17 @@ from sts2_training.selection_log import JsonlSelectionLogger
 __all__ = ["SelfPlayRunResult", "run_self_play_batch"]
 
 _LOG = logging.getLogger(__name__)
+_FILENAME_UNSAFE = re.compile(r"[^a-z0-9._-]+")
 
 
 @dataclass(frozen=True)
 class SelfPlayRunResult:
-    """One `start_new_run` attempt. `episode` is `None` iff `error` is set - a
-    failed run still gets a `log_path` (whatever was recorded before it failed)."""
+    """One `start_new_run` attempt.
+
+    `episode` is `None` iff `error` is set. A failed run still gets a `log_path`;
+    when logging itself fails, the path may contain only the records flushed before
+    the failure (or may not exist if logger creation failed).
+    """
 
     run_id: str
     log_path: Path
@@ -56,14 +64,63 @@ class SelfPlayRunResult:
     error: str | None
 
 
-def _positive_int(value: str) -> int:
+def _format_error(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _validate_positive_int(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+
+def _validate_optional_positive_int(name: str, value: int | None) -> None:
+    if value is not None:
+        _validate_positive_int(name, value)
+
+
+def _validate_positive_float(name: str, value: float) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a finite positive number")
+
+
+def _filename_component(value: str) -> str:
+    """Return a path-safe, human-readable component for a run filename."""
+    normalized = _FILENAME_UNSAFE.sub("-", value.strip().lower()).strip("._-")
+    return normalized or "character"
+
+
+class _TrackingSelectionLogger:
+    """Remember logger write failures that SelectionAudit intentionally swallows.
+
+    Selection logging is globally best-effort so a generic client never changes game
+    behavior when audit output fails. Self-play is different: its product *is* the
+    data, so the run may finish playing but must still be reported as failed when the
+    JSONL stream became incomplete.
+    """
+
+    def __init__(self, logger: JsonlSelectionLogger) -> None:
+        self._logger = logger
+        self.error: BaseException | None = None
+
+    def __call__(self, event: Mapping[str, Any]) -> None:
+        try:
+            self._logger(event)
+        except Exception as exc:
+            if self.error is None:
+                self.error = exc
+            raise
+
+
+async def _close_client_best_effort(client: AsyncTrainingApiClient, run_id: str) -> None:
     try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a positive integer") from exc
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return parsed
+        await client.close()
+    except Exception:  # noqa: BLE001 - transport cleanup must not overwrite run result
+        _LOG.exception("self-play run %s: client close failed", run_id)
 
 
 async def _run_one(
@@ -79,25 +136,48 @@ async def _run_one(
     output_dir: Path,
 ) -> SelfPlayRunResult:
     log_path = output_dir / f"{run_id}.jsonl"
-    logger = JsonlSelectionLogger(log_path)
+    logger: JsonlSelectionLogger | None = None
+    tracked_logger: _TrackingSelectionLogger | None = None
+    client: AsyncTrainingApiClient | None = None
+    episode: EpisodeResult | None = None
+    error: str | None = None
+
     try:
+        logger = JsonlSelectionLogger(log_path)
+        tracked_logger = _TrackingSelectionLogger(logger)
         connection = connection_factory()
-        async with AsyncTrainingApiClient(connection, selection_logger=logger) as client:
-            episode = await start_new_run(
-                client,
-                character_id=character_id,
-                ascension=ascension,
-                decision_timeout_s=decision_timeout_s,
-                max_decisions=max_decisions,
-                search_mode=search_mode,
-                beam_max_depth=beam_max_depth,
-            )
-        return SelfPlayRunResult(run_id, log_path, episode, None)
+        client = AsyncTrainingApiClient(connection, selection_logger=tracked_logger)
+        await connection.connect()
+        episode = await start_new_run(
+            client,
+            character_id=character_id,
+            ascension=ascension,
+            decision_timeout_s=decision_timeout_s,
+            max_decisions=max_decisions,
+            search_mode=search_mode,
+            beam_max_depth=beam_max_depth,
+        )
     except Exception as exc:  # noqa: BLE001 - one run's failure must not sink the batch
         _LOG.exception("self-play run %s failed", run_id)
-        return SelfPlayRunResult(run_id, log_path, None, f"{type(exc).__name__}: {exc}")
+        episode = None
+        error = _format_error(exc)
     finally:
-        logger.close()
+        if client is not None:
+            await _close_client_best_effort(client, run_id)
+        if logger is not None:
+            try:
+                logger.close()
+            except Exception as exc:  # noqa: BLE001 - contain the failure to this run
+                _LOG.exception("self-play run %s: selection log close failed", run_id)
+                if error is None:
+                    episode = None
+                    error = f"SelectionLogCloseError: {_format_error(exc)}"
+
+    if tracked_logger is not None and tracked_logger.error is not None and error is None:
+        episode = None
+        error = f"SelectionLogError: {_format_error(tracked_logger.error)}"
+
+    return SelfPlayRunResult(run_id, log_path, episode, error)
 
 
 async def run_self_play_batch(
@@ -116,31 +196,51 @@ async def run_self_play_batch(
     beam_max_depth: int | None = None,
     output_dir: Path = Path("data/self_play"),
 ) -> list[SelfPlayRunResult]:
-    """Run `num_runs` independent `start_new_run` episodes, at most `concurrency` at
-    once. Each run gets its own connection (default: a fresh `TcpConnection(host,
-    port, connect_timeout_s)` per run - pass `connection_factory` to point at
-    something else, e.g. a fake in tests) and its own JSONL log file under
-    `output_dir`, named `<character_id>-<batch_start_time>-<index>-<random>.jsonl`.
+    """Run `num_runs` independent `start_new_run` episodes with bounded workers.
 
-    One run failing (start rejected, transport error, emulator fault, ...) is
-    captured in that run's `SelfPlayRunResult.error` rather than raised - a bad
-    server-side interaction on run 7 of 50 should not discard the other 49.
+    Each run gets its own connection (default: a fresh `TcpConnection(host, port,
+    connect_timeout_s)`) and JSONL file under `output_dir`. Shared configuration is
+    validated before any connection is opened. Runtime and logging failures are
+    captured per run so one bad interaction does not discard the rest of the batch.
     """
-    if isinstance(num_runs, bool) or not isinstance(num_runs, int) or num_runs <= 0:
-        raise ValueError("num_runs must be a positive integer")
-    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency <= 0:
-        raise ValueError("concurrency must be a positive integer")
+    _validate_positive_int("num_runs", num_runs)
+    _validate_positive_int("concurrency", concurrency)
+    if not isinstance(character_id, str) or not character_id.strip():
+        raise ValueError("character_id must be a non-empty string")
+    if isinstance(ascension, bool) or not isinstance(ascension, int):
+        raise ValueError("ascension must be an integer")
+    _validate_positive_float("decision_timeout_s", decision_timeout_s)
+    _validate_optional_positive_int("max_decisions", max_decisions)
+    # Validate the shared beam configuration once, before spawning any network work.
+    resolve_search_mode(search_mode, max_depth=beam_max_depth)
 
-    factory = connection_factory or (
-        lambda: TcpConnection(host=host, port=port, connect_timeout_s=connect_timeout_s)
-    )
-    semaphore = asyncio.Semaphore(concurrency)
-    batch_tag = f"{character_id.lower()}-{int(time.time())}"
+    if connection_factory is None:
+        _validate_positive_float("connect_timeout_s", connect_timeout_s)
+        # Construct once only for validation; each run still receives a fresh connection.
+        TcpConnection(host=host, port=port, connect_timeout_s=connect_timeout_s)
+        factory: Callable[[], Any] = lambda: TcpConnection(
+            host=host, port=port, connect_timeout_s=connect_timeout_s
+        )
+    else:
+        factory = connection_factory
 
-    async def _bounded(index: int) -> SelfPlayRunResult:
-        run_id = f"{batch_tag}-{index:05d}-{uuid.uuid4().hex[:8]}"
-        async with semaphore:
-            return await _run_one(
+    output_dir = Path(output_dir)
+    batch_tag = f"{_filename_component(character_id)}-{int(time.time())}"
+    results: list[SelfPlayRunResult | None] = [None] * num_runs
+    next_index = 0
+    index_lock = asyncio.Lock()
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while True:
+            async with index_lock:
+                if next_index >= num_runs:
+                    return
+                index = next_index
+                next_index += 1
+
+            run_id = f"{batch_tag}-{index:05d}-{uuid.uuid4().hex[:8]}"
+            results[index] = await _run_one(
                 run_id,
                 connection_factory=factory,
                 character_id=character_id,
@@ -152,7 +252,9 @@ async def run_self_play_batch(
                 output_dir=output_dir,
             )
 
-    return await asyncio.gather(*[_bounded(index) for index in range(num_runs)])
+    workers = [asyncio.create_task(_worker()) for _ in range(min(concurrency, num_runs))]
+    await asyncio.gather(*workers)
+    return [result for result in results if result is not None]
 
 
 def _summarize(results: list[SelfPlayRunResult]) -> dict[str, Any]:
@@ -170,12 +272,16 @@ def _summarize(results: list[SelfPlayRunResult]) -> dict[str, Any]:
         "avg_elapsed_s": (
             sum(r.episode.elapsed_s for r in completed) / len(completed) if completed else None
         ),
-        "failures": [{"run_id": r.run_id, "error": r.error} for r in failed],
+        "failures": [
+            {"run_id": r.run_id, "log_path": str(r.log_path), "error": r.error} for r in failed
+        ],
     }
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     add_common_arguments(parser)
     parser.add_argument("--character-id", required=True)
     parser.add_argument("--ascension", type=int, default=0)
