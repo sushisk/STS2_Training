@@ -12,6 +12,7 @@ no new decision logic, only the loop/lifecycle around it.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -38,6 +39,16 @@ def _validate_max_decisions(max_decisions: int | None) -> None:
         raise ValueError("max_decisions must be a positive integer or None")
 
 
+def _validate_timeout(name: str, value: float) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a finite positive number")
+
+
 def _is_terminal_dto(dto: Mapping[str, Any]) -> bool:
     return dto.get("terminal") is True or dto.get("run_terminal") is True
 
@@ -52,6 +63,13 @@ def _terminal_dto_from_no_action(error: NoAvailableActionError) -> JsonObject | 
     return dict(dto)
 
 
+def _validate_engine_client(client: Any, engine: CombatDecisionEngine) -> None:
+    if engine.client is not client:
+        raise ValueError(
+            "explicit CombatDecisionEngine must be bound to the same client passed to the runner"
+        )
+
+
 def build_engine(
     client: Any,
     *,
@@ -59,10 +77,10 @@ def build_engine(
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
 ) -> CombatDecisionEngine:
-    """`engine` given -> used as-is; combining it with `search_mode`/`beam_max_depth`
-    raises rather than silently ignoring one. Otherwise builds a fresh
-    `CombatDecisionEngine` from `search_mode`/`beam_max_depth` (see
-    `decision.search_modes.resolve_search_mode`).
+    """`engine` given -> used as-is after verifying it belongs to `client`; combining
+    it with `search_mode`/`beam_max_depth` raises rather than silently ignoring one.
+    Otherwise builds a fresh `CombatDecisionEngine` from `search_mode`/
+    `beam_max_depth` (see `decision.search_modes.resolve_search_mode`).
     """
     if engine is not None:
         if search_mode is not None or beam_max_depth is not None:
@@ -70,6 +88,7 @@ def build_engine(
                 "pass either `engine` or `search_mode`/`beam_max_depth`, not both - "
                 "an explicit engine already has its own BeamSearchConfig"
             )
+        _validate_engine_client(client, engine)
         return engine
     beam_config = resolve_search_mode(search_mode, max_depth=beam_max_depth)
     return CombatDecisionEngine(client, beam_config=beam_config)
@@ -104,7 +123,11 @@ class EpisodeRunner:
 
     def __init__(self, client: Any, engine: CombatDecisionEngine | None = None) -> None:
         self._client = client
-        self._engine = engine if engine is not None else CombatDecisionEngine(client)
+        if engine is not None:
+            _validate_engine_client(client, engine)
+            self._engine = engine
+        else:
+            self._engine = CombatDecisionEngine(client)
 
     async def run(
         self,
@@ -119,6 +142,8 @@ class EpisodeRunner:
         loop ended. A non-terminal decision with no selectable action fails closed.
         """
         _validate_max_decisions(max_decisions)
+        _validate_timeout("decision_timeout_s", decision_timeout_s)
+        _validate_timeout("close_timeout_s", close_timeout_s)
         t_start = time.monotonic()
         decisions_made = 0
         final_dto: JsonObject = {}
@@ -137,9 +162,12 @@ class EpisodeRunner:
                     break
 
                 decisions_made += 1
-                final_dto = response.get("masked_emulator_dto") or {}
-                if not isinstance(final_dto, dict):
+                if not isinstance(response, Mapping):
+                    raise RuntimeError("commit_action must return a mapping")
+                raw_final_dto = response.get("masked_emulator_dto")
+                if not isinstance(raw_final_dto, Mapping):
                     raise RuntimeError("commit_action returned an invalid masked_emulator_dto")
+                final_dto = dict(raw_final_dto)
 
                 if _is_terminal_dto(final_dto):
                     break
@@ -195,6 +223,8 @@ async def start_and_run(
     `instance_config` (see `scenario.py`).
     """
     _validate_max_decisions(max_decisions)
+    _validate_timeout("start_timeout_s", start_timeout_s)
+    _validate_timeout("decision_timeout_s", decision_timeout_s)
     resolved_engine = build_engine(
         client, engine=engine, search_mode=search_mode, beam_max_depth=beam_max_depth
     )
