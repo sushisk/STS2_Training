@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $TrainingRepo = 'sushisk/STS2_Training'
 $TrainingPr = 22
 $RlRepo = 'sushisk/STS2_RL'
-$RlPr = 8
+$RlPr = 9
 
 function Invoke-Checked {
     param(
