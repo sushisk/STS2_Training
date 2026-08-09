@@ -5,6 +5,7 @@ this is about the loop/lifecycle, not beam search (see `test_beam_search.py`).
 
 from __future__ import annotations
 
+import math
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
@@ -154,6 +155,33 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(connection.close_instance_calls, 1)
 
+    async def test_falsey_non_mapping_commit_dto_is_rejected_and_instance_closed(self) -> None:
+        class _StubClient:
+            pending_retry = None
+            session_invalid = False
+
+            def __init__(self) -> None:
+                self.close_instance_calls = 0
+
+            async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
+                self.close_instance_calls += 1
+                return {"status": "completed"}
+
+        class _StubEngine:
+            def __init__(self, client) -> None:
+                self.client = client
+
+            async def decide_and_commit(self, instance_id: str, *, timeout_s: float):
+                return {"masked_emulator_dto": []}
+
+        client = _StubClient()
+        runner = EpisodeRunner(client, _StubEngine(client))  # type: ignore[arg-type]
+
+        with self.assertRaisesRegex(RuntimeError, "invalid masked_emulator_dto"):
+            await runner.run("inst-001", decision_timeout_s=5.0)
+
+        self.assertEqual(client.close_instance_calls, 1)
+
     async def test_max_decisions_raises_but_still_closes_instance(self) -> None:
         decisions = [_decision("d0"), _decision("d1"), _decision("d2"), _decision("d3", legal_actions=[])]
         client, connection = await self._client_and_connection(decisions)
@@ -163,6 +191,31 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
             await runner.run("inst-001", decision_timeout_s=5.0, max_decisions=2)
 
         self.assertEqual(connection.close_instance_calls, 1)
+
+    async def test_invalid_run_timeouts_are_rejected_before_engine_or_close_calls(self) -> None:
+        class _StubClient:
+            pending_retry = None
+            session_invalid = False
+
+            def __init__(self) -> None:
+                self.close_instance_calls = 0
+
+            async def close_instance(self, instance_id: str, *, timeout_s: float) -> dict:
+                self.close_instance_calls += 1
+                return {"status": "completed"}
+
+        for kwargs in (
+            {"decision_timeout_s": 0.0},
+            {"decision_timeout_s": math.nan},
+            {"decision_timeout_s": True},
+            {"decision_timeout_s": 1.0, "close_timeout_s": 0.0},
+        ):
+            with self.subTest(kwargs=kwargs):
+                client = _StubClient()
+                runner = EpisodeRunner(client)  # type: ignore[arg-type]
+                with self.assertRaises(ValueError):
+                    await runner.run("inst-001", **kwargs)  # type: ignore[arg-type]
+                self.assertEqual(client.close_instance_calls, 0)
 
     async def test_close_instance_skipped_when_session_invalid(self) -> None:
         # A real client with session_invalid already set rejects every operation up
@@ -193,10 +246,17 @@ class EpisodeRunnerConstructionTest(unittest.TestCase):
             def __bool__(self) -> bool:
                 return False
 
-        given = _FalseyEngine(client=object())
-        runner = EpisodeRunner(client=object(), engine=given)
+        client = object()
+        given = _FalseyEngine(client=client)
+        runner = EpisodeRunner(client=client, engine=given)
 
         self.assertIs(runner._engine, given)  # noqa: SLF001
+
+    def test_engine_bound_to_different_client_is_rejected(self) -> None:
+        given = CombatDecisionEngine(client=object())
+
+        with self.assertRaisesRegex(ValueError, "same client"):
+            EpisodeRunner(client=object(), engine=given)
 
 
 class BuildEngineTest(unittest.TestCase):
@@ -216,21 +276,30 @@ class BuildEngineTest(unittest.TestCase):
         self.assertEqual(engine.beam_search.config.beam_width, SEARCH_MODES["wide"].beam_width)
 
     def test_explicit_engine_is_returned_as_is(self) -> None:
+        client = object()
+        given = CombatDecisionEngine(client=client)
+
+        self.assertIs(build_engine(client=client, engine=given), given)
+
+    def test_explicit_engine_bound_to_other_client_is_rejected(self) -> None:
         given = CombatDecisionEngine(client=object())
 
-        self.assertIs(build_engine(client=object(), engine=given), given)
+        with self.assertRaisesRegex(ValueError, "same client"):
+            build_engine(client=object(), engine=given)
 
     def test_engine_combined_with_search_mode_raises(self) -> None:
-        given = CombatDecisionEngine(client=object())
+        client = object()
+        given = CombatDecisionEngine(client=client)
 
         with self.assertRaises(ValueError):
-            build_engine(client=object(), engine=given, search_mode="deep")
+            build_engine(client=client, engine=given, search_mode="deep")
 
     def test_engine_combined_with_beam_max_depth_raises(self) -> None:
-        given = CombatDecisionEngine(client=object())
+        client = object()
+        given = CombatDecisionEngine(client=client)
 
         with self.assertRaises(ValueError):
-            build_engine(client=object(), engine=given, beam_max_depth=3)
+            build_engine(client=client, engine=given, beam_max_depth=3)
 
 
 class StartAndRunTest(unittest.IsolatedAsyncioTestCase):
@@ -266,6 +335,22 @@ class StartAndRunTest(unittest.IsolatedAsyncioTestCase):
                         decision_timeout_s=5.0,
                         max_decisions=value,  # type: ignore[arg-type]
                     )
+
+                self.assertEqual(connection.start_instance_calls, 0)
+
+    async def test_invalid_timeouts_are_rejected_before_starting_instance(self) -> None:
+        for kwargs in (
+            {"start_timeout_s": 0.0, "decision_timeout_s": 5.0},
+            {"start_timeout_s": math.inf, "decision_timeout_s": 5.0},
+            {"start_timeout_s": 1.0, "decision_timeout_s": 0.0},
+            {"start_timeout_s": 1.0, "decision_timeout_s": math.nan},
+        ):
+            with self.subTest(kwargs=kwargs):
+                connection = _FakeConnection([_decision("d0")])
+                client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+
+                with self.assertRaises(ValueError):
+                    await start_and_run(client, {"instance_type": "combat"}, **kwargs)
 
                 self.assertEqual(connection.start_instance_calls, 0)
 
