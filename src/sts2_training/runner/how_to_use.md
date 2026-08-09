@@ -40,6 +40,12 @@ start_new_run(NewRunConfig)               通常のゲームスタート(deckな
 呼び出しの時点で`TypeError`になるようにするためです。`NewRunConfig`は盤面を渡さない
 通常開始用なので、`ascension`と`seed`にデフォルトがあります。
 
+Whole Runのsnapshot restoreは現時点ではサポートしていません。`STS2_RL`の
+`WholeRunInstance`は`seed`/`character_id`/`ascension`からfresh runを開始するだけなので、
+`AsyncTrainingApiClient.start_instance()`は`instance_type="whole_run"`の設定に
+`snapshot_json`が含まれている場合、値が空や`None`でもwire送信前に拒否します。raw
+`start_instance()`へ直接snapshotを渡してresumeしたつもりになる経路もfail closedです。
+
 `CombatScenario`の出力はSTS2_RLの`build_scenario_from_spec()`
 (`Common/schemas/combat_scenario_input_schema.json`)のwire shapeに合わせます。runner側では
 `potions=["FIRE_POTION", None, "BLOCK_POTION"]`のようなbelt順の短縮形を
