@@ -1,5 +1,5 @@
 """Shared CLI scaffolding for the `start_*` entry-point scripts - the argument set
-and result printing are identical across all three; only the scenario-specific
+and result printing are identical across both; only the scenario-specific
 input differs (see each module's own `_parse_args`/`_run`).
 """
 
