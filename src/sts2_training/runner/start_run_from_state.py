@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.runner._cli import add_common_arguments, configure_logging, print_result
@@ -69,16 +68,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def _run(args: argparse.Namespace) -> EpisodeResult:
     data = json.loads(args.snapshot.read_text(encoding="utf-8"))
     snapshot = RunSnapshot(**data)
-    connection = TcpConnection(host=args.host, port=args.port, connect_timeout_s=args.connect_timeout)
-    async with AsyncTrainingApiClient(connection) as client:
-        return await start_run_from_state(
-            client,
-            snapshot,
-            decision_timeout_s=args.decision_timeout,
-            max_decisions=args.max_decisions,
-            search_mode=args.search_mode,
-            beam_max_depth=args.beam_depth,
-        )
+    # Fail locally before opening a TCP connection. Until snapshot restore is wired on
+    # the RL side, a connection attempt can only obscure the deliberate unsupported
+    # error with an unrelated network failure.
+    return await start_run_from_state(
+        None,
+        snapshot,
+        decision_timeout_s=args.decision_timeout,
+        max_decisions=args.max_decisions,
+        search_mode=args.search_mode,
+        beam_max_depth=args.beam_depth,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
