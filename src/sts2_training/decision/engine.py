@@ -194,21 +194,20 @@ class CombatDecisionEngine:
 def _commit_action_id(client: Any, outcome: DecisionOutcome) -> str:
     """Return the action token the currently deployed RL server expects on commit.
 
-    Combat instances publish ``max_emulate_actions_items`` and consume the opaque
-    ``action_id`` exactly as advertised by the DTO contract. Whole Run instances do not
-    publish that capability. Their current STS2_RL ``_View.resolve_action_id`` instead
-    interprets the public token as a positional index into ``legal_actions_raw`` even
-    though ``mask_legal_actions`` publishes the Emulator's sparse ActionId unchanged.
+    Whole Run's current STS2_RL ``_View.resolve_action_id`` interprets the public token
+    as a positional index into ``legal_actions_raw`` even though ``mask_legal_actions``
+    publishes the Emulator's sparse ActionId unchanged. Other instance types consume the
+    opaque public ``action_id`` directly.
 
     Until that server-side mismatch can be removed without breaking deployed Whole Run
-    servers, translate only the no-emulate-actions instance path at the final wire
+    servers, translate only an explicitly identified Whole Run at the final wire
     boundary. Selection still happens against the public sparse ID; only commit uses the
     ordinal required by the current Whole Run implementation.
     """
     chosen_action_id = outcome.chosen_action_id
     if chosen_action_id is None:
         raise RuntimeError("cannot commit an empty action_id")
-    if getattr(client, "max_emulate_actions_items", None) is not None:
+    if getattr(client, "instance_type", None) != "whole_run":
         return chosen_action_id
 
     dto = outcome.decision.get("masked_emulator_dto")
