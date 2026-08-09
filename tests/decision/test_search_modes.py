@@ -11,11 +11,30 @@ from sts2_training.decision.search_modes import (
 
 
 class ResolveSearchModeTest(unittest.TestCase):
-    def test_none_resolves_to_default_mode(self) -> None:
-        self.assertIs(resolve_search_mode(None), SEARCH_MODES[DEFAULT_SEARCH_MODE])
+    def test_none_resolves_to_isolated_default_mode(self) -> None:
+        resolved = resolve_search_mode(None)
 
-    def test_named_mode_resolves_to_its_preset(self) -> None:
-        self.assertIs(resolve_search_mode("deep"), SEARCH_MODES["deep"])
+        self.assertIsNot(resolved, SEARCH_MODES[DEFAULT_SEARCH_MODE])
+        self.assertEqual(resolved, SEARCH_MODES[DEFAULT_SEARCH_MODE])
+
+    def test_named_mode_resolves_to_isolated_preset(self) -> None:
+        resolved = resolve_search_mode("deep")
+
+        self.assertIsNot(resolved, SEARCH_MODES["deep"])
+        self.assertEqual(resolved, SEARCH_MODES["deep"])
+        self.assertIsNot(resolved.simulation_options, SEARCH_MODES["deep"].simulation_options)
+
+    def test_mutating_resolved_named_mode_does_not_corrupt_preset(self) -> None:
+        resolved = resolve_search_mode("deep")
+        original_depth = SEARCH_MODES["deep"].max_depth
+        original_options = dict(SEARCH_MODES["deep"].simulation_options or {})
+
+        resolved.max_depth = 99
+        assert resolved.simulation_options is not None
+        resolved.simulation_options["stop_condition"] = "combat_end"
+
+        self.assertEqual(SEARCH_MODES["deep"].max_depth, original_depth)
+        self.assertEqual(SEARCH_MODES["deep"].simulation_options, original_options)
 
     def test_unknown_mode_name_raises(self) -> None:
         with self.assertRaises(ValueError):
@@ -42,6 +61,10 @@ class ResolveSearchModeTest(unittest.TestCase):
 
         self.assertEqual(resolved.max_depth, 5)
         self.assertEqual(resolved.beam_width, 2)
+        self.assertIsNot(resolved.simulation_options, custom.simulation_options)
+
+    def test_standard_mode_tracks_beam_search_defaults(self) -> None:
+        self.assertEqual(SEARCH_MODES["standard"], BeamSearchConfig())
 
     def test_every_mode_is_a_valid_beam_search_config(self) -> None:
         for name, config in SEARCH_MODES.items():
