@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 
 from sts2_training.decision.search_modes import SEARCH_MODES
 from sts2_training.runner.episode import EpisodeResult
@@ -25,11 +26,31 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _port(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer between 1 and 65535") from exc
+    if not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be an integer between 1 and 65535")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a finite positive number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return parsed
+
+
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--connect-timeout", type=float, default=5.0)
-    parser.add_argument("--decision-timeout", type=float, default=30.0)
+    parser.add_argument("--port", type=_port, default=8765)
+    parser.add_argument("--connect-timeout", type=_positive_float, default=5.0)
+    parser.add_argument("--decision-timeout", type=_positive_float, default=30.0)
     parser.add_argument("--max-decisions", type=_positive_int, default=None)
     parser.add_argument(
         "--search-mode",
