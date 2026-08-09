@@ -28,6 +28,15 @@ class CombatScenarioTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _minimal_scenario(enemies=[])
 
+    def test_extra_cannot_override_modeled_or_identity_fields(self) -> None:
+        for key, value in (
+            ("instance_type", "whole_run"),
+            ("player_hp", 1),
+            ("energy", 99),
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                _minimal_scenario(extra={key: value})
+
     def test_to_instance_config_shape(self) -> None:
         scenario = _minimal_scenario()
         config = scenario.to_instance_config()
