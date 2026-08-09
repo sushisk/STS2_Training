@@ -120,7 +120,6 @@ class ModuleCliTest(unittest.TestCase):
         modules = (
             "sts2_training.runner.start_combat_from_state",
             "sts2_training.runner.start_new_run",
-            "sts2_training.runner.start_run_from_state",
         )
         for module in modules:
             with self.subTest(module=module):

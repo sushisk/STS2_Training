@@ -1,7 +1,7 @@
 """`EpisodeRunner`: the "drive an already-started instance to completion" loop
 shared by every entry point in this package.
 
-The three entry points differ only in how an instance gets created (see
+The two entry points differ only in how an instance gets created (see
 `scenario.py`); once `start_instance` returns an `instance_id`, driving it to
 completion is identical regardless of `instance_type` - `CombatDecisionEngine`
 already generalizes over that (Beam Search only for `card`/`potion`/`system`,

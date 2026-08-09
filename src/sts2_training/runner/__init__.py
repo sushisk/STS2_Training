@@ -1,14 +1,12 @@
 """Top-level entry points for starting an instance and driving it to completion,
 layered on `sts2_training.decision.CombatDecisionEngine`. See `how_to_use.md`.
 
-Three entry points sharing one loop (`EpisodeRunner`):
+Two entry points sharing one loop (`EpisodeRunner`):
 
 - `start_combat_from_state`: Combat from a fully-specified board (`CombatScenario`).
-- `start_run_from_state`: Whole Run resumed from a snapshot (`RunSnapshot`) -
-  currently always raises `RunSnapshotRestoreNotSupportedError`, see that module.
 - `start_new_run`: a normal, from-scratch Whole Run (`NewRunConfig`).
 
-All three accept `search_mode`/`beam_max_depth` to pick the beam config (see
+Both accept `search_mode`/`beam_max_depth` to pick the beam config (see
 `decision.search_modes`) without hand-constructing a `BeamSearchConfig`.
 
 The executable `start_*` modules are lazy exports. Importing them eagerly here would
@@ -30,22 +28,14 @@ from sts2_training.runner.episode import (
     build_engine,
     start_and_run,
 )
-from sts2_training.runner.scenario import CombatScenario, EnemyScenario, NewRunConfig, RunSnapshot
+from sts2_training.runner.scenario import CombatScenario, EnemyScenario, NewRunConfig
 
 _LAZY_EXPORTS = {
-    "RunSnapshotRestoreNotSupportedError": (
-        "sts2_training.runner.start_run_from_state",
-        "RunSnapshotRestoreNotSupportedError",
-    ),
     "start_combat_from_state": (
         "sts2_training.runner.start_combat_from_state",
         "start_combat_from_state",
     ),
     "start_new_run": ("sts2_training.runner.start_new_run", "start_new_run"),
-    "start_run_from_state": (
-        "sts2_training.runner.start_run_from_state",
-        "start_run_from_state",
-    ),
 }
 
 __all__ = [
@@ -56,15 +46,12 @@ __all__ = [
     "EpisodeResult",
     "EpisodeRunner",
     "NewRunConfig",
-    "RunSnapshot",
-    "RunSnapshotRestoreNotSupportedError",
     "SEARCH_MODES",
     "build_engine",
     "resolve_search_mode",
     "start_and_run",
     "start_combat_from_state",
     "start_new_run",
-    "start_run_from_state",
 ]
 
 

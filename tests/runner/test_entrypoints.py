@@ -1,26 +1,17 @@
-"""Coverage for the three top-level entry points: each one's job is only to build
+"""Coverage for the two top-level entry points: each one's job is only to build
 the right `instance_config` and hand off to `EpisodeRunner` (loop itself covered by
 `test_episode.py`), so these just assert `start_instance` gets the expected config.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import random
-import tempfile
 import unittest
-from pathlib import Path
 
 from sts2_training.decision.engine import CombatDecisionEngine
-from sts2_training.runner.scenario import CombatScenario, EnemyScenario, RunSnapshot
+from sts2_training.runner.scenario import CombatScenario, EnemyScenario
 from sts2_training.runner.start_combat_from_state import start_combat_from_state
 from sts2_training.runner.start_new_run import start_new_run
-from sts2_training.runner.start_run_from_state import (
-    RunSnapshotRestoreNotSupportedError,
-    _run as _run_snapshot_cli,
-    start_run_from_state,
-)
 
 
 class _FakeClient:
@@ -142,45 +133,6 @@ class StartNewRunTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.start_instance_calls[0]["seed"], 123456789)
         self.assertEqual(rng.assert_bounds, (1, 2**31 - 1))
-
-
-class StartRunFromStateTest(unittest.IsolatedAsyncioTestCase):
-    async def test_raises_before_touching_the_client(self) -> None:
-        client = _FakeClient()
-        snapshot = RunSnapshot(character_id="IRONCLAD", ascension=0, seed=1, snapshot_json="{...}")
-
-        with self.assertRaises(RunSnapshotRestoreNotSupportedError):
-            await start_run_from_state(client, snapshot, decision_timeout_s=5.0)
-
-        self.assertEqual(client.start_instance_calls, [])
-
-    async def test_cli_path_raises_unsupported_before_network_io(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            snapshot_path = Path(temp_dir) / "snapshot.json"
-            snapshot_path.write_text(
-                json.dumps(
-                    {
-                        "character_id": "IRONCLAD",
-                        "ascension": 0,
-                        "seed": 1,
-                        "snapshot_json": "{...}",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            args = argparse.Namespace(
-                snapshot=snapshot_path,
-                host="does-not-resolve.invalid",
-                port=1,
-                connect_timeout=0.001,
-                decision_timeout=5.0,
-                max_decisions=None,
-                search_mode=None,
-                beam_depth=None,
-            )
-
-            with self.assertRaises(RunSnapshotRestoreNotSupportedError):
-                await _run_snapshot_cli(args)
 
 
 if __name__ == "__main__":
