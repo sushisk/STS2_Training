@@ -104,6 +104,7 @@ def test_terminal_markers_are_mutually_exclusive() -> None:
         {"terminal": True, "outcome": "victory", "legal_actions": []},
         {"terminal": True, "outcome": "defeat", "legal_actions": []},
         {"run_terminal": True, "outcome": "victory"},
+        {"run_terminal": True, "outcome": "run_victory"},
         {
             "run_terminal": True,
             "outcome": "defeat",
@@ -114,28 +115,13 @@ def test_terminal_markers_are_mutually_exclusive() -> None:
         },
     ],
 )
-def test_terminal_decision_accepts_victory_or_defeat(masked: dict) -> None:
+def test_terminal_decision_accepts_valid_outcome(masked: dict) -> None:
     contract = ApiContract(client_session_id="session-a")
 
     contract._validate_decision_payload(_response(masked))  # noqa: SLF001
 
 
-def test_run_terminal_accepts_run_victory() -> None:
-    """"run_victory" (STS2_Emulator commit 72ac8df, STS2_RL PR #18, 2026-08-10) is the
-    whole-Run analogue of clearing the game - deliberately distinct from combat-scoped
-    "victory". Only valid at `run_terminal`, never at combat's own `terminal` marker (see
-    `test_combat_terminal_rejects_run_victory` below).
-    """
-    contract = ApiContract(client_session_id="session-a")
-
-    contract._validate_decision_payload(  # noqa: SLF001
-        _response({"run_terminal": True, "outcome": "run_victory"})
-    )
-
-
 def test_combat_terminal_rejects_run_victory() -> None:
-    """`run_victory` has no meaning for a single combat (no Acts, no game-clear epilogue)
-    - only Whole Run's `run_terminal` marker may carry it."""
     contract = ApiContract(client_session_id="session-a")
 
     with pytest.raises(ApiProtocolError, match="outcome"):
