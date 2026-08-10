@@ -29,6 +29,10 @@ class VisualizerApp:
         self.live = live
         self.replay_path = replay_path
 
+    def _refresh_live(self) -> None:
+        if self.mode == "live" and self.live is not None:
+            self.live.refresh()
+
     def status(self) -> dict[str, Any]:
         if self.mode == "live":
             assert self.live is not None
@@ -43,6 +47,7 @@ class VisualizerApp:
         }
 
     def events_after(self, cursor: int) -> dict[str, Any]:
+        self._refresh_live()
         pairs = self.store.after(cursor)
         events = [present_event(index, record) for index, record in pairs]
         next_cursor = pairs[-1][0] if pairs else cursor
