@@ -51,7 +51,7 @@ class LiveRunController:
 
     @staticmethod
     def _default_process_factory(command: Sequence[str]) -> Process:
-        return subprocess.Popen(list(command))
+        return subprocess.Popen(command)
 
     @property
     def command(self) -> list[str]:
@@ -73,7 +73,6 @@ class LiveRunController:
             # runner's JSONL writer also opens with append=False.
             self.log_path.write_bytes(b"")
             self.store.clear()
-            self._reader.reset()
             try:
                 self._process = self._process_factory(self.command)
             except BaseException as exc:  # noqa: BLE001 - surface launch failure in UI
