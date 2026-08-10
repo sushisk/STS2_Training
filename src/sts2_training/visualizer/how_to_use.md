@@ -9,24 +9,47 @@ resource bar, player/enemy health bars, bottom fanned hand, energy gem, highligh
 card/action) without bundling or copying game assets. Training-only metadata is kept in side
 panels so it does not obscure the board.
 
+Both modes use the same input boundary:
+
+```text
+Runner -> JSONL selection log -> Visualizer reader -> present_event -> Browser
+```
+
+`present_event` is the only DTO-to-browser adapter. Replay reads a completed JSONL file; live
+mode tails a growing one and keeps an unterminated final line buffered until the next poll.
+
 ## Live mode
 
-Start STS2_RL first, then start the visualizer:
+Live mode does not construct an API client or duplicate Whole Run configuration. Pressing
+**START RUN** launches the existing `sts2_training.runner.start_new_run` CLI as a subprocess,
+with its arguments passed through unchanged and `--selection-log` supplied by the visualizer.
+
+Start STS2_RL first, then start the visualizer. Put runner arguments after `--`:
 
 ```bash
 python -m sts2_training.visualizer live \
+  --log data/visualizer/ironclad.jsonl \
+  -- \
   --host 127.0.0.1 --port 8765 \
   --character-id IRONCLAD --ascension 0
 ```
 
-Open the printed URL and press **START RUN**. The visualizer creates the same
-`AsyncTrainingApiClient` + `start_new_run` pipeline as the normal runner. Its selection logger
-is tee'd to a timestamped JSONL file under `data/visualizer/` and to the browser event stream,
-so committed actions and beam-search branches appear while the run is progressing.
+Open the printed URL and press **START RUN**. The normal runner owns `TcpConnection`,
+`AsyncTrainingApiClient`, all run/search defaults, and JSONL logging. The visualizer only
+starts that entry point and tails the file, so changes to runner defaults do not require a
+second set of visualizer options.
 
-Use `--log path/to/run.jsonl` to choose the live output file, and pass the same `--seed`,
-`--search-mode`, `--beam-depth`, `--decision-timeout`, and `--max-decisions` controls when a
-reproducible run is needed.
+`--log` is optional; live mode otherwise creates a timestamped file under `data/visualizer/`.
+Do not pass `--selection-log` after `--`; that path is managed by the visualizer.
+
+The runner can also produce a visualizable log without the visualizer:
+
+```bash
+python -m sts2_training.runner.start_new_run \
+  --host 127.0.0.1 --port 8765 \
+  --character-id IRONCLAD \
+  --selection-log data/runs/ironclad.jsonl
+```
 
 ## Replay mode
 
@@ -47,9 +70,9 @@ selected and keeps `result.masked_emulator_dto` in the event payload for inspect
 ## Browser/API endpoints
 
 - `GET /` - visualizer UI
-- `GET /api/status` - mode, lifecycle, event count, log path, live-run result/error
+- `GET /api/status` - mode, lifecycle, event count, log path, live runner exit/error
 - `GET /api/events?after=N` - normalized events after zero-based cursor `N`
-- `POST /api/live/start` - start the configured Whole Run (live mode only, once per process)
+- `POST /api/live/start` - launch the configured runner CLI (live mode only, once per process)
 
 The HTTP server binds to `127.0.0.1:7878` by default. Use `--bind` / `--ui-port` to change it
 and `--no-browser` for headless environments.
