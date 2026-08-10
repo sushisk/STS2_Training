@@ -85,9 +85,7 @@ class LiveRunController:
 
     def refresh(self) -> None:
         with self._lock:
-            if self._state not in {"running", "completed", "failed"}:
-                return
-            if self._state == "failed" and self._process is None:
+            if self._state != "running":
                 return
 
             try:
