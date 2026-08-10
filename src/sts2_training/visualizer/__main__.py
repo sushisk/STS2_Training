@@ -8,15 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sts2_training.visualizer.core import EventStore, ReplayLogError, read_jsonl
-from sts2_training.visualizer.live import LiveRunConfig, LiveRunController
+from sts2_training.visualizer.live import LiveRunController
 from sts2_training.visualizer.server import VisualizerApp, make_server
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,18 +22,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
     sub = parser.add_subparsers(dest="mode", required=True)
 
-    live = sub.add_parser("live", help="start a Whole Run from the UI and watch its log live")
-    live.add_argument("--host", default="127.0.0.1", help="STS2_RL TCP host")
-    live.add_argument("--port", type=int, default=8765, help="STS2_RL TCP port")
-    live.add_argument("--connect-timeout", type=float, default=5.0)
-    live.add_argument("--character-id", default="IRONCLAD")
-    live.add_argument("--ascension", type=int, default=0)
-    live.add_argument("--seed", type=int, default=None)
-    live.add_argument("--decision-timeout", type=float, default=30.0)
-    live.add_argument("--max-decisions", type=_positive_int, default=None)
-    live.add_argument("--search-mode", default=None)
-    live.add_argument("--beam-depth", type=_positive_int, default=None)
+    live = sub.add_parser(
+        "live",
+        help="start the existing Whole Run CLI and tail its JSONL log live",
+        epilog=(
+            "Pass start_new_run arguments after '--', for example: "
+            "live -- --host 127.0.0.1 --port 8765 --character-id IRONCLAD"
+        ),
+    )
     live.add_argument("--log", type=Path, default=None, help="JSONL output path")
+    live.add_argument(
+        "runner_args",
+        nargs=argparse.REMAINDER,
+        help="arguments passed unchanged to sts2_training.runner.start_new_run (prefix with --)",
+    )
 
     replay = sub.add_parser("replay", help="replay an existing JSONL selection log")
     replay.add_argument("log", type=Path)
@@ -59,19 +54,11 @@ def build_app(args: argparse.Namespace) -> VisualizerApp:
         return VisualizerApp(mode="replay", store=store, replay_path=str(args.log))
 
     store = EventStore()
-    config = LiveRunConfig(
-        host=args.host,
-        port=args.port,
-        connect_timeout_s=args.connect_timeout,
-        character_id=args.character_id,
-        ascension=args.ascension,
-        seed=args.seed,
-        decision_timeout_s=args.decision_timeout,
-        max_decisions=args.max_decisions,
-        search_mode=args.search_mode,
-        beam_max_depth=args.beam_depth,
+    live = LiveRunController(
+        store=store,
+        log_path=args.log or _default_log_path(),
+        runner_args=args.runner_args,
     )
-    live = LiveRunController(store=store, config=config, log_path=args.log or _default_log_path())
     return VisualizerApp(mode="live", store=store, live=live)
 
 
@@ -80,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         app = build_app(args)
-    except ReplayLogError as exc:
+    except (ReplayLogError, ValueError) as exc:
         parser.error(str(exc))
 
     server = make_server(app, bind=args.bind, port=args.ui_port)
@@ -89,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://{browser_host}:{port}/"
     print(f"STS2 visualizer ({args.mode}) listening on {url}")
     if args.mode == "live":
-        print("Open the UI and press START RUN to begin the configured Whole Run.")
+        print("Open the UI and press START RUN to launch sts2_training.runner.start_new_run.")
     else:
         print(f"Loaded {len(app.store)} events from {args.log}")
     if not args.no_browser:
