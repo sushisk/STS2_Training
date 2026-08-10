@@ -68,7 +68,23 @@ def test_replay_mode_exposes_canonical_frames_and_run_terminal_record(tmp_path: 
                     "draw_count": 3,
                     "discard_count": 4,
                     "legal_actions": [
-                        {"action_id": "strike", "action_type": "play_card", "name": "Strike", "cost": 1}
+                        {
+                            "action_id": "strike",
+                            "action_type": "play_card",
+                            "name": "Strike",
+                            "cost": 1,
+                            "description": "Deal 6 damage",
+                            "parameters": {"target_index": 0},
+                        },
+                        {
+                            "action_id": "smith",
+                            "action_type": "choose_option",
+                            "parameters": {
+                                "option_id": "smith",
+                                "amount": 2,
+                                "target": {"name": "Sword", "level": 1},
+                            },
+                        },
                     ],
                 },
             },
@@ -142,13 +158,31 @@ def test_replay_mode_exposes_canonical_frames_and_run_terminal_record(tmp_path: 
         assert selection["frame"]["resources"]["gold"] == 123
         assert selection["frame"]["resources"]["floor"] == 7
         assert selection["frame"]["piles"]["draw"] == 3
+
+        choices = selection["frame"]["choices"]
+        assert [choice["action_id"] for choice in choices] == ["strike", "smith"]
+        assert choices[0]["summary"] == "Deal 6 damage"
+        assert choices[0]["details"] == [{"label": "Target Index", "value": "0"}]
+        assert choices[1]["summary"] == (
+            "Option Id: smith · Amount: 2 · Target: Name: Sword, Level: 1"
+        )
+        assert choices[1]["details"] == [
+            {"label": "Option Id", "value": "smith"},
+            {"label": "Amount", "value": "2"},
+            {"label": "Target", "value": "Name: Sword, Level: 1"},
+        ]
+        assert "{" not in choices[1]["summary"]
         assert selection["selected_action"]["action_id"] == "strike"
+        assert selection["selected_action"]["details"] == [
+            {"label": "Target Index", "value": "0"}
+        ]
 
         assert terminal["event"] == "run_result"
         assert terminal["frame_source"] == "final_dto"
         assert terminal["phase"] == "run_terminal"
         assert terminal["frame"]["outcome"] == "run_victory"
         assert terminal["frame"]["player"]["powers"] == []
+        assert terminal["frame"]["choices"] == []
         assert "before" not in terminal and "after" not in terminal
     finally:
         server.shutdown()
