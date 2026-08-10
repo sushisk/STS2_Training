@@ -37,16 +37,7 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "defeat_penalty": -100_000.0,
 }
 
-# Generic Buff/Debuff type fallback deliberately saturates because Power.amount
-# is not one universal quantity in STS2: depending on the Power it can represent
-# intensity, duration, a counter, or another semantic. Large unknown amounts must
-# not dominate beam pruning merely because they share the same numeric field.
 _GENERIC_POWER_AMOUNT_CAP = 3.0
-
-# Intentionally empty until STS2 canonical power IDs and relative values are
-# verified. Callers can provide `power_values={power_id: value_per_stack}` now;
-# later this can be populated from measured rollout / ablation data without
-# changing the beam-search interface.
 DEFAULT_POWER_VALUES: dict[str, float] = {}
 
 
@@ -72,15 +63,7 @@ class ValueModel:
 
 
 class HeuristicValueFunction(ValueModel):
-    """Hand-written ValueModel used for lightweight beam pruning.
-
-    ``power_values`` uses a holder-relative sign convention: a positive value
-    means the Power is beneficial to whichever actor owns it, while a negative
-    value means harmful. Player contributions are added and living-enemy
-    contributions are subtracted. Named values multiply the Power's raw
-    absolute ``amount`` (or 1 when ``amount`` is absent); unlike the generic
-    Buff/Debuff fallback, this semantic layer is intentionally not saturated.
-    """
+    """Hand-written ValueModel used for lightweight beam pruning."""
 
     def __init__(
         self,
@@ -160,23 +143,15 @@ class HeuristicValueFunction(ValueModel):
             player_powers, self._power_values, "playerPowers"
         )
 
-        # Enemy powers matter in the opposite direction from the player's point
-        # of view: enemy Buffs are bad, enemy Debuffs are good. Only living
-        # enemies contribute because dead-enemy powers cannot affect future turns.
         enemy_power_type_score = 0.0
         for index, enemy in enemies:
             raw_powers = enemy.get("powers")
             if raw_powers is None:
                 raw_powers = enemy.get("enemyPowers")
-            enemy_powers = _mapping_sequence_value(
-                raw_powers, f"enemies[{index}].powers"
-            )
-            enemy_power_type_score -= _typed_power_score(
-                enemy_powers, f"enemies[{index}].powers"
-            )
-            named_power_score -= _named_power_score(
-                enemy_powers, self._power_values, f"enemies[{index}].powers"
-            )
+            field_name = f"enemies[{index}].powers"
+            enemy_powers = _mapping_sequence_value(raw_powers, field_name)
+            enemy_power_type_score -= _typed_power_score(enemy_powers, field_name)
+            named_power_score -= _named_power_score(enemy_powers, self._power_values, field_name)
 
         return {
             "player_hp_ratio": hp / max_hp,
@@ -184,31 +159,18 @@ class HeuristicValueFunction(ValueModel):
             "enemy_hp_ratio": enemy_hp / enemy_max_hp,
             "predicted_incoming_damage": incoming,
             "enemies_alive": float(len(enemies)),
-            # Kept under the old feature name for backwards-compatible custom
-            # weight dictionaries.
             "buff_debuff_score": player_power_type_score,
             "enemy_buff_debuff_score": enemy_power_type_score,
-            # Semantic correction layer keyed by canonical power ID. It is
-            # deliberately separate from type-based scoring so values can later
-            # be fit from data without removing the robust unknown-ID fallback.
             "named_power_score": named_power_score,
         }
 
 
-def _typed_power_score(
-    powers: Sequence[Mapping[str, Any]], field_name: str
-) -> float:
+def _typed_power_score(powers: Sequence[Mapping[str, Any]], field_name: str) -> float:
     score = 0.0
     for index, power in enumerate(powers):
         power_type = power.get("type")
         if power_type is not None and not isinstance(power_type, str):
-            raise ValueError(
-                f"heuristic input {field_name}[{index}].type must be a string"
-            )
-        # Missing amount still means the Power is present. For the generic type
-        # fallback, saturate large amounts because amount may be duration/counter
-        # rather than linear combat strength; Power-specific semantics belong in
-        # the named correction layer below.
+            raise ValueError(f"heuristic input {field_name}[{index}].type must be a string")
         amount = min(
             abs(_num(power.get("amount"), default=1.0)),
             _GENERIC_POWER_AMOUNT_CAP,
@@ -297,9 +259,6 @@ def _validated_finite_number(value: Any, label: str) -> float:
 def _num(value: Any, *, default: float = 0.0) -> float:
     if value is None:
         return default
-    # Keep the established DTO-validation message stable: several caller-facing
-    # regression tests intentionally assert this contract. Configuration values
-    # use the more specific labels from `_validated_finite_number` instead.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("heuristic input numbers must be finite numeric values")
     try:
