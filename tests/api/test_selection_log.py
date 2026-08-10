@@ -154,21 +154,18 @@ def test_speculative_branch_result_does_not_create_root_room_result() -> None:
     assert "run_result" not in events[0]
 
 
-def test_whole_run_sparse_commit_records_public_action_id_and_preserves_wire_token() -> None:
+def test_whole_run_sparse_commit_records_public_action_id_unchanged() -> None:
     events: list[dict] = []
     audit = SelectionAudit(events.append)
-    start = _decision(
-        decision_point_id="decision-1",
-        boundary="reward",
-        room_context={"room_id": 7},
-        legal_actions=_sparse_actions("1", "3"),
+    audit.remember(
+        _decision(
+            decision_point_id="decision-1",
+            boundary="reward",
+            room_context={"room_id": 7},
+            legal_actions=_sparse_actions("1", "3"),
+        )
     )
-    start["operation"] = "start_instance"
-    audit.remember(start, wire_commit_action_id_is_ordinal=True)
 
-    # The selected public action is "3", but the deployed Whole Run server consumes
-    # ordinal "1" at the commit_action wire boundary. The direct public ID "1" also
-    # exists, making this a deliberate collision test rather than a trivial remapping.
     result = _decision(
         decision_point_id="decision-2",
         boundary="reward",
@@ -176,23 +173,20 @@ def test_whole_run_sparse_commit_records_public_action_id_and_preserves_wire_tok
         legal_actions=_sparse_actions("5", "8"),
     )
     audit.record_action(
-        {**_commit_request(), "action_id": "1"},
+        {**_commit_request(), "action_id": "3"},
         source_branch_id="root",
         result=result,
     )
 
-    assert events[0]["request"]["action_id"] == "1"
+    assert events[0]["request"]["action_id"] == "3"
     assert events[0]["selected_action_id"] == "3"
 
-    # A successful root commit clears stale Decisions but does not close the instance.
-    # The Whole Run ordinal compatibility mode must therefore survive into the next
-    # decision; ordinal "0" below labels public action "5".
     audit.record_action(
         {
             **_commit_request(request_id="session-a:3"),
             "request_seq": 3,
             "decision_point_id": "decision-2",
-            "action_id": "0",
+            "action_id": "5",
         },
         source_branch_id="root",
         result=_decision(
@@ -202,23 +196,23 @@ def test_whole_run_sparse_commit_records_public_action_id_and_preserves_wire_tok
         ),
     )
 
-    assert events[1]["request"]["action_id"] == "0"
+    assert events[1]["request"]["action_id"] == "5"
     assert events[1]["selected_action_id"] == "5"
 
 
 def test_whole_run_sparse_public_action_id_survives_selection_recovery() -> None:
     events: list[dict] = []
     audit = SelectionAudit(events.append)
-    start = _decision(
-        decision_point_id="decision-1",
-        boundary="reward",
-        room_context={"room_id": 7},
-        legal_actions=_sparse_actions("1", "3"),
+    audit.remember(
+        _decision(
+            decision_point_id="decision-1",
+            boundary="reward",
+            room_context={"room_id": 7},
+            legal_actions=_sparse_actions("1", "3"),
+        )
     )
-    start["operation"] = "start_instance"
-    audit.remember(start, wire_commit_action_id_is_ordinal=True)
 
-    request = {**_commit_request(), "action_id": "1"}
+    request = {**_commit_request(), "action_id": "3"}
     audit.record_action(
         request,
         source_branch_id="root",
@@ -239,22 +233,17 @@ def test_whole_run_sparse_public_action_id_survives_selection_recovery() -> None
     assert [event["selected_action_id"] for event in events] == ["3", "3"]
 
 
-def test_combat_numeric_public_action_id_is_not_treated_as_an_ordinal() -> None:
+def test_combat_numeric_public_action_id_is_matched_by_value() -> None:
     events: list[dict] = []
     audit = SelectionAudit(events.append)
-    start = _decision(
-        decision_point_id="decision-1",
-        boundary="combat",
-        room_context={"room_id": 7},
-        legal_actions=_sparse_actions("1", "3"),
+    audit.remember(
+        _decision(
+            decision_point_id="decision-1",
+            boundary="combat",
+            room_context={"room_id": 7},
+            legal_actions=_sparse_actions("1", "3"),
+        )
     )
-    start.update(
-        {
-            "operation": "start_instance",
-            "max_emulate_actions_items": 64,
-        }
-    )
-    audit.remember(start, wire_commit_action_id_is_ordinal=False)
 
     audit.record_action(
         {**_commit_request(), "action_id": "1"},
