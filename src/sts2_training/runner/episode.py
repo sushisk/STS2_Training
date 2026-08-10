@@ -137,9 +137,13 @@ class EpisodeRunner:
         max_decisions: int | None = None,
         close_timeout_s: float = 10.0,
     ) -> EpisodeResult:
-        """Repeatedly `decide_and_commit` until an explicit Combat/Whole Run terminal
-        marker is observed, then best-effort `close_instance` regardless of how the
-        loop ended. A non-terminal decision with no selectable action fails closed.
+        """Repeatedly decide+commit until an explicit Combat/Whole Run terminal marker
+        is observed, then best-effort `close_instance` regardless of how the loop ended.
+        A non-terminal decision with no selectable action fails closed.
+
+        A successful `commit_action` response already contains the next root Decision,
+        so subsequent iterations feed that response directly back into the engine rather
+        than immediately issuing a redundant `get_decision` for the same state.
         """
         _validate_max_decisions(max_decisions)
         _validate_timeout("decision_timeout_s", decision_timeout_s)
@@ -147,13 +151,21 @@ class EpisodeRunner:
         t_start = time.monotonic()
         decisions_made = 0
         final_dto: JsonObject = {}
+        next_decision: JsonObject | None = None
 
         try:
             while True:
                 try:
-                    response = await self._engine.decide_and_commit(
-                        instance_id, timeout_s=decision_timeout_s
-                    )
+                    if next_decision is None:
+                        response = await self._engine.decide_and_commit(
+                            instance_id, timeout_s=decision_timeout_s
+                        )
+                    else:
+                        response = await self._engine.decide_and_commit(
+                            instance_id,
+                            timeout_s=decision_timeout_s,
+                            decision=next_decision,
+                        )
                 except NoAvailableActionError as exc:
                     terminal_dto = _terminal_dto_from_no_action(exc)
                     if terminal_dto is None:
@@ -164,6 +176,7 @@ class EpisodeRunner:
                 decisions_made += 1
                 if not isinstance(response, Mapping):
                     raise RuntimeError("commit_action must return a mapping")
+                next_decision = dict(response)
                 raw_final_dto = response.get("masked_emulator_dto")
                 if not isinstance(raw_final_dto, Mapping):
                     raise RuntimeError("commit_action returned an invalid masked_emulator_dto")
