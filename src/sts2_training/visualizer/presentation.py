@@ -45,9 +45,67 @@ def _status_label(value: Any) -> Any:
     return deepcopy(value)
 
 
+def _power_items(value: Any) -> list[Any]:
+    """Normalize list-shaped and keyed-map power payloads into power-like objects."""
+    if isinstance(value, Mapping):
+        power_keys = {
+            "power_id",
+            "id",
+            "name",
+            "display_name",
+            "power_name",
+            "amount",
+            "stacks",
+            "stack",
+            "count",
+            "value",
+        }
+        if power_keys.intersection(value):
+            return [value]
+
+        items: list[Any] = []
+        for key, raw in value.items():
+            if isinstance(raw, Mapping):
+                item = dict(raw)
+                item.setdefault("power_id", key)
+                item.setdefault("name", key)
+            else:
+                item = {"power_id": key, "name": key, "amount": raw}
+            items.append(item)
+        return items
+    return _sequence(value)
+
+
+def _power_view(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {
+            "id": "",
+            "name": deepcopy(value),
+            "amount": None,
+            "description": None,
+            "type": None,
+        }
+
+    power = dict(value)
+    power_id = _pick(power, ("power_id", "id", "key", "type"), "")
+    return {
+        "id": power_id,
+        "name": _pick(
+            power,
+            ("name", "display_name", "power_name", "power_id", "id", "type"),
+            power_id or "Power",
+        ),
+        "amount": _pick(power, ("amount", "stacks", "stack", "count", "value")),
+        "description": _pick(power, ("description", "text", "tooltip", "rules_text")),
+        "type": _pick(power, ("power_type", "category", "kind", "type")),
+    }
+
+
 def _entity_view(value: Any, *, fallback_name: str) -> dict[str, Any]:
     entity = _mapping(value)
     current_hp = _pick(entity, ("current_hp", "hp", "health", "current_health"))
+    statuses = _pick(entity, ("statuses", "effects", "buffs"), [])
+    powers = _pick(entity, ("powers", "power_list", "active_powers"), [])
     return {
         "name": _pick(
             entity,
@@ -58,12 +116,8 @@ def _entity_view(value: Any, *, fallback_name: str) -> dict[str, Any]:
         "max_hp": _pick(entity, ("max_hp", "max_health", "health_max"), current_hp),
         "block": _pick(entity, ("block", "current_block"), 0),
         "intent": _pick(entity, ("intent", "next_move", "move_intent", "intent_damage")),
-        "statuses": [
-            _status_label(status)
-            for status in _sequence(
-                _pick(entity, ("statuses", "powers", "effects", "buffs"), [])
-            )
-        ],
+        "statuses": [_status_label(status) for status in _sequence(statuses)],
+        "powers": [_power_view(power) for power in _power_items(powers)],
     }
 
 
