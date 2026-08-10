@@ -120,7 +120,8 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
         card_actions = [
             action
             for action in legal_raw
-            if "card" in str(_mapping(action).get("action_type", "")).lower()
+            if isinstance(action, Mapping)
+            and "card" in str(action.get("action_type", "")).lower()
         ]
         hand_raw = card_actions or legal_raw[:9]
 
@@ -176,8 +177,8 @@ def _selected_action(selected_id: str | None, selection_dto: Mapping[str, Any]) 
 def _frame_input(
     record: Mapping[str, Any],
     *,
-    received_dto: Mapping[str, Any],
-    result_dto: Mapping[str, Any],
+    received_dto: dict[str, Any],
+    result_dto: dict[str, Any],
     operation: Any,
 ) -> tuple[dict[str, Any], str, str]:
     final_dto = record.get("final_dto")
@@ -186,10 +187,10 @@ def _frame_input(
 
     if received_dto:
         phase = "beam_explore" if operation == "emulate_actions" else "selection"
-        return dict(received_dto), "received.masked_emulator_dto", phase
+        return received_dto, "received.masked_emulator_dto", phase
 
     if result_dto:
-        return dict(result_dto), "result.masked_emulator_dto", "result"
+        return result_dto, "result.masked_emulator_dto", "result"
     return {}, "none", "unknown"
 
 
