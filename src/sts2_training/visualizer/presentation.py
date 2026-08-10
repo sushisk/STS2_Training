@@ -121,12 +121,83 @@ def _entity_view(value: Any, *, fallback_name: str) -> dict[str, Any]:
     }
 
 
+def _human_key(value: Any) -> str:
+    return str(value).replace("_", " ").strip().title()
+
+
+def _display_value(value: Any) -> str:
+    """Format structured action data as short human-readable text, never raw JSON."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, Mapping):
+        return ", ".join(
+            f"{_human_key(key)}: {_display_value(item)}"
+            for key, item in value.items()
+            if item is not None
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return ", ".join(_display_value(item) for item in value)
+    return str(value)
+
+
+def _action_details(action: Mapping[str, Any]) -> list[dict[str, str]]:
+    ignored = {
+        "action_id",
+        "id",
+        "uuid",
+        "action_type",
+        "type",
+        "name",
+        "display_name",
+        "card_name",
+        "cost",
+        "energy_cost",
+        "description",
+        "text",
+        "rules_text",
+        "effect",
+        "is_available",
+        "playable",
+        "enabled",
+        "parameters",
+    }
+    entries: list[tuple[Any, Any]] = []
+    parameters = action.get("parameters")
+    if isinstance(parameters, Mapping):
+        entries.extend(parameters.items())
+    entries.extend((key, value) for key, value in action.items() if key not in ignored)
+
+    details: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for key, value in entries:
+        if value is None:
+            continue
+        label = _human_key(key)
+        if label in seen:
+            continue
+        formatted = _display_value(value)
+        if not formatted:
+            continue
+        seen.add(label)
+        details.append({"label": label, "value": formatted})
+    return details[:10]
+
+
 def _action_view(value: Any) -> dict[str, Any]:
     action = _mapping(value)
     action_id = _pick(action, ("action_id", "id", "card_id", "uuid"), "")
+    action_type = _pick(action, ("action_type", "type"))
+    details = _action_details(action)
+    raw_description = _pick(action, ("description", "text", "rules_text", "effect"), "")
+    description = _display_value(raw_description)
+    summary = description or " · ".join(
+        f"{detail['label']}: {detail['value']}" for detail in details[:3]
+    )
     return {
         "action_id": action_id,
-        "action_type": _pick(action, ("action_type", "type")),
+        "action_type": action_type,
         "name": _pick(
             action,
             ("name", "display_name", "card_name", "action_type"),
@@ -137,12 +208,11 @@ def _action_view(value: Any) -> dict[str, Any]:
             ("cost", "energy_cost", "parameters.cost", "parameters.energy"),
             "",
         ),
-        "description": _pick(
-            action,
-            ("description", "text", "rules_text", "effect", "parameters"),
-            "",
-        ),
+        "description": description,
+        "summary": summary,
+        "details": details,
         "is_available": _pick(action, ("is_available", "playable", "enabled"), True) is not False,
+        # Retained for API compatibility; browser presentation uses ``details`` instead.
         "parameters": deepcopy(_mapping(action.get("parameters"))),
     }
 
@@ -171,13 +241,12 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
     )
     legal_raw = _sequence(dto.get("legal_actions"))
     if not hand_raw:
-        card_actions = [
+        hand_raw = [
             action
             for action in legal_raw
             if isinstance(action, Mapping)
             and "card" in str(action.get("action_type", "")).lower()
         ]
-        hand_raw = card_actions or legal_raw[:9]
 
     def player_or_dto(paths: Sequence[str], default: Any = None) -> Any:
         value = _pick(player_raw, paths)
@@ -201,6 +270,7 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
             for index, enemy in enumerate(enemies_raw[:5])
         ],
         "hand": [_action_view(action) for action in hand_raw[:12]],
+        "choices": [_action_view(action) for action in legal_raw[:24]],
         "resources": {
             "character": player_or_dto(("character_id", "character", "name")),
             "gold": player_or_dto(("gold", "money", "coins")),
