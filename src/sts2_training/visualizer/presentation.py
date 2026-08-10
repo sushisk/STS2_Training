@@ -118,10 +118,7 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
         card_actions = [
             action
             for action in legal_raw
-            if any(
-                token in str(_mapping(action).get("action_type", "")).lower()
-                for token in ("card", "play_card", "card_play")
-            )
+            if "card" in str(_mapping(action).get("action_type", "")).lower()
         ]
         hand_raw = card_actions or legal_raw[:9]
 
@@ -163,12 +160,8 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _selected_action(record: Mapping[str, Any], selection_dto: Mapping[str, Any]) -> dict[str, Any] | None:
-    selected_id = record.get("selected_action_id")
-    if not isinstance(selected_id, str) or not selected_id:
-        request_id = _mapping(record.get("request")).get("action_id")
-        selected_id = request_id if isinstance(request_id, str) else None
-    if not selected_id:
+def _selected_action(selected_id: str | None, selection_dto: Mapping[str, Any]) -> dict[str, Any] | None:
+    if selected_id is None:
         return None
 
     legal_actions = _sequence(selection_dto.get("legal_actions"))
@@ -209,6 +202,14 @@ def present_event(index: int, record: Mapping[str, Any]) -> dict[str, Any]:
     frame_dto, frame_source, phase = _frame_input(record)
     operation = request.get("operation")
     branch_id = request.get("branch_id") or received.get("branch_id") or result.get("branch_id")
+    selected_action_id = record.get("selected_action_id")
+    if not isinstance(selected_action_id, str) or not selected_action_id:
+        request_action_id = request.get("action_id")
+        selected_action_id = (
+            request_action_id
+            if isinstance(request_action_id, str) and request_action_id
+            else None
+        )
     return {
         "index": index,
         "event": record.get("event", "unknown"),
@@ -219,8 +220,8 @@ def present_event(index: int, record: Mapping[str, Any]) -> dict[str, Any]:
         "phase": phase,
         "frame_source": frame_source,
         "frame": _frame_view(frame_dto),
-        "selected_action_id": record.get("selected_action_id") or request.get("action_id"),
-        "selected_action": _selected_action(record, selection_dto),
+        "selected_action_id": selected_action_id,
+        "selected_action": _selected_action(selected_action_id, selection_dto),
         "client_error": deepcopy(record.get("client_error")),
         "room_result": deepcopy(record.get("room_result")),
         "run_result": deepcopy(record.get("run_result")),
