@@ -9,11 +9,11 @@ from typing import Any
 
 
 class ReplayLogError(ValueError):
-    """Raised when a JSONL replay file cannot be decoded safely."""
+    """Raised when a JSONL visualizer input cannot be decoded safely."""
 
 
 class EventStore:
-    """Thread-safe, append-only event store shared by the runner and HTTP server."""
+    """Thread-safe in-memory store of records already read from JSONL."""
 
     def __init__(self, records: Iterable[Mapping[str, Any]] = ()) -> None:
         self._lock = threading.RLock()
@@ -24,6 +24,10 @@ class EventStore:
             self._records.append(deepcopy(dict(record)))
             return len(self._records) - 1
 
+    def clear(self) -> None:
+        with self._lock:
+            self._records.clear()
+
     def snapshot(self) -> list[dict[str, Any]]:
         with self._lock:
             return deepcopy(self._records)
@@ -32,39 +36,94 @@ class EventStore:
         """Return records whose zero-based index is greater than ``cursor``."""
         with self._lock:
             start = max(cursor + 1, 0)
-            return [(index, deepcopy(record)) for index, record in enumerate(self._records[start:], start)]
+            return [
+                (index, deepcopy(record))
+                for index, record in enumerate(self._records[start:], start)
+            ]
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._records)
 
 
-def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    """Load a selection log while preserving record order and actionable errors."""
-    log_path = Path(path)
-    records: list[dict[str, Any]] = []
-    try:
-        stream = log_path.open("r", encoding="utf-8")
-    except OSError as exc:
-        raise ReplayLogError(f"cannot open replay log {log_path}: {exc}") from exc
+class JsonlLogReader:
+    """Incrementally read complete JSONL records from a growing file.
 
-    with stream:
-        for line_number, raw_line in enumerate(stream, 1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ReplayLogError(
-                    f"invalid JSON in {log_path} at line {line_number}: {exc.msg}"
-                ) from exc
-            if not isinstance(value, dict):
-                raise ReplayLogError(
-                    f"record in {log_path} at line {line_number} must be a JSON object"
-                )
-            records.append(value)
-    return records
+    The reader tracks a byte offset and retains an unterminated tail between polls.
+    This makes the same reader suitable for completed replay logs and live logs that
+    may be observed while their final JSON object is still being written.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.reset()
+
+    def reset(self) -> None:
+        self._offset = 0
+        self._pending = b""
+        self._line_number = 0
+
+    def poll(self, *, final: bool = False) -> list[dict[str, Any]]:
+        try:
+            with self.path.open("rb") as stream:
+                stream.seek(0, 2)
+                size = stream.tell()
+                if size < self._offset:
+                    raise ReplayLogError(f"visualizer log was truncated while reading {self.path}")
+                stream.seek(self._offset)
+                chunk = stream.read()
+        except FileNotFoundError:
+            if final:
+                raise ReplayLogError(f"cannot open visualizer log {self.path}: file does not exist")
+            return []
+        except OSError as exc:
+            raise ReplayLogError(f"cannot open visualizer log {self.path}: {exc}") from exc
+
+        self._offset += len(chunk)
+        data = self._pending + chunk
+        parts = data.split(b"\n")
+        self._pending = parts.pop()
+
+        records: list[dict[str, Any]] = []
+        for raw_line in parts:
+            self._line_number += 1
+            record = self._decode_line(raw_line, self._line_number)
+            if record is not None:
+                records.append(record)
+
+        if final and self._pending:
+            self._line_number += 1
+            record = self._decode_line(self._pending, self._line_number)
+            self._pending = b""
+            if record is not None:
+                records.append(record)
+        return records
+
+    def _decode_line(self, raw_line: bytes, line_number: int) -> dict[str, Any] | None:
+        if not raw_line.strip():
+            return None
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ReplayLogError(
+                f"invalid UTF-8 in {self.path} at line {line_number}"
+            ) from exc
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ReplayLogError(
+                f"invalid JSON in {self.path} at line {line_number}: {exc.msg}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ReplayLogError(
+                f"record in {self.path} at line {line_number} must be a JSON object"
+            )
+        return value
+
+
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """Load a completed JSONL log through the same reader used by live mode."""
+    return JsonlLogReader(path).poll(final=True)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
