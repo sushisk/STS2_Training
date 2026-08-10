@@ -66,6 +66,18 @@ async def start_new_run(
     )
 
 
+def _run_result_event(result: EpisodeResult) -> dict[str, Any]:
+    """Return the run-level record that makes a selection log self-contained."""
+    return {
+        "event": "run_result",
+        "instance_id": result.instance_id,
+        "decisions_made": result.decisions_made,
+        "elapsed_s": result.elapsed_s,
+        "outcome": result.final_dto.get("outcome"),
+        "final_dto": result.final_dto,
+    }
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_common_arguments(parser)
@@ -76,7 +88,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--selection-log",
         type=Path,
         default=None,
-        help="write selection audit events to this JSONL file (overwrite if it exists)",
+        help=(
+            "write selection audit events plus one final run_result record to this "
+            "JSONL file (overwrite if it exists)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -88,7 +103,7 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
     )
     try:
         async with AsyncTrainingApiClient(connection, selection_logger=selection_logger) as client:
-            return await start_new_run(
+            result = await start_new_run(
                 client,
                 character_id=args.character_id,
                 ascension=args.ascension,
@@ -98,6 +113,9 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
                 search_mode=args.search_mode,
                 beam_max_depth=args.beam_depth,
             )
+        if selection_logger is not None:
+            selection_logger(_run_result_event(result))
+        return result
     finally:
         if selection_logger is not None:
             selection_logger.close()
