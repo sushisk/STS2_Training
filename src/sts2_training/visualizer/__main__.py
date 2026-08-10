@@ -7,15 +7,16 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sts2_training.visualizer.core import EventStore, ReplayLogError, read_jsonl
+from sts2_training.visualizer.log_reader import ReplayLogError, read_jsonl
 from sts2_training.visualizer.live import LiveRunController
 from sts2_training.visualizer.server import VisualizerApp, make_server
+from sts2_training.visualizer.store import EventStore
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m sts2_training.visualizer",
-        description="Slay the Spire 2-styled visualizer for STS2_Training selection logs.",
+        description="Slay the Spire 2-styled visualizer for STS2_Training run event logs.",
     )
     parser.add_argument("--bind", default="127.0.0.1", help="visualizer HTTP bind address")
     parser.add_argument("--ui-port", type=int, default=7878, help="visualizer HTTP port")
@@ -24,20 +25,20 @@ def _parser() -> argparse.ArgumentParser:
 
     live = sub.add_parser(
         "live",
-        help="start the existing Whole Run CLI and tail its JSONL log live",
+        help="start the existing Whole Run CLI and tail its JSONL run log live",
         epilog=(
             "Pass start_new_run arguments after '--', for example: "
             "live -- --host 127.0.0.1 --port 8765 --character-id IRONCLAD"
         ),
     )
-    live.add_argument("--log", type=Path, default=None, help="JSONL output path")
+    live.add_argument("--log", type=Path, default=None, help="JSONL run-log output path")
     live.add_argument(
         "runner_args",
         nargs=argparse.REMAINDER,
         help="arguments passed unchanged to sts2_training.runner.start_new_run (prefix with --)",
     )
 
-    replay = sub.add_parser("replay", help="replay an existing JSONL selection log")
+    replay = sub.add_parser("replay", help="replay an existing JSONL run event log")
     replay.add_argument("log", type=Path)
     return parser
 
