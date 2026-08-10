@@ -7,9 +7,9 @@ override `evaluate_batch` directly (one batched forward pass) to hit the
 here just loops over `evaluate`.
 
 `HeuristicValueFunction` is the no-model default: hand-picked features (HP/
-enemy-HP ratios, block, predicted incoming damage, buffs/debuffs) combined
-through fixed weights, the same idea as the OLD Combat package's
-`StateEvaluator` but rebuilt against the actual RL/Training wire schema
+enemy-HP ratios, block, predicted incoming damage, powers) combined through
+fixed weights, the same idea as the OLD Combat package's `StateEvaluator` but
+rebuilt against the actual RL/Training wire schema
 (`rl_training_dto_documentation.md` section 3, "そのまま公開する情報") instead
 of the old in-process `engine_state` shape. It exists so `BeamSearchEngine`/
 `CombatDecisionEngine` are runnable and testable before any trained value
@@ -31,9 +31,17 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "predicted_incoming_damage": -1.0,
     "enemies_alive": -2.0,
     "buff_debuff_score": 2.0,
+    "enemy_buff_debuff_score": 2.0,
+    "named_power_score": 1.0,
     "victory_bonus": 100_000.0,
     "defeat_penalty": -100_000.0,
 }
+
+# Intentionally empty until STS2 canonical power IDs and relative values are
+# verified. Callers can provide `power_values={power_id: value_per_stack}` now;
+# later this can be populated from measured rollout / ablation data without
+# changing the beam-search interface.
+DEFAULT_POWER_VALUES: dict[str, float] = {}
 
 
 class ValueModel:
@@ -58,7 +66,12 @@ class ValueModel:
 
 
 class HeuristicValueFunction(ValueModel):
-    def __init__(self, weights: Mapping[str, float] | None = None) -> None:
+    def __init__(
+        self,
+        weights: Mapping[str, float] | None = None,
+        *,
+        power_values: Mapping[str, float] | None = None,
+    ) -> None:
         self._weights = dict(DEFAULT_WEIGHTS)
         if weights is not None:
             unknown = [name for name in weights if name not in DEFAULT_WEIGHTS]
@@ -66,13 +79,18 @@ class HeuristicValueFunction(ValueModel):
                 names = ", ".join(sorted(repr(name) for name in unknown))
                 raise ValueError(f"unknown heuristic weight(s): {names}")
             for name, raw_weight in weights.items():
-                if (
-                    isinstance(raw_weight, bool)
-                    or not isinstance(raw_weight, (int, float))
-                    or not math.isfinite(float(raw_weight))
-                ):
-                    raise ValueError(f"heuristic weight {name!r} must be a finite number")
-                self._weights[name] = float(raw_weight)
+                self._weights[name] = _validated_finite_number(
+                    raw_weight, f"heuristic weight {name!r}"
+                )
+
+        self._power_values = dict(DEFAULT_POWER_VALUES)
+        if power_values is not None:
+            for power_id, raw_value in power_values.items():
+                if not isinstance(power_id, str) or not power_id:
+                    raise ValueError("power_values keys must be non-empty strings")
+                self._power_values[power_id] = _validated_finite_number(
+                    raw_value, f"power value {power_id!r}"
+                )
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
         outcome = _terminal_outcome(masked_emulator_dto)
@@ -120,13 +138,29 @@ class HeuristicValueFunction(ValueModel):
             incoming_before_block += max(0.0, _num(damage) * repeats)
         incoming = max(0.0, incoming_before_block - block)
 
-        buff_debuff = 0.0
-        for index, power in enumerate(_mapping_sequence(dto, "playerPowers")):
-            power_type = power.get("type")
-            if power_type is not None and not isinstance(power_type, str):
-                raise ValueError(f"heuristic input playerPowers[{index}].type must be a string")
-            sign = 1.0 if power_type == "Buff" else -1.0 if power_type == "Debuff" else 0.0
-            buff_debuff += sign * _num(power.get("amount"))
+        player_powers = _mapping_sequence(dto, "playerPowers")
+        player_power_type_score = _typed_power_score(player_powers, "playerPowers")
+        named_power_score = _named_power_score(
+            player_powers, self._power_values, "playerPowers"
+        )
+
+        # Enemy powers matter in the opposite direction from the player's point
+        # of view: enemy Buffs are bad, enemy Debuffs are good. Only living
+        # enemies contribute because dead-enemy powers cannot affect future turns.
+        enemy_power_type_score = 0.0
+        for index, enemy in enemies:
+            raw_powers = enemy.get("powers")
+            if raw_powers is None:
+                raw_powers = enemy.get("enemyPowers")
+            enemy_powers = _mapping_sequence_value(
+                raw_powers, f"enemies[{index}].powers"
+            )
+            enemy_power_type_score -= _typed_power_score(
+                enemy_powers, f"enemies[{index}].powers"
+            )
+            named_power_score -= _named_power_score(
+                enemy_powers, self._power_values, f"enemies[{index}].powers"
+            )
 
         return {
             "player_hp_ratio": hp / max_hp,
@@ -134,8 +168,64 @@ class HeuristicValueFunction(ValueModel):
             "enemy_hp_ratio": enemy_hp / enemy_max_hp,
             "predicted_incoming_damage": incoming,
             "enemies_alive": float(len(enemies)),
-            "buff_debuff_score": buff_debuff,
+            # Kept under the old feature name for backwards-compatible custom
+            # weight dictionaries.
+            "buff_debuff_score": player_power_type_score,
+            "enemy_buff_debuff_score": enemy_power_type_score,
+            # Semantic correction layer keyed by canonical power ID. It is
+            # deliberately separate from type-based scoring so values can later
+            # be fit from data without removing the robust unknown-ID fallback.
+            "named_power_score": named_power_score,
         }
+
+
+def _typed_power_score(
+    powers: Sequence[Mapping[str, Any]], field_name: str
+) -> float:
+    score = 0.0
+    for index, power in enumerate(powers):
+        power_type = power.get("type")
+        if power_type is not None and not isinstance(power_type, str):
+            raise ValueError(
+                f"heuristic input {field_name}[{index}].type must be a string"
+            )
+        # Some non-stacking powers may omit amount entirely. Treat presence as
+        # one effective stack rather than silently valuing the power at zero.
+        amount = abs(_num(power.get("amount"), default=1.0))
+        if power_type == "Buff":
+            score += amount
+        elif power_type == "Debuff":
+            score -= amount
+    return score
+
+
+def _named_power_score(
+    powers: Sequence[Mapping[str, Any]],
+    power_values: Mapping[str, float],
+    field_name: str,
+) -> float:
+    score = 0.0
+    for index, power in enumerate(powers):
+        power_id = _power_id(power, f"{field_name}[{index}]")
+        if power_id is None:
+            continue
+        value_per_stack = power_values.get(power_id)
+        if value_per_stack is None:
+            continue
+        amount = abs(_num(power.get("amount"), default=1.0))
+        score += value_per_stack * amount
+    return score
+
+
+def _power_id(power: Mapping[str, Any], field_name: str) -> str | None:
+    for key in ("power_id", "powerId", "id"):
+        value = power.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"heuristic input {field_name}.{key} must be a string")
+        return value
+    return None
 
 
 def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
@@ -155,7 +245,10 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
 
 
 def _mapping_sequence(dto: Mapping[str, Any], field_name: str) -> list[Mapping[str, Any]]:
-    value = dto.get(field_name)
+    return _mapping_sequence_value(dto.get(field_name), field_name)
+
+
+def _mapping_sequence_value(value: Any, field_name: str) -> list[Mapping[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
@@ -168,15 +261,19 @@ def _mapping_sequence(dto: Mapping[str, Any], field_name: str) -> list[Mapping[s
     return normalized
 
 
-def _num(value: Any, *, default: float = 0.0) -> float:
-    if value is None:
-        return default
+def _validated_finite_number(value: Any, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("heuristic input numbers must be finite numeric values")
+        raise ValueError(f"{label} must be a finite number")
     try:
         number = float(value)
     except OverflowError as exc:
-        raise ValueError("heuristic input numbers must be finite numeric values") from exc
+        raise ValueError(f"{label} must be a finite number") from exc
     if not math.isfinite(number):
-        raise ValueError("heuristic input numbers must be finite numeric values")
+        raise ValueError(f"{label} must be a finite number")
     return number
+
+
+def _num(value: Any, *, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    return _validated_finite_number(value, "heuristic input numbers")
