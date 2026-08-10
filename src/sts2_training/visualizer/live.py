@@ -1,148 +1,126 @@
 from __future__ import annotations
 
-import asyncio
+import subprocess
+import sys
 import threading
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from sts2_training.visualizer.core import EventStore
+from sts2_training.visualizer.core import EventStore, JsonlLogReader, ReplayLogError
 
 
-class EventWriter(Protocol):
-    def __call__(self, event: Mapping[str, Any]) -> None: ...
-    def close(self) -> None: ...
+class Process(Protocol):
+    def poll(self) -> int | None: ...
 
 
-Runner = Callable[[Callable[[Mapping[str, Any]], None]], Awaitable[Any]]
-WriterFactory = Callable[[Path], EventWriter]
-
-
-@dataclass(frozen=True)
-class LiveRunConfig:
-    host: str = "127.0.0.1"
-    port: int = 8765
-    connect_timeout_s: float = 5.0
-    character_id: str = "IRONCLAD"
-    ascension: int = 0
-    seed: int | None = None
-    decision_timeout_s: float = 30.0
-    max_decisions: int | None = None
-    search_mode: str | None = None
-    beam_max_depth: int | None = None
-
-
-class _FanoutLogger:
-    def __init__(self, store: EventStore, writer: EventWriter) -> None:
-        self._store = store
-        self._writer = writer
-
-    def __call__(self, event: Mapping[str, Any]) -> None:
-        # JsonlSelectionLogger adds logged_at to its private copy. Stamp the fanout
-        # record first so the live browser and persisted replay see the same timestamp.
-        record = dict(event)
-        record.setdefault(
-            "logged_at",
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        )
-        # Keep the live display useful even when persistence fails. SelectionAudit
-        # already treats logger failures as best-effort and must not alter gameplay.
-        self._store.append(record)
-        self._writer(record)
+ProcessFactory = Callable[[Sequence[str]], Process]
 
 
 class LiveRunController:
-    """Own one visualized Whole Run and expose thread-safe lifecycle status."""
+    """Launch the existing Whole Run CLI and tail its JSONL selection log.
+
+    Run composition intentionally stays in ``sts2_training.runner.start_new_run``.
+    The visualizer only starts that entry point, reads the resulting JSONL, and exposes
+    lifecycle state to the HTTP layer.
+    """
 
     def __init__(
         self,
         *,
         store: EventStore,
-        config: LiveRunConfig,
         log_path: str | Path,
-        runner: Runner | None = None,
-        writer_factory: WriterFactory | None = None,
+        runner_args: Sequence[str] = (),
+        process_factory: ProcessFactory | None = None,
     ) -> None:
         self.store = store
-        self.config = config
         self.log_path = Path(log_path)
-        self._runner = runner or self._default_runner
-        self._writer_factory = writer_factory or self._default_writer_factory
+        self.runner_args = tuple(_normalize_runner_args(runner_args))
+        if "--selection-log" in self.runner_args:
+            raise ValueError("runner_args must not include --selection-log; visualizer owns the live log path")
+        self._process_factory = process_factory or self._default_process_factory
+        self._reader = JsonlLogReader(self.log_path)
         self._lock = threading.RLock()
-        self._thread: threading.Thread | None = None
+        self._process: Process | None = None
         self._state = "idle"
         self._error: str | None = None
         self._result: Any = None
 
     @staticmethod
-    def _default_writer_factory(path: Path) -> EventWriter:
-        from sts2_training.selection_log import JsonlSelectionLogger
+    def _default_process_factory(command: Sequence[str]) -> Process:
+        return subprocess.Popen(list(command))
 
-        return JsonlSelectionLogger(path, append=False)
-
-    async def _default_runner(self, event_logger: Callable[[Mapping[str, Any]], None]) -> Any:
-        from sts2_training.api import AsyncTrainingApiClient, TcpConnection
-        from sts2_training.runner.start_new_run import start_new_run
-
-        connection = TcpConnection(
-            host=self.config.host,
-            port=self.config.port,
-            connect_timeout_s=self.config.connect_timeout_s,
-        )
-        async with AsyncTrainingApiClient(connection, selection_logger=event_logger) as client:
-            return await start_new_run(
-                client,
-                character_id=self.config.character_id,
-                ascension=self.config.ascension,
-                seed=self.config.seed,
-                decision_timeout_s=self.config.decision_timeout_s,
-                max_decisions=self.config.max_decisions,
-                search_mode=self.config.search_mode,
-                beam_max_depth=self.config.beam_max_depth,
-            )
+    @property
+    def command(self) -> list[str]:
+        return [
+            sys.executable,
+            "-m",
+            "sts2_training.runner.start_new_run",
+            *self.runner_args,
+            "--selection-log",
+            str(self.log_path),
+        ]
 
     def start(self) -> bool:
         with self._lock:
             if self._state != "idle":
                 return False
-            self._state = "running"
-            self._thread = threading.Thread(
-                target=self._thread_main,
-                name="sts2-visualizer-live-run",
-                daemon=True,
-            )
-            self._thread.start()
-            return True
-
-    def _thread_main(self) -> None:
-        writer: EventWriter | None = None
-        try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            writer = self._writer_factory(self.log_path)
-            result = asyncio.run(self._runner(_FanoutLogger(self.store, writer)))
-        except BaseException as exc:  # noqa: BLE001 - surface runner failure in the UI
-            with self._lock:
+            # Remove stale replay data before handing the path to the runner. The
+            # runner's JsonlSelectionLogger also opens with append=False.
+            self.log_path.write_bytes(b"")
+            self.store.clear()
+            self._reader.reset()
+            try:
+                self._process = self._process_factory(self.command)
+            except BaseException as exc:  # noqa: BLE001 - surface launch failure in UI
                 self._state = "failed"
                 self._error = f"{type(exc).__name__}: {exc}"
-            return
-        finally:
-            if writer is not None:
-                try:
-                    writer.close()
-                except Exception as exc:  # noqa: BLE001
-                    with self._lock:
-                        if self._error is None:
-                            self._state = "failed"
-                            self._error = f"LogCloseError: {type(exc).__name__}: {exc}"
+                return True
+            self._state = "running"
+            return True
 
+    def refresh(self) -> None:
         with self._lock:
-            if self._state != "failed":
+            if self._state not in {"running", "completed", "failed"}:
+                return
+            if self._state == "failed" and self._process is None:
+                return
+
+            try:
+                for record in self._reader.poll(final=False):
+                    self.store.append(record)
+            except ReplayLogError as exc:
+                self._state = "failed"
+                self._error = str(exc)
+                return
+
+            if self._process is None:
+                return
+            exit_code = self._process.poll()
+            if exit_code is None:
+                return
+
+            # One final read accepts a valid final JSON object even if an external
+            # writer omitted the trailing newline. JsonlSelectionLogger normally
+            # writes a newline, but this keeps the reader useful for generic logs.
+            try:
+                for record in self._reader.poll(final=True):
+                    self.store.append(record)
+            except ReplayLogError as exc:
+                self._state = "failed"
+                self._error = str(exc)
+                return
+
+            self._result = {"exit_code": exit_code}
+            if exit_code == 0:
                 self._state = "completed"
-                self._result = _result_summary(result)
+            else:
+                self._state = "failed"
+                self._error = f"runner exited with code {exit_code}"
 
     def status(self) -> dict[str, Any]:
+        self.refresh()
         with self._lock:
             return {
                 "state": self._state,
@@ -152,17 +130,9 @@ class LiveRunController:
                 "event_count": len(self.store),
             }
 
-    def join(self, timeout: float | None = None) -> None:
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout)
 
-
-def _result_summary(result: Any) -> Any:
-    if isinstance(result, Mapping):
-        return dict(result)
-    fields = {}
-    for name in ("instance_id", "decisions_made", "elapsed_s", "final_dto"):
-        if hasattr(result, name):
-            fields[name] = getattr(result, name)
-    return fields or repr(result)
+def _normalize_runner_args(args: Sequence[str]) -> list[str]:
+    normalized = list(args)
+    if normalized and normalized[0] == "--":
+        normalized.pop(0)
+    return normalized
