@@ -36,9 +36,30 @@ def test_replay_mode_exposes_canonical_frames_and_run_terminal_record(tmp_path: 
                         "current_block": 5,
                         "current_energy": 2,
                         "money": 123,
+                        "statuses": [{"name": "Weak"}],
+                        "powers": [
+                            {
+                                "power_id": "strength",
+                                "display_name": "Strength",
+                                "amount": 3,
+                                "description": "Deal more attack damage",
+                            }
+                        ],
                     },
                     "monsters": [
-                        {"monster_id": "CULTIST", "hp": 42, "max_hp": 48, "next_move": "attack"}
+                        {
+                            "monster_id": "CULTIST",
+                            "hp": 42,
+                            "max_hp": 48,
+                            "next_move": "attack",
+                            "powers": {
+                                "Ritual": 5,
+                                "Vulnerable": {
+                                    "amount": 2,
+                                    "description": "Take more attack damage",
+                                },
+                            },
+                        }
                     ],
                     "cards_in_hand": [
                         {"card_id": "strike", "display_name": "Strike", "energy_cost": 1, "text": "Deal damage"}
@@ -89,9 +110,34 @@ def test_replay_mode_exposes_canonical_frames_and_run_terminal_record(tmp_path: 
             "max_hp": 80,
             "block": 5,
             "intent": None,
-            "statuses": [],
+            "statuses": ["Weak"],
+            "powers": [
+                {
+                    "id": "strength",
+                    "name": "Strength",
+                    "amount": 3,
+                    "description": "Deal more attack damage",
+                    "type": None,
+                }
+            ],
         }
         assert selection["frame"]["enemies"][0]["name"] == "CULTIST"
+        assert selection["frame"]["enemies"][0]["powers"] == [
+            {
+                "id": "Ritual",
+                "name": "Ritual",
+                "amount": 5,
+                "description": None,
+                "type": None,
+            },
+            {
+                "id": "Vulnerable",
+                "name": "Vulnerable",
+                "amount": 2,
+                "description": "Take more attack damage",
+                "type": None,
+            },
+        ]
         assert selection["frame"]["hand"][0]["name"] == "Strike"
         assert selection["frame"]["resources"]["gold"] == 123
         assert selection["frame"]["resources"]["floor"] == 7
@@ -102,6 +148,7 @@ def test_replay_mode_exposes_canonical_frames_and_run_terminal_record(tmp_path: 
         assert terminal["frame_source"] == "final_dto"
         assert terminal["phase"] == "run_terminal"
         assert terminal["frame"]["outcome"] == "run_victory"
+        assert terminal["frame"]["player"]["powers"] == []
         assert "before" not in terminal and "after" not in terminal
     finally:
         server.shutdown()
