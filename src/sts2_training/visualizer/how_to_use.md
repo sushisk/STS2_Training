@@ -1,7 +1,7 @@
 # Log visualizer
 
-The visualizer turns the runner's JSONL run log into a local, browser-based combat view. It
-intentionally ships with no frontend/runtime dependency: the Python process serves a
+The visualizer turns the runner's JSONL run event log into a local, browser-based combat view.
+It intentionally ships with no frontend/runtime dependency: the Python process serves a
 self-contained HTML/CSS/JS page from the standard library HTTP server.
 
 The visual language follows Slay the Spire 2 combat layout (dark dungeon field, compact top
@@ -12,14 +12,29 @@ panels so it does not obscure the board.
 Both modes use the same input boundary:
 
 ```text
-Runner -> JSONL run log -> Visualizer reader -> present_event -> Browser
+Runner -> JSONL run event log -> JsonlLogReader -> present_event -> Browser
 ```
 
-The log contains the existing per-selection audit records and, on every successful
-`start_new_run --selection-log`, one final `run_result` record with `instance_id`,
+The run-log contract contains the existing per-selection audit records and, on every
+successful `start_new_run --run-log`, one final `run_result` record with `instance_id`,
 `decisions_made`, `elapsed_s`, `outcome`, and `final_dto`. The final record is written even
 when the run was already terminal before its first selection, so a zero-selection run is
 still complete and replayable.
+
+`RunEventLogger` is the runner-facing logging abstraction. `JsonlRunEventLogger` is the JSONL
+implementation used by `start_new_run`; the existing `JsonlSelectionLogger` and
+`--selection-log` name remain supported for backward compatibility.
+
+The visualizer implementation keeps its main responsibilities separate:
+
+```text
+store.py         EventStore
+log_reader.py    JSONL parsing and incremental tailing
+presentation.py  DTO -> canonical browser View Model
+```
+
+`core.py` only re-exports those APIs for backward compatibility. New code imports the focused
+modules directly.
 
 `present_event` is the only DTO-to-browser adapter. It converts record-specific DTO shapes
 into a canonical browser View Model:
@@ -44,7 +59,7 @@ final line buffered until the next poll.
 
 Live mode does not construct an API client or duplicate Whole Run configuration. Pressing
 **START RUN** launches the existing `sts2_training.runner.start_new_run` CLI as a subprocess,
-with its arguments passed through unchanged and `--selection-log` supplied by the visualizer.
+with its arguments passed through unchanged and `--run-log` supplied by the visualizer.
 
 Start STS2_RL first, then start the visualizer. Put runner arguments after `--`:
 
@@ -62,7 +77,8 @@ starts that entry point and tails the file, so changes to runner defaults do not
 second set of visualizer options.
 
 `--log` is optional; live mode otherwise creates a timestamped file under `data/visualizer/`.
-Do not pass `--selection-log` after `--`; that path is managed by the visualizer.
+Do not pass `--run-log` or its legacy alias `--selection-log` after `--`; that path is managed
+by the visualizer.
 
 The runner can also produce a visualizable log without the visualizer:
 
@@ -70,12 +86,14 @@ The runner can also produce a visualizable log without the visualizer:
 python -m sts2_training.runner.start_new_run \
   --host 127.0.0.1 --port 8765 \
   --character-id IRONCLAD \
-  --selection-log data/runs/ironclad.jsonl
+  --run-log data/runs/ironclad.jsonl
 ```
+
+For existing scripts, `--selection-log data/runs/ironclad.jsonl` is an equivalent alias.
 
 ## Replay mode
 
-Replay any completed run/selection JSONL without STS2_RL running:
+Replay any completed run-event JSONL without STS2_RL running:
 
 ```bash
 python -m sts2_training.visualizer replay data/self_play/<run>.jsonl
