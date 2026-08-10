@@ -33,13 +33,15 @@ def _pick(value: Mapping[str, Any], paths: Sequence[str], default: Any = None) -
 
 
 def _masked_dto(container: Any) -> dict[str, Any]:
-    value = _mapping(container).get("masked_emulator_dto")
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(container, Mapping):
+        return {}
+    return _mapping(container.get("masked_emulator_dto"))
 
 
 def _status_label(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return _pick(value, ("name", "display_name", "id", "type"), deepcopy(dict(value)))
+        label = _pick(value, ("name", "display_name", "id", "type"))
+        return deepcopy(dict(value)) if label is None else label
     return deepcopy(value)
 
 
@@ -171,20 +173,23 @@ def _selected_action(selected_id: str | None, selection_dto: Mapping[str, Any]) 
     return _action_view({"action_id": selected_id})
 
 
-def _frame_input(record: Mapping[str, Any]) -> tuple[dict[str, Any], str, str]:
+def _frame_input(
+    record: Mapping[str, Any],
+    *,
+    received_dto: Mapping[str, Any],
+    result_dto: Mapping[str, Any],
+    operation: Any,
+) -> tuple[dict[str, Any], str, str]:
     final_dto = record.get("final_dto")
     if isinstance(final_dto, Mapping):
         return deepcopy(dict(final_dto)), "final_dto", "run_terminal"
 
-    received = _masked_dto(record.get("received"))
-    if received:
-        operation = _mapping(record.get("request")).get("operation")
+    if received_dto:
         phase = "beam_explore" if operation == "emulate_actions" else "selection"
-        return received, "received.masked_emulator_dto", phase
+        return dict(received_dto), "received.masked_emulator_dto", phase
 
-    result = _masked_dto(record.get("result"))
-    if result:
-        return result, "result.masked_emulator_dto", "result"
+    if result_dto:
+        return dict(result_dto), "result.masked_emulator_dto", "result"
     return {}, "none", "unknown"
 
 
@@ -198,9 +203,15 @@ def present_event(index: int, record: Mapping[str, Any]) -> dict[str, Any]:
     received = _mapping(record.get("received"))
     result = _mapping(record.get("result"))
     request = _mapping(record.get("request"))
-    selection_dto = _masked_dto(received)
-    frame_dto, frame_source, phase = _frame_input(record)
+    received_dto = _masked_dto(received)
+    result_dto = _masked_dto(result)
     operation = request.get("operation")
+    frame_dto, frame_source, phase = _frame_input(
+        record,
+        received_dto=received_dto,
+        result_dto=result_dto,
+        operation=operation,
+    )
     branch_id = request.get("branch_id") or received.get("branch_id") or result.get("branch_id")
     selected_action_id = record.get("selected_action_id")
     if not isinstance(selected_action_id, str) or not selected_action_id:
@@ -221,7 +232,7 @@ def present_event(index: int, record: Mapping[str, Any]) -> dict[str, Any]:
         "frame_source": frame_source,
         "frame": _frame_view(frame_dto),
         "selected_action_id": selected_action_id,
-        "selected_action": _selected_action(selected_action_id, selection_dto),
+        "selected_action": _selected_action(selected_action_id, received_dto),
         "client_error": deepcopy(record.get("client_error")),
         "room_result": deepcopy(record.get("room_result")),
         "run_result": deepcopy(record.get("run_result")),
