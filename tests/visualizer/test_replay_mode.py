@@ -5,8 +5,9 @@ import json
 import threading
 from pathlib import Path
 
-from sts2_training.visualizer.core import EventStore, read_jsonl
+from sts2_training.visualizer.log_reader import read_jsonl
 from sts2_training.visualizer.server import VisualizerApp, make_server
+from sts2_training.visualizer.store import EventStore
 
 
 def _request(server, path: str) -> tuple[int, dict]:
