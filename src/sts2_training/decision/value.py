@@ -37,6 +37,12 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "defeat_penalty": -100_000.0,
 }
 
+# Generic Buff/Debuff type fallback deliberately saturates because Power.amount
+# is not one universal quantity in STS2: depending on the Power it can represent
+# intensity, duration, a counter, or another semantic. Large unknown amounts must
+# not dominate beam pruning merely because they share the same numeric field.
+_GENERIC_POWER_AMOUNT_CAP = 3.0
+
 # Intentionally empty until STS2 canonical power IDs and relative values are
 # verified. Callers can provide `power_values={power_id: value_per_stack}` now;
 # later this can be populated from measured rollout / ablation data without
@@ -66,6 +72,16 @@ class ValueModel:
 
 
 class HeuristicValueFunction(ValueModel):
+    """Hand-written ValueModel used for lightweight beam pruning.
+
+    ``power_values`` uses a holder-relative sign convention: a positive value
+    means the Power is beneficial to whichever actor owns it, while a negative
+    value means harmful. Player contributions are added and living-enemy
+    contributions are subtracted. Named values multiply the Power's raw
+    absolute ``amount`` (or 1 when ``amount`` is absent); unlike the generic
+    Buff/Debuff fallback, this semantic layer is intentionally not saturated.
+    """
+
     def __init__(
         self,
         weights: Mapping[str, float] | None = None,
@@ -189,9 +205,14 @@ def _typed_power_score(
             raise ValueError(
                 f"heuristic input {field_name}[{index}].type must be a string"
             )
-        # Some non-stacking powers may omit amount entirely. Treat presence as
-        # one effective stack rather than silently valuing the power at zero.
-        amount = abs(_num(power.get("amount"), default=1.0))
+        # Missing amount still means the Power is present. For the generic type
+        # fallback, saturate large amounts because amount may be duration/counter
+        # rather than linear combat strength; Power-specific semantics belong in
+        # the named correction layer below.
+        amount = min(
+            abs(_num(power.get("amount"), default=1.0)),
+            _GENERIC_POWER_AMOUNT_CAP,
+        )
         if power_type == "Buff":
             score += amount
         elif power_type == "Debuff":
@@ -276,4 +297,15 @@ def _validated_finite_number(value: Any, label: str) -> float:
 def _num(value: Any, *, default: float = 0.0) -> float:
     if value is None:
         return default
-    return _validated_finite_number(value, "heuristic input numbers")
+    # Keep the established DTO-validation message stable: several caller-facing
+    # regression tests intentionally assert this contract. Configuration values
+    # use the more specific labels from `_validated_finite_number` instead.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("heuristic input numbers must be finite numeric values")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ValueError("heuristic input numbers must be finite numeric values") from exc
+    if not math.isfinite(number):
+        raise ValueError("heuristic input numbers must be finite numeric values")
+    return number
