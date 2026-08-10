@@ -83,21 +83,25 @@ class CombatDecisionEngine:
         instance_id: str,
         *,
         timeout_s: float,
+        decision: Mapping[str, Any] | None = None,
     ) -> DecisionOutcome:
         deadline = _deadline_from_timeout(timeout_s)
 
-        raw_decision = await self._client.get_decision(
-            instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
-        )
+        if decision is None:
+            raw_decision = await self._client.get_decision(
+                instance_id, ROOT_BRANCH_ID, timeout_s=timeout_s
+            )
+        else:
+            raw_decision = decision
         if not isinstance(raw_decision, Mapping):
             raise RuntimeError("get_decision must return a mapping")
-        decision: JsonObject = dict(raw_decision)
+        current_decision: JsonObject = dict(raw_decision)
 
-        decision_point_id = decision.get("decision_point_id")
+        decision_point_id = current_decision.get("decision_point_id")
         if not isinstance(decision_point_id, str) or not decision_point_id:
             raise RuntimeError("get_decision returned an invalid decision_point_id")
 
-        dto = decision.get("masked_emulator_dto")
+        dto = current_decision.get("masked_emulator_dto")
         if not isinstance(dto, Mapping):
             raise RuntimeError("get_decision returned an invalid masked_emulator_dto")
 
@@ -133,19 +137,19 @@ class CombatDecisionEngine:
             raise RuntimeError("get_decision returned invalid legal_actions")
 
         if not legal_actions:
-            return DecisionOutcome(decision, None, "none", None)
+            return DecisionOutcome(current_decision, None, "none", None)
         if len(legal_actions) == 1:
             only_action_id = legal_actions[0].get("action_id")
             if not isinstance(only_action_id, str) or not only_action_id:
                 raise RuntimeError("available legal action is missing action_id")
-            return DecisionOutcome(decision, only_action_id, "forced_single_action", None)
+            return DecisionOutcome(current_decision, only_action_id, "forced_single_action", None)
 
         result: BeamSearchResult | None = None
         remaining = deadline - time.monotonic()
         if remaining > 0:
-            result = await self._beam.search(instance_id, decision, timeout_s=remaining)
+            result = await self._beam.search(instance_id, current_decision, timeout_s=remaining)
         if result is not None and _beam_result_is_actionable(result):
-            return DecisionOutcome(decision, result.best_root_action_id, "beam_search", result)
+            return DecisionOutcome(current_decision, result.best_root_action_id, "beam_search", result)
 
         chosen = self._fallback.select(legal_actions)
         if not isinstance(chosen, Mapping):
@@ -158,13 +162,14 @@ class CombatDecisionEngine:
             or chosen_action_id not in available_ids
         ):
             raise RuntimeError("fallback selector must return an available legal action")
-        return DecisionOutcome(decision, chosen_action_id, "heuristic_fallback", result)
+        return DecisionOutcome(current_decision, chosen_action_id, "heuristic_fallback", result)
 
     async def decide_and_commit(
         self,
         instance_id: str,
         *,
         timeout_s: float,
+        decision: Mapping[str, Any] | None = None,
     ) -> JsonObject:
         deadline = _deadline_from_timeout(timeout_s)
         remaining = deadline - time.monotonic()
@@ -173,6 +178,7 @@ class CombatDecisionEngine:
         outcome = await self.decide(
             instance_id,
             timeout_s=remaining,
+            decision=decision,
         )
         if outcome.chosen_action_id is None:
             raise NoAvailableActionError(
