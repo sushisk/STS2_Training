@@ -61,15 +61,15 @@ class _FakeClient:
 
 
 class WholeRunSparseActionIdTest(unittest.IsolatedAsyncioTestCase):
-    async def test_whole_run_sparse_public_id_is_committed_by_position(self) -> None:
+    async def test_whole_run_sparse_public_id_is_committed_unchanged(self) -> None:
         client = _FakeClient(instance_type="whole_run", emulate_supported=False)
         engine = CombatDecisionEngine(client, fallback_selector=_ChooseSecond())
 
         await engine.decide_and_commit("inst-001", timeout_s=1.0)
 
-        # STS2_RL WholeRunInstance currently resolves the wire token as an index into
-        # legal_actions_raw. Public action_id "3" is the second item, so send "1".
-        self.assertEqual(client.committed_action_id, "1")
+        # STS2_RL #10 resolves the public token by ActionId value, so Training sends
+        # the sparse opaque ID exactly as published rather than translating to ordinal 1.
+        self.assertEqual(client.committed_action_id, "3")
 
     async def test_combat_keeps_public_action_id_unchanged(self) -> None:
         client = _FakeClient(instance_type="combat", emulate_supported=True)
@@ -79,7 +79,7 @@ class WholeRunSparseActionIdTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.committed_action_id, "3")
 
-    async def test_missing_emulate_capability_alone_does_not_enable_ordinal_commit(self) -> None:
+    async def test_missing_emulate_capability_alone_does_not_change_commit_id(self) -> None:
         client = _FakeClient(instance_type="future_mode", emulate_supported=False)
         engine = CombatDecisionEngine(client, fallback_selector=_ChooseSecond())
 
