@@ -13,10 +13,9 @@ class EventStore:
         self._lock = threading.RLock()
         self._records: list[dict[str, Any]] = [deepcopy(dict(record)) for record in records]
 
-    def append(self, record: Mapping[str, Any]) -> int:
+    def append(self, record: Mapping[str, Any]) -> None:
         with self._lock:
             self._records.append(deepcopy(dict(record)))
-            return len(self._records) - 1
 
     def clear(self) -> None:
         with self._lock:
