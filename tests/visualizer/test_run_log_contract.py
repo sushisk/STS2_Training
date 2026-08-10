@@ -6,10 +6,12 @@ import importlib
 import json
 from pathlib import Path
 
+from sts2_training.run_log import JsonlRunEventLogger
 from sts2_training.runner.episode import EpisodeResult
+from sts2_training.selection_log import JsonlSelectionLogger
 
 
-def test_start_new_run_selection_log_always_appends_run_result(monkeypatch, tmp_path: Path) -> None:
+def test_start_new_run_run_log_always_appends_run_result(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("sts2_training.runner.start_new_run")
     log_path = tmp_path / "zero-selection.jsonl"
     expected = EpisodeResult(
@@ -48,7 +50,7 @@ def test_start_new_run_selection_log_always_appends_run_result(monkeypatch, tmp_
         max_decisions=None,
         search_mode=None,
         beam_depth=None,
-        selection_log=log_path,
+        run_log=log_path,
     )
 
     result = asyncio.run(module._run(args))  # noqa: SLF001
@@ -63,3 +65,16 @@ def test_start_new_run_selection_log_always_appends_run_result(monkeypatch, tmp_
     assert record["outcome"] == "run_victory"
     assert record["final_dto"] == {"run_terminal": True, "outcome": "run_victory"}
     assert isinstance(record["logged_at"], str) and record["logged_at"].endswith("Z")
+
+
+def test_selection_log_cli_name_remains_a_backward_compatible_alias() -> None:
+    module = importlib.import_module("sts2_training.runner.start_new_run")
+    path = Path("legacy-selection-name.jsonl")
+    args = module._parse_args(  # noqa: SLF001
+        ["--character-id", "IRONCLAD", "--selection-log", str(path)]
+    )
+    assert args.run_log == path
+
+
+def test_run_log_writer_keeps_selection_logger_compatibility() -> None:
+    assert issubclass(JsonlRunEventLogger, JsonlSelectionLogger)
