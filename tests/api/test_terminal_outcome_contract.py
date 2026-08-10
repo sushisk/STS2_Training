@@ -104,6 +104,7 @@ def test_terminal_markers_are_mutually_exclusive() -> None:
         {"terminal": True, "outcome": "victory", "legal_actions": []},
         {"terminal": True, "outcome": "defeat", "legal_actions": []},
         {"run_terminal": True, "outcome": "victory"},
+        {"run_terminal": True, "outcome": "run_victory"},
         {
             "run_terminal": True,
             "outcome": "defeat",
@@ -114,7 +115,16 @@ def test_terminal_markers_are_mutually_exclusive() -> None:
         },
     ],
 )
-def test_terminal_decision_accepts_victory_or_defeat(masked: dict) -> None:
+def test_terminal_decision_accepts_valid_outcome(masked: dict) -> None:
     contract = ApiContract(client_session_id="session-a")
 
     contract._validate_decision_payload(_response(masked))  # noqa: SLF001
+
+
+def test_combat_terminal_rejects_run_victory() -> None:
+    contract = ApiContract(client_session_id="session-a")
+
+    with pytest.raises(ApiProtocolError, match="outcome"):
+        contract._validate_decision_payload(  # noqa: SLF001
+            _response({"terminal": True, "outcome": "run_victory", "legal_actions": []})
+        )

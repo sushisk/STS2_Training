@@ -32,7 +32,9 @@ _BRANCH_STATUS_VALUES = frozenset(
 # returns only after every Branch dispatched for the batch is terminal. queued/running
 # are therefore invalid per-item response states for this operation.
 _EMULATE_ACTIONS_BRANCH_STATUSES = frozenset({"completed", "partial", "faulted"})
-_TERMINAL_OUTCOMES = frozenset({"victory", "defeat"})
+_COMBAT_TERMINAL_OUTCOMES = frozenset({"victory", "defeat"})
+# Whole-run completion has a distinct victory token while sharing combat defeat semantics.
+_RUN_TERMINAL_OUTCOMES = _COMBAT_TERMINAL_OUTCOMES | {"run_victory"}
 
 
 class ApiProtocolError(RuntimeError):
@@ -480,9 +482,13 @@ class ApiContract:
 
         if is_terminal:
             outcome = masked.get("outcome")
-            if not isinstance(outcome, str) or outcome not in _TERMINAL_OUTCOMES:
+            valid_outcomes = (
+                _RUN_TERMINAL_OUTCOMES if run_terminal else _COMBAT_TERMINAL_OUTCOMES
+            )
+            if not isinstance(outcome, str) or outcome not in valid_outcomes:
                 raise ApiProtocolError(
-                    "terminal masked_emulator_dto.outcome must be 'victory' or 'defeat'"
+                    "terminal masked_emulator_dto.outcome must be one of "
+                    f"{sorted(valid_outcomes)!r}"
                 )
         elif "outcome" in masked:
             raise ApiProtocolError(
