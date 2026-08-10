@@ -1,0 +1,119 @@
+# Log visualizer
+
+The visualizer turns the runner's JSONL run event log into a local, browser-based combat view.
+It intentionally ships with no frontend/runtime dependency: the Python process serves a
+self-contained HTML/CSS/JS page from the standard library HTTP server.
+
+The visual language follows Slay the Spire 2 combat layout (dark dungeon field, compact top
+resource bar, player/enemy health bars, bottom fanned hand, energy gem, highlighted selected
+card/action) without bundling or copying game assets. Training-only metadata is kept in side
+panels so it does not obscure the board.
+
+Both modes use the same input boundary:
+
+```text
+Runner -> JSONL run event log -> JsonlLogReader -> present_event -> Browser
+```
+
+The run-log contract contains the existing per-selection audit records and, on every
+successful `start_new_run --run-log`, one final `run_result` record with `instance_id`,
+`decisions_made`, `elapsed_s`, `outcome`, and `final_dto`. The final record is written even
+when the run was already terminal before its first selection, so a zero-selection run is
+still complete and replayable.
+
+`RunEventLogger` is the runner-facing logging abstraction. `JsonlRunEventLogger` is the JSONL
+implementation used by `start_new_run`; the existing `JsonlSelectionLogger` and
+`--selection-log` name remain supported for backward compatibility.
+
+The visualizer implementation keeps its main responsibilities separate:
+
+```text
+store.py         EventStore
+log_reader.py    JSONL parsing and incremental tailing
+presentation.py  DTO -> canonical browser View Model
+```
+
+`core.py` only re-exports those APIs for backward compatibility. New code imports the focused
+modules directly.
+
+`present_event` is the only DTO-to-browser adapter. It converts record-specific DTO shapes
+into a canonical browser View Model:
+
+- `frame.player`
+- `frame.enemies`
+- `frame.hand`
+- `frame.resources`
+- `frame.piles`
+- `frame.boundary` / `frame.outcome`
+- `selected_action`
+- `frame_source` and `phase`
+
+DTO aliases such as player/enemy/hand field variants are resolved only in Python. Browser
+JavaScript reads only this canonical contract. The original JSONL record remains available
+under `raw` for the inspector.
+
+Replay reads a completed JSONL file; live mode tails a growing one and keeps an unterminated
+final line buffered until the next poll.
+
+## Live mode
+
+Live mode does not construct an API client or duplicate Whole Run configuration. Pressing
+**START RUN** launches the existing `sts2_training.runner.start_new_run` CLI as a subprocess,
+with its arguments passed through unchanged and `--run-log` supplied by the visualizer.
+
+Start STS2_RL first, then start the visualizer. Put runner arguments after `--`:
+
+```bash
+python -m sts2_training.visualizer live \
+  --log data/visualizer/ironclad.jsonl \
+  -- \
+  --host 127.0.0.1 --port 8765 \
+  --character-id IRONCLAD --ascension 0
+```
+
+Open the printed URL and press **START RUN**. The normal runner owns `TcpConnection`,
+`AsyncTrainingApiClient`, all run/search defaults, and JSONL logging. The visualizer only
+starts that entry point and tails the file, so changes to runner defaults do not require a
+second set of visualizer options.
+
+`--log` is optional; live mode otherwise creates a timestamped file under `data/visualizer/`.
+Do not pass `--run-log` or its legacy alias `--selection-log` after `--`; that path is managed
+by the visualizer.
+
+The runner can also produce a visualizable log without the visualizer:
+
+```bash
+python -m sts2_training.runner.start_new_run \
+  --host 127.0.0.1 --port 8765 \
+  --character-id IRONCLAD \
+  --run-log data/runs/ironclad.jsonl
+```
+
+For existing scripts, `--selection-log data/runs/ironclad.jsonl` is an equivalent alias.
+
+## Replay mode
+
+Replay any completed run-event JSONL without STS2_RL running:
+
+```bash
+python -m sts2_training.visualizer replay data/self_play/<run>.jsonl
+```
+
+The transport bar supports play/pause, previous/next event, 0.5x-4x speed, and arbitrary
+seeking. Clicking a timeline entry jumps directly to that event. `commit_action` selections
+are visually separated from speculative `emulate_actions` branches.
+
+Selection records render the state from `received.masked_emulator_dto`; terminal run-level
+records render `final_dto`. This source is explicit in `frame_source`, rather than overloading
+a generic `before` field. Existing self-play `self_play_run_result.final_dto` records are
+handled by the same terminal-frame path.
+
+## Browser/API endpoints
+
+- `GET /` - visualizer UI
+- `GET /api/status` - mode, lifecycle, event count, log path, live runner exit/error
+- `GET /api/events?after=N` - canonical presented events after zero-based cursor `N`
+- `POST /api/live/start` - launch the configured runner CLI (live mode only, once per process)
+
+The HTTP server binds to `127.0.0.1:7878` by default. Use `--bind` / `--ui-port` to change it
+and `--no-browser` for headless environments.

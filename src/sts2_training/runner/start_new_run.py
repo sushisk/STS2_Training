@@ -7,7 +7,7 @@ Programmatic use::
 
 CLI use::
 
-    python -m sts2_training.runner.start_new_run \\
+    python -m sts2_training.runner.start_new_run \
         --host 127.0.0.1 --port 8765 --character-id IRONCLAD
 """
 
@@ -17,11 +17,13 @@ import argparse
 import asyncio
 import random
 import sys
+from pathlib import Path
 from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.run_log import JsonlRunEventLogger, RunEventLogger, run_result_event
 from sts2_training.runner._cli import add_common_arguments, configure_logging, print_result
 from sts2_training.runner.episode import EpisodeResult, start_and_run
 from sts2_training.runner.scenario import NewRunConfig
@@ -70,22 +72,44 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--character-id", required=True)
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--seed", type=int, default=None, help="omit for a fresh random seed each run")
+    parser.add_argument(
+        "--run-log",
+        "--selection-log",
+        dest="run_log",
+        type=Path,
+        default=None,
+        help=(
+            "write the complete run event stream (selection audit plus final run_result) "
+            "to this JSONL file; --selection-log is a backward-compatible alias"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 async def _run(args: argparse.Namespace) -> EpisodeResult:
     connection = TcpConnection(host=args.host, port=args.port, connect_timeout_s=args.connect_timeout)
-    async with AsyncTrainingApiClient(connection) as client:
-        return await start_new_run(
-            client,
-            character_id=args.character_id,
-            ascension=args.ascension,
-            seed=args.seed,
-            decision_timeout_s=args.decision_timeout,
-            max_decisions=args.max_decisions,
-            search_mode=args.search_mode,
-            beam_max_depth=args.beam_depth,
-        )
+    run_log_path = args.run_log
+    run_logger: RunEventLogger | None = (
+        JsonlRunEventLogger(run_log_path, append=False) if run_log_path is not None else None
+    )
+    try:
+        async with AsyncTrainingApiClient(connection, selection_logger=run_logger) as client:
+            result = await start_new_run(
+                client,
+                character_id=args.character_id,
+                ascension=args.ascension,
+                seed=args.seed,
+                decision_timeout_s=args.decision_timeout,
+                max_decisions=args.max_decisions,
+                search_mode=args.search_mode,
+                beam_max_depth=args.beam_depth,
+            )
+        if run_logger is not None:
+            run_logger(run_result_event(result))
+        return result
+    finally:
+        if run_logger is not None:
+            run_logger.close()
 
 
 def main(argv: list[str] | None = None) -> int:
