@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from sts2_training.visualizer.core import EventStore
 from sts2_training.visualizer.live import LiveRunController
 from sts2_training.visualizer.server import VisualizerApp, make_server
+from sts2_training.visualizer.store import EventStore
 
 
 class _FakeProcess:
@@ -75,8 +75,8 @@ def test_live_mode_starts_runner_cli_and_tails_only_complete_jsonl_records(tmp_p
 
     def process_factory(command: Sequence[str]) -> _FakeProcess:
         commands.append(list(command))
-        selection_log_index = command.index("--selection-log")
-        assert Path(command[selection_log_index + 1]) == log_path
+        run_log_index = command.index("--run-log")
+        assert Path(command[run_log_index + 1]) == log_path
 
         first = json.dumps(records[0], separators=(",", ":")) + "\n"
         second = json.dumps(records[1], separators=(",", ":"))
@@ -120,7 +120,8 @@ def test_live_mode_starts_runner_cli_and_tails_only_complete_jsonl_records(tmp_p
         command = commands[0]
         assert command[:3] == [sys.executable, "-m", "sts2_training.runner.start_new_run"]
         assert command[3:7] == ["--host", "127.0.0.1", "--character-id", "IRONCLAD"]
-        assert command.count("--selection-log") == 1
+        assert command.count("--run-log") == 1
+        assert "--selection-log" not in command
 
         allow_finish.set()
         deadline = time.monotonic() + 2
