@@ -86,17 +86,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _run_log_path(args: argparse.Namespace) -> Path | None:
-    path = getattr(args, "run_log", None)
-    if path is None:
-        # Compatibility for callers constructing the pre-rename Namespace directly.
-        path = getattr(args, "selection_log", None)
-    return path
-
-
 async def _run(args: argparse.Namespace) -> EpisodeResult:
     connection = TcpConnection(host=args.host, port=args.port, connect_timeout_s=args.connect_timeout)
-    run_log_path = _run_log_path(args)
+    run_log_path = args.run_log
     run_logger: RunEventLogger | None = (
         JsonlRunEventLogger(run_log_path, append=False) if run_log_path is not None else None
     )
