@@ -22,10 +22,6 @@ class EventStore:
         with self._lock:
             self._records.clear()
 
-    def snapshot(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return deepcopy(self._records)
-
     def after(self, cursor: int) -> list[tuple[int, dict[str, Any]]]:
         """Return records whose zero-based index is greater than ``cursor``."""
         with self._lock:
