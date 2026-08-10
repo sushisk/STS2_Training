@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Protocol
 
+from sts2_training.selection_log import JsonlSelectionLogger
+
 
 class RunEventLogger(Protocol):
     """Sink for the complete event stream that describes one run.
@@ -15,6 +17,15 @@ class RunEventLogger(Protocol):
     def __call__(self, event: Mapping[str, Any]) -> None: ...
 
     def close(self) -> None: ...
+
+
+class JsonlRunEventLogger(JsonlSelectionLogger):
+    """Run-log name for the backward-compatible JSONL event writer.
+
+    ``JsonlSelectionLogger`` remains available for existing callers. The runner uses
+    this name to make it explicit that the same stream now also contains run-level
+    events such as ``run_result``.
+    """
 
 
 class RunResultLike(Protocol):
@@ -37,4 +48,4 @@ def run_result_event(result: RunResultLike) -> dict[str, Any]:
     }
 
 
-__all__ = ["RunEventLogger", "run_result_event"]
+__all__ = ["JsonlRunEventLogger", "RunEventLogger", "run_result_event"]
