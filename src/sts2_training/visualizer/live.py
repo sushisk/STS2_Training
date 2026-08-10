@@ -7,7 +7,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from sts2_training.visualizer.core import EventStore, JsonlLogReader, ReplayLogError
+from sts2_training.visualizer.log_reader import JsonlLogReader, ReplayLogError
+from sts2_training.visualizer.store import EventStore
 
 
 class Process(Protocol):
@@ -18,7 +19,7 @@ ProcessFactory = Callable[[Sequence[str]], Process]
 
 
 class LiveRunController:
-    """Launch the existing Whole Run CLI and tail its JSONL selection log.
+    """Launch the existing Whole Run CLI and tail its JSONL run event log.
 
     Run composition intentionally stays in ``sts2_training.runner.start_new_run``.
     The visualizer only starts that entry point, reads the resulting JSONL, and exposes
@@ -36,8 +37,10 @@ class LiveRunController:
         self.store = store
         self.log_path = Path(log_path)
         self.runner_args = tuple(_normalize_runner_args(runner_args))
-        if "--selection-log" in self.runner_args:
-            raise ValueError("runner_args must not include --selection-log; visualizer owns the live log path")
+        reserved = {"--run-log", "--selection-log"}.intersection(self.runner_args)
+        if reserved:
+            option = sorted(reserved)[0]
+            raise ValueError(f"runner_args must not include {option}; visualizer owns the live log path")
         self._process_factory = process_factory or self._default_process_factory
         self._reader = JsonlLogReader(self.log_path)
         self._lock = threading.RLock()
@@ -57,7 +60,7 @@ class LiveRunController:
             "-m",
             "sts2_training.runner.start_new_run",
             *self.runner_args,
-            "--selection-log",
+            "--run-log",
             str(self.log_path),
         ]
 
@@ -67,7 +70,7 @@ class LiveRunController:
                 return False
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             # Remove stale replay data before handing the path to the runner. The
-            # runner's JsonlSelectionLogger also opens with append=False.
+            # runner's JSONL writer also opens with append=False.
             self.log_path.write_bytes(b"")
             self.store.clear()
             self._reader.reset()
@@ -102,8 +105,7 @@ class LiveRunController:
                 return
 
             # One final read accepts a valid final JSON object even if an external
-            # writer omitted the trailing newline. JsonlSelectionLogger normally
-            # writes a newline, but this keeps the reader useful for generic logs.
+            # writer omitted the trailing newline.
             try:
                 for record in self._reader.poll(final=True):
                     self.store.append(record)
