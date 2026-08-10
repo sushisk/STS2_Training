@@ -5,6 +5,12 @@ import unittest
 from sts2_training.decision.value import DEFAULT_WEIGHTS, HeuristicValueFunction
 
 
+def _single_feature_weights(name: str, value: float = 1.0) -> dict[str, float]:
+    weights = {key: 0.0 for key in DEFAULT_WEIGHTS}
+    weights[name] = value
+    return weights
+
+
 class HeuristicValueFunctionTest(unittest.TestCase):
     def test_victory_dominates_everything(self) -> None:
         value_fn = HeuristicValueFunction()
@@ -18,11 +24,7 @@ class HeuristicValueFunctionTest(unittest.TestCase):
     def test_defeat_is_worse_than_any_nonterminal_state(self) -> None:
         value_fn = HeuristicValueFunction()
         defeat = {"outcome": "defeat", "hp": 0, "maxHp": 100}
-        bad_nonterminal = {
-            "hp": 1,
-            "maxHp": 100,
-            "enemies": [{"hp": 50, "maxHp": 50, "isAlive": True}],
-        }
+        bad_nonterminal = {"hp": 1, "maxHp": 100, "enemies": [{"hp": 50, "maxHp": 50, "isAlive": True}]}
 
         self.assertLess(value_fn.evaluate(defeat), value_fn.evaluate(bad_nonterminal))
 
@@ -40,20 +42,8 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
     def test_combat_terminal_outcome_is_honored(self) -> None:
         value_fn = HeuristicValueFunction()
-        victory = {
-            "legal_actions": [],
-            "terminal": True,
-            "outcome": "victory",
-            "hp": 4,
-            "maxHp": 80,
-        }
-        defeat = {
-            "legal_actions": [],
-            "terminal": True,
-            "outcome": "defeat",
-            "hp": 0,
-            "maxHp": 80,
-        }
+        victory = {"legal_actions": [], "terminal": True, "outcome": "victory", "hp": 4, "maxHp": 80}
+        defeat = {"legal_actions": [], "terminal": True, "outcome": "defeat", "hp": 0, "maxHp": 80}
         healthy_nonterminal = {"hp": 80, "maxHp": 80, "enemies": []}
 
         self.assertEqual(value_fn.evaluate(victory), DEFAULT_WEIGHTS["victory_bonus"])
@@ -92,14 +82,7 @@ class HeuristicValueFunctionTest(unittest.TestCase):
             "hp": 50,
             "maxHp": 50,
             "block": 0,
-            "enemies": [
-                {
-                    "hp": 10,
-                    "maxHp": 10,
-                    "isAlive": True,
-                    "intent": {"attackDamage": 20, "attackRepeats": 1},
-                }
-            ],
+            "enemies": [{"hp": 10, "maxHp": 10, "isAlive": True, "intent": {"attackDamage": 20, "attackRepeats": 1}}],
         }
         blocked = {**base, "block": 20}
 
@@ -107,16 +90,7 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
     def test_block_is_consumed_once_across_multiple_enemy_attacks(self) -> None:
         value_fn = HeuristicValueFunction(
-            weights={
-                "player_hp_ratio": 0.0,
-                "player_block": 0.0,
-                "enemy_hp_ratio": 0.0,
-                "predicted_incoming_damage": -1.0,
-                "enemies_alive": 0.0,
-                "buff_debuff_score": 0.0,
-                "enemy_buff_debuff_score": 0.0,
-                "named_power_score": 0.0,
-            }
+            weights=_single_feature_weights("predicted_incoming_damage", -1.0)
         )
         dto = {
             "hp": 50,
@@ -130,24 +104,13 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertEqual(value_fn.evaluate(dto), -10.0)
 
-    def test_player_buff_is_better_than_same_state_without_power(self) -> None:
+    def test_player_power_type_direction(self) -> None:
         value_fn = HeuristicValueFunction()
         base = {"hp": 50, "maxHp": 50, "enemies": []}
-        buffed = {
-            **base,
-            "playerPowers": [{"id": "CONCEPT_PLAYER_BUFF", "type": "Buff", "amount": 2}],
-        }
+        buffed = {**base, "playerPowers": [{"type": "Buff", "amount": 2}]}
+        debuffed = {**base, "playerPowers": [{"type": "Debuff", "amount": 2}]}
 
         self.assertGreater(value_fn.evaluate(buffed), value_fn.evaluate(base))
-
-    def test_player_debuff_is_worse_than_same_state_without_power(self) -> None:
-        value_fn = HeuristicValueFunction()
-        base = {"hp": 50, "maxHp": 50, "enemies": []}
-        debuffed = {
-            **base,
-            "playerPowers": [{"id": "CONCEPT_PLAYER_DEBUFF", "type": "Debuff", "amount": 2}],
-        }
-
         self.assertLess(value_fn.evaluate(debuffed), value_fn.evaluate(base))
 
     def test_enemy_buff_is_bad_and_enemy_debuff_is_good(self) -> None:
@@ -156,21 +119,11 @@ class HeuristicValueFunctionTest(unittest.TestCase):
         neutral = {"hp": 50, "maxHp": 50, "enemies": [base_enemy]}
         buffed_enemy = {
             **neutral,
-            "enemies": [
-                {
-                    **base_enemy,
-                    "powers": [{"id": "CONCEPT_ENEMY_BUFF", "type": "Buff", "amount": 2}],
-                }
-            ],
+            "enemies": [{**base_enemy, "powers": [{"id": "BUFF", "type": "Buff", "amount": 2}]}],
         }
         debuffed_enemy = {
             **neutral,
-            "enemies": [
-                {
-                    **base_enemy,
-                    "powers": [{"id": "CONCEPT_ENEMY_DEBUFF", "type": "Debuff", "amount": 2}],
-                }
-            ],
+            "enemies": [{**base_enemy, "powers": [{"id": "DEBUFF", "type": "Debuff", "amount": 2}]}],
         }
 
         self.assertLess(value_fn.evaluate(buffed_enemy), value_fn.evaluate(neutral))
@@ -178,24 +131,14 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
     def test_dead_enemy_powers_do_not_affect_value(self) -> None:
         value_fn = HeuristicValueFunction()
-        base = {
-            "hp": 50,
-            "maxHp": 50,
-            "enemies": [{"hp": 0, "maxHp": 20, "isAlive": False}],
-        }
-        dead_enemy_with_power = {
+        base_enemy = {"hp": 0, "maxHp": 20, "isAlive": False}
+        base = {"hp": 50, "maxHp": 50, "enemies": [base_enemy]}
+        powered = {
             **base,
-            "enemies": [
-                {
-                    "hp": 0,
-                    "maxHp": 20,
-                    "isAlive": False,
-                    "powers": [{"id": "CONCEPT_BUFF", "type": "Buff", "amount": 999}],
-                }
-            ],
+            "enemies": [{**base_enemy, "powers": [{"type": "Buff", "amount": 999}]}],
         }
 
-        self.assertEqual(value_fn.evaluate(dead_enemy_with_power), value_fn.evaluate(base))
+        self.assertEqual(value_fn.evaluate(powered), value_fn.evaluate(base))
 
     def test_power_without_amount_counts_as_one_effective_stack(self) -> None:
         value_fn = HeuristicValueFunction()
@@ -204,28 +147,22 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
         self.assertGreater(value_fn.evaluate(buffed), value_fn.evaluate(base))
 
+    def test_generic_power_amount_is_capped(self) -> None:
+        value_fn = HeuristicValueFunction()
+        base = {"hp": 50, "maxHp": 50, "enemies": []}
+        capped = {**base, "playerPowers": [{"type": "Buff", "amount": 3}]}
+        huge = {**base, "playerPowers": [{"type": "Buff", "amount": 999}]}
+
+        self.assertEqual(value_fn.evaluate(huge), value_fn.evaluate(capped))
+
     def test_named_power_values_add_semantic_adjustment(self) -> None:
         value_fn = HeuristicValueFunction(
-            weights={
-                "player_hp_ratio": 0.0,
-                "player_block": 0.0,
-                "enemy_hp_ratio": 0.0,
-                "predicted_incoming_damage": 0.0,
-                "enemies_alive": 0.0,
-                "buff_debuff_score": 0.0,
-                "enemy_buff_debuff_score": 0.0,
-                "named_power_score": 1.0,
-            },
-            power_values={
-                # Conceptual IDs: replace with canonical STS2 IDs after verifying
-                # the RL DTO / ID dictionary.
-                "SCALING_ENGINE": 4.0,
-                "DANGEROUS_ENEMY_AURA": 6.0,
-            },
+            weights=_single_feature_weights("named_power_score"),
+            power_values={"SCALING_ENGINE": 4.0, "DANGEROUS_ENEMY_AURA": 6.0},
         )
         dto = {
             "playerPowers": [
-                {"id": "SCALING_ENGINE", "type": "Buff", "amount": 2},
+                {"id": "SCALING_ENGINE", "type": "Buff", "amount": 10},
                 {"id": "UNKNOWN_POWER", "type": "Buff", "amount": 999},
             ],
             "enemies": [
@@ -240,9 +177,7 @@ class HeuristicValueFunctionTest(unittest.TestCase):
             ],
         }
 
-        # +8 from the player's known power, -6 from the enemy's known power.
-        # UNKNOWN_POWER contributes zero to named_power_score.
-        self.assertEqual(value_fn.evaluate(dto), 2.0)
+        self.assertEqual(value_fn.evaluate(dto), 34.0)
 
     def test_missing_fields_do_not_raise(self) -> None:
         value_fn = HeuristicValueFunction()
