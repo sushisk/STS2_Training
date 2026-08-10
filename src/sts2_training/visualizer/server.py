@@ -7,8 +7,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from sts2_training.visualizer.assets import INDEX_HTML
-from sts2_training.visualizer.core import EventStore, present_event
 from sts2_training.visualizer.live import LiveRunController
+from sts2_training.visualizer.presentation import present_event
+from sts2_training.visualizer.store import EventStore
 
 
 class VisualizerApp:
