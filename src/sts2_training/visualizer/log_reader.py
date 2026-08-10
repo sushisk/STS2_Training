@@ -19,9 +19,6 @@ class JsonlLogReader:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.reset()
-
-    def reset(self) -> None:
         self._offset = 0
         self._pending = b""
         self._line_number = 0
