@@ -1,10 +1,10 @@
 # Log visualizer
 
-The visualizer turns `selection_log.JsonlSelectionLogger` records into a local, browser-based
-combat view. It intentionally ships with no frontend/runtime dependency: the Python process
-serves a self-contained HTML/CSS/JS page from the standard library HTTP server.
+The visualizer turns the runner's JSONL run log into a local, browser-based combat view. It
+intentionally ships with no frontend/runtime dependency: the Python process serves a
+self-contained HTML/CSS/JS page from the standard library HTTP server.
 
-The visual language follows Slay the Spire 2's combat layout (dark dungeon field, compact top
+The visual language follows Slay the Spire 2 combat layout (dark dungeon field, compact top
 resource bar, player/enemy health bars, bottom fanned hand, energy gem, highlighted selected
 card/action) without bundling or copying game assets. Training-only metadata is kept in side
 panels so it does not obscure the board.
@@ -12,11 +12,33 @@ panels so it does not obscure the board.
 Both modes use the same input boundary:
 
 ```text
-Runner -> JSONL selection log -> Visualizer reader -> present_event -> Browser
+Runner -> JSONL run log -> Visualizer reader -> present_event -> Browser
 ```
 
-`present_event` is the only DTO-to-browser adapter. Replay reads a completed JSONL file; live
-mode tails a growing one and keeps an unterminated final line buffered until the next poll.
+The log contains the existing per-selection audit records and, on every successful
+`start_new_run --selection-log`, one final `run_result` record with `instance_id`,
+`decisions_made`, `elapsed_s`, `outcome`, and `final_dto`. The final record is written even
+when the run was already terminal before its first selection, so a zero-selection run is
+still complete and replayable.
+
+`present_event` is the only DTO-to-browser adapter. It converts record-specific DTO shapes
+into a canonical browser View Model:
+
+- `frame.player`
+- `frame.enemies`
+- `frame.hand`
+- `frame.resources`
+- `frame.piles`
+- `frame.boundary` / `frame.outcome`
+- `selected_action`
+- `frame_source` and `phase`
+
+DTO aliases such as player/enemy/hand field variants are resolved only in Python. Browser
+JavaScript reads only this canonical contract. The original JSONL record remains available
+under `raw` for the inspector.
+
+Replay reads a completed JSONL file; live mode tails a growing one and keeps an unterminated
+final line buffered until the next poll.
 
 ## Live mode
 
@@ -53,7 +75,7 @@ python -m sts2_training.runner.start_new_run \
 
 ## Replay mode
 
-Replay any existing selection JSONL without STS2_RL running:
+Replay any completed run/selection JSONL without STS2_RL running:
 
 ```bash
 python -m sts2_training.visualizer replay data/self_play/<run>.jsonl
@@ -63,15 +85,16 @@ The transport bar supports play/pause, previous/next event, 0.5x-4x speed, and a
 seeking. Clicking a timeline entry jumps directly to that event. `commit_action` selections
 are visually separated from speculative `emulate_actions` branches.
 
-The visualizer prefers `received.masked_emulator_dto` as the state on which the action was
-selected and keeps `result.masked_emulator_dto` in the event payload for inspection. A
-`self_play_run_result.final_dto` record is also accepted as a terminal replay frame.
+Selection records render the state from `received.masked_emulator_dto`; terminal run-level
+records render `final_dto`. This source is explicit in `frame_source`, rather than overloading
+a generic `before` field. Existing self-play `self_play_run_result.final_dto` records are
+handled by the same terminal-frame path.
 
 ## Browser/API endpoints
 
 - `GET /` - visualizer UI
 - `GET /api/status` - mode, lifecycle, event count, log path, live runner exit/error
-- `GET /api/events?after=N` - normalized events after zero-based cursor `N`
+- `GET /api/events?after=N` - canonical presented events after zero-based cursor `N`
 - `POST /api/live/start` - launch the configured runner CLI (live mode only, once per process)
 
 The HTTP server binds to `127.0.0.1:7878` by default. Use `--bind` / `--ui-port` to change it
