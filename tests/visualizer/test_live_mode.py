@@ -144,3 +144,57 @@ def test_live_mode_starts_runner_cli_and_tails_only_complete_jsonl_records(tmp_p
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_live_mode_renders_zero_selection_run_result(tmp_path: Path) -> None:
+    log_path = tmp_path / "terminal-only.jsonl"
+    done = threading.Event()
+    terminal = {
+        "event": "run_result",
+        "instance_id": "already-terminal",
+        "decisions_made": 0,
+        "elapsed_s": 0.01,
+        "outcome": "run_victory",
+        "final_dto": {
+            "run_terminal": True,
+            "outcome": "run_victory",
+            "player": {"name": "IRONCLAD", "current_hp": 80, "max_hp": 80},
+        },
+    }
+
+    def process_factory(command: Sequence[str]) -> _FakeProcess:
+        with log_path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(terminal, separators=(",", ":")) + "\n")
+            stream.flush()
+        done.set()
+        return _FakeProcess(done)
+
+    store = EventStore()
+    controller = LiveRunController(
+        store=store,
+        log_path=log_path,
+        runner_args=["--", "--character-id", "IRONCLAD"],
+        process_factory=process_factory,
+    )
+    app = VisualizerApp(mode="live", store=store, live=controller)
+    server = make_server(app, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status_code, _ = _request(server, "POST", "/api/live/start")
+        assert status_code == 202
+        _, status = _request(server, "GET", "/api/status")
+        assert status["state"] == "completed"
+
+        _, payload = _request(server, "GET", "/api/events?after=-1")
+        assert len(payload["events"]) == 1
+        event = payload["events"][0]
+        assert event["event"] == "run_result"
+        assert event["phase"] == "run_terminal"
+        assert event["frame_source"] == "final_dto"
+        assert event["frame"]["outcome"] == "run_victory"
+        assert event["frame"]["player"]["current_hp"] == 80
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
