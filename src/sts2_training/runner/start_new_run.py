@@ -23,6 +23,7 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.run_log import RunEventLogger, run_result_event
 from sts2_training.runner._cli import add_common_arguments, configure_logging, print_result
 from sts2_training.runner.episode import EpisodeResult, start_and_run
 from sts2_training.runner.scenario import NewRunConfig
@@ -66,18 +67,6 @@ async def start_new_run(
     )
 
 
-def _run_result_event(result: EpisodeResult) -> dict[str, Any]:
-    """Return the run-level record that makes a selection log self-contained."""
-    return {
-        "event": "run_result",
-        "instance_id": result.instance_id,
-        "decisions_made": result.decisions_made,
-        "elapsed_s": result.elapsed_s,
-        "outcome": result.final_dto.get("outcome"),
-        "final_dto": result.final_dto,
-    }
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_common_arguments(parser)
@@ -85,24 +74,35 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--seed", type=int, default=None, help="omit for a fresh random seed each run")
     parser.add_argument(
+        "--run-log",
         "--selection-log",
+        dest="run_log",
         type=Path,
         default=None,
         help=(
-            "write selection audit events plus one final run_result record to this "
-            "JSONL file (overwrite if it exists)"
+            "write the complete run event stream (selection audit plus final run_result) "
+            "to this JSONL file; --selection-log is a backward-compatible alias"
         ),
     )
     return parser.parse_args(argv)
 
 
+def _run_log_path(args: argparse.Namespace) -> Path | None:
+    path = getattr(args, "run_log", None)
+    if path is None:
+        # Compatibility for callers constructing the pre-rename Namespace directly.
+        path = getattr(args, "selection_log", None)
+    return path
+
+
 async def _run(args: argparse.Namespace) -> EpisodeResult:
     connection = TcpConnection(host=args.host, port=args.port, connect_timeout_s=args.connect_timeout)
-    selection_logger = (
-        JsonlSelectionLogger(args.selection_log, append=False) if args.selection_log is not None else None
+    run_log_path = _run_log_path(args)
+    run_logger: RunEventLogger | None = (
+        JsonlSelectionLogger(run_log_path, append=False) if run_log_path is not None else None
     )
     try:
-        async with AsyncTrainingApiClient(connection, selection_logger=selection_logger) as client:
+        async with AsyncTrainingApiClient(connection, selection_logger=run_logger) as client:
             result = await start_new_run(
                 client,
                 character_id=args.character_id,
@@ -113,12 +113,12 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
                 search_mode=args.search_mode,
                 beam_max_depth=args.beam_depth,
             )
-        if selection_logger is not None:
-            selection_logger(_run_result_event(result))
+        if run_logger is not None:
+            run_logger(run_result_event(result))
         return result
     finally:
-        if selection_logger is not None:
-            selection_logger.close()
+        if run_logger is not None:
+            run_logger.close()
 
 
 def main(argv: list[str] | None = None) -> int:
