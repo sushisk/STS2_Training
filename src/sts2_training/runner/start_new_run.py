@@ -23,11 +23,10 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
-from sts2_training.run_log import RunEventLogger, run_result_event
+from sts2_training.run_log import JsonlRunEventLogger, RunEventLogger, run_result_event
 from sts2_training.runner._cli import add_common_arguments, configure_logging, print_result
 from sts2_training.runner.episode import EpisodeResult, start_and_run
 from sts2_training.runner.scenario import NewRunConfig
-from sts2_training.selection_log import JsonlSelectionLogger
 
 __all__ = ["start_new_run"]
 
@@ -99,7 +98,7 @@ async def _run(args: argparse.Namespace) -> EpisodeResult:
     connection = TcpConnection(host=args.host, port=args.port, connect_timeout_s=args.connect_timeout)
     run_log_path = _run_log_path(args)
     run_logger: RunEventLogger | None = (
-        JsonlSelectionLogger(run_log_path, append=False) if run_log_path is not None else None
+        JsonlRunEventLogger(run_log_path, append=False) if run_log_path is not None else None
     )
     try:
         async with AsyncTrainingApiClient(connection, selection_logger=run_logger) as client:
