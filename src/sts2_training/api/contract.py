@@ -32,7 +32,15 @@ _BRANCH_STATUS_VALUES = frozenset(
 # returns only after every Branch dispatched for the batch is terminal. queued/running
 # are therefore invalid per-item response states for this operation.
 _EMULATE_ACTIONS_BRANCH_STATUSES = frozenset({"completed", "partial", "faulted"})
-_TERMINAL_OUTCOMES = frozenset({"victory", "defeat"})
+# Combat-only terminal outcomes (a single combat's win/loss - no Acts, no game-clear
+# epilogue, so "run_victory" below has no meaning here).
+_COMBAT_TERMINAL_OUTCOMES = frozenset({"victory", "defeat"})
+# Whole Run terminal outcomes. "run_victory" (STS2_Emulator commit 72ac8df, STS2_RL PR #18,
+# 2026-08-10) is the whole-Run analogue of clearing the game (defeating the final Act's
+# boss and completing TheArchitect's epilogue) - deliberately a DIFFERENT value from
+# combat-scoped "victory": winning one combat and clearing the whole Run are different
+# events that must never collide into one value.
+_RUN_TERMINAL_OUTCOMES = frozenset({"victory", "defeat", "run_victory"})
 
 
 class ApiProtocolError(RuntimeError):
@@ -480,9 +488,14 @@ class ApiContract:
 
         if is_terminal:
             outcome = masked.get("outcome")
-            if not isinstance(outcome, str) or outcome not in _TERMINAL_OUTCOMES:
+            # run_terminal is Whole Run's own terminal marker (never set alongside `terminal`,
+            # per the mutual-exclusion check above), so it's what selects the wider
+            # run-scoped outcome vocabulary - not `combat_terminal`, which stays combat-only.
+            valid_outcomes = _RUN_TERMINAL_OUTCOMES if run_terminal else _COMBAT_TERMINAL_OUTCOMES
+            if not isinstance(outcome, str) or outcome not in valid_outcomes:
+                expected = "'victory', 'defeat', or 'run_victory'" if run_terminal else "'victory' or 'defeat'"
                 raise ApiProtocolError(
-                    "terminal masked_emulator_dto.outcome must be 'victory' or 'defeat'"
+                    f"terminal masked_emulator_dto.outcome must be {expected}"
                 )
         elif "outcome" in masked:
             raise ApiProtocolError(
