@@ -192,43 +192,9 @@ class CombatDecisionEngine:
         return await self._client.commit_action(
             instance_id,
             outcome.decision["decision_point_id"],
-            _commit_action_id(self._client, outcome),
+            outcome.chosen_action_id,
             timeout_s=remaining,
         )
-
-
-def _commit_action_id(client: Any, outcome: DecisionOutcome) -> str:
-    """Return the action token the currently deployed RL server expects on commit.
-
-    Whole Run's current STS2_RL ``_View.resolve_action_id`` interprets the public token
-    as a positional index into ``legal_actions_raw`` even though ``mask_legal_actions``
-    publishes the Emulator's sparse ActionId unchanged. Other instance types consume the
-    opaque public ``action_id`` directly.
-
-    Until that server-side mismatch can be removed without breaking deployed Whole Run
-    servers, translate only an explicitly identified Whole Run at the final wire
-    boundary. Selection still happens against the public sparse ID; only commit uses the
-    ordinal required by the current Whole Run implementation.
-    """
-    chosen_action_id = outcome.chosen_action_id
-    if chosen_action_id is None:
-        raise RuntimeError("cannot commit an empty action_id")
-    if getattr(client, "instance_type", None) != "whole_run":
-        return chosen_action_id
-
-    dto = outcome.decision.get("masked_emulator_dto")
-    if not isinstance(dto, Mapping):
-        raise RuntimeError("decision is missing masked_emulator_dto for Whole Run commit")
-    raw_legal_actions = dto.get("legal_actions")
-    if not isinstance(raw_legal_actions, Sequence) or isinstance(raw_legal_actions, (str, bytes)):
-        raise RuntimeError("decision is missing legal_actions for Whole Run commit")
-
-    for index, action in enumerate(raw_legal_actions):
-        if isinstance(action, Mapping) and action.get("action_id") == chosen_action_id:
-            return str(index)
-    raise RuntimeError(
-        f"selected action_id {chosen_action_id!r} is not present in the decision legal_actions"
-    )
 
 
 def _beam_result_is_actionable(result: BeamSearchResult) -> bool:
