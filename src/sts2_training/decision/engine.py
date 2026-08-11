@@ -40,6 +40,37 @@ class DecisionOutcome:
     beam_result: BeamSearchResult | None
 
 
+class _BeamCapabilityClientView:
+    """Expose Whole Run batch-branch capability to the legacy low-level Beam guard.
+
+    Older RL versions do not advertise ``max_emulate_actions_items`` for Whole Run and
+    must keep the historical fallback behavior. Newer RL versions publish a positive
+    capacity when Combat-scoped ``emulate_actions`` is supported. The low-level
+    ``BeamSearchEngine`` still rejects the literal ``instance_type == 'whole_run'`` for
+    backward compatibility, so this internal view presents a capability-qualified type
+    only to Beam while delegating every operation/state field to the real client.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    @property
+    def instance_type(self) -> Any:
+        instance_type = getattr(self._client, "instance_type", None)
+        max_items = getattr(self._client, "max_emulate_actions_items", None)
+        if (
+            instance_type == "whole_run"
+            and isinstance(max_items, int)
+            and not isinstance(max_items, bool)
+            and max_items > 0
+        ):
+            return "whole_run_combat_beam"
+        return instance_type
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
 class CombatDecisionEngine:
     """Root-only Combat decision engine.
 
@@ -100,7 +131,10 @@ class CombatDecisionEngine:
             ),
         )
         self._beam = BeamSearchEngine(
-            client, policy=policy_model, value_fn=value_model, config=resolved_beam_config
+            _BeamCapabilityClientView(client),
+            policy=policy_model,
+            value_fn=value_model,
+            config=resolved_beam_config,
         )
         self._fallback = (
             fallback_selector if fallback_selector is not None else HeuristicCombatSelector()
