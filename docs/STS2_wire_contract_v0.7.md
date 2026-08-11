@@ -131,13 +131,31 @@ the completed `start_instance` response as the positive integer
 
 The standard Combat configuration uses 64, but callers must not assume that value: the
 server may be configured with a smaller or larger capacity. Training caches the published
-limit for the active instance and rejects an `emulate_actions` request that exceeds it,
-so Beam can chunk a wide frontier deterministically before sending it. This capability is
-the configured maximum batch size, not a claim about the momentary number of free Branch
-slots; RL still performs the authoritative active-capacity admission check.
+limit for the active instance and rejects an `emulate_actions` request that exceeds it.
 
-The Beam integration target is therefore "one depth = one or more bounded batch
-requests", not an unconditional one-request-per-depth guarantee.
+For **Whole Run Combat Beam**, the same published number also represents the configured
+total active Branch capacity enforced by RL. It is therefore both:
+
+- the hard item-count ceiling for one `emulate_actions` request; and
+- the hard ceiling on live non-terminal Branches owned by the instance.
+
+It is **not** the number of currently free slots. Whole Run Training must account for the
+Branches it still keeps live and guarantee, before submitting a batch:
+
+```text
+current_live_non_root_branches + submitted_children <= max_emulate_actions_items
+```
+
+Live parent Branches and stable siblings retained while a continuation is unresolved both
+consume this capacity. Releasing a pruned Branch returns its slot. Merely chunking a wide
+frontier does not make an otherwise over-capacity depth safe, because children created by
+earlier chunks remain live while later chunks are submitted. Training must therefore
+prune/release live parents or waiting siblings, or reduce the submitted frontier, before
+sending the next request. RL remains the authoritative admission check.
+
+For ordinary Combat batching, the field continues to be the instance-specific request
+item ceiling. The additional live-set accounting rule above is required by the Whole Run
+branch lifecycle introduced by the paired Whole Run Beam integration.
 
 ## Admission and execution
 
@@ -204,46 +222,6 @@ validation. Any missing result, extra result, or correlation mismatch observed b
 Training is an `ApiProtocolError`; completion is uncertain and the exact request remains
 pending for retry.
 
-## Terminal outcome invariant
-
-`terminal` and `run_terminal`, when present, are booleans. A terminal decision payload
-must carry the final run/combat verdict explicitly. Whenever
-`masked_emulator_dto.terminal == true` (Combat) or
-`masked_emulator_dto.run_terminal == true` (Whole Run),
-`masked_emulator_dto.outcome` is required and must be exactly one of:
-
-```text
-victory
-defeat
-```
-
-The invariant is bidirectional: a non-terminal decision payload must not carry a
-top-level `outcome` field. This prevents a stale `victory`/`defeat` value from making a
-normal search node look terminal to a value function that gives terminal scores dominant
-weight.
-
-Missing, `null`, or any other terminal outcome is a protocol violation. RL treats such a
-state as a producer/coordinator invariant failure rather than emitting a successful
-terminal payload, and Training rejects it with `ApiProtocolError` instead of silently
-degrading terminal scoring.
-
-A terminal decision has no selectable actions. If `legal_actions` is present on a
-terminal payload it must therefore be the empty list. Combat terminal responses always
-use `terminal: true` with `legal_actions: []`. Whole Run has two legitimate terminal
-shapes: the root response still carries normal root context such as `boundary`,
-`legal_actions: []`, `room_context`, and `history`; the Branch terminal shortcut may omit
-`legal_actions` and contain only the terminal semantic fields plus the normal masked DTO
-metadata. `build_masked_emulator_dto()` adds `dto_version` and `mask_version` to both
-shapes, so examples that omit those fields are only minimal semantic examples, not
-byte-for-byte wire fixtures.
-
-Terminal Branches are re-readable through `get_decision()` in both Combat and Whole Run;
-the response must preserve the same terminal marker and validated `outcome` until the
-Branch is cancelled/released or the instance is otherwise invalidated.
-
-This requirement is part of the still-in-development v0.7 lockstep contract and does not
-require a version bump within this unmerged v0.7 rollout.
-
 ## Retry and at-most-once semantics
 
 The existing single in-flight sequencing rules apply to the batch as a whole.
@@ -290,5 +268,5 @@ The following are outside this contract change:
 - Beam frontier generation/scoring/pruning changes themselves.
 
 Beam integration is a follow-up change that should replace frontier-by-frontier single
-calls with bounded `emulate_actions([...])` chunks, targeting one Beam depth per one or
-more batch requests.
+calls with bounded `emulate_actions([...])` requests while respecting both the per-request
+item ceiling and, for Whole Run, the shared active Branch capacity.
