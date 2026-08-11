@@ -32,6 +32,7 @@ from sts2_training.decision.value import ValueModel
 JsonObject = dict[str, Any]
 _LOG = logging.getLogger(__name__)
 _RESOLVED_STATUSES = frozenset({"completed", "partial"})
+_WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
 
 
 @dataclass
@@ -44,8 +45,7 @@ class BeamSearchConfig:
     max_batch_size: int = 64
     expand_partial: bool = True
     release_branches_on_finish: bool = True
-    # Action-type scope is independent from transport capability. Whole Run search is
-    # enabled only when the active client advertises a positive batch limit.
+    # Action-type scope is independent from transport capability and Whole Run boundary.
     beam_searchable_action_types: frozenset[str] = field(
         default_factory=lambda: frozenset({"system", "card", "potion"})
     )
@@ -178,7 +178,9 @@ class BeamSearchEngine:
             and _server_batch_limit(self._client) is None
         ):
             return BeamSearchResult(None, None, None, "emulate_actions_not_supported", stats)
-        if not _is_beam_searchable(root_dto, cfg.beam_searchable_action_types):
+        if not _is_beam_searchable_for_client(
+            self._client, root_dto, cfg.beam_searchable_action_types
+        ):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
 
         beam: list[BeamNode] = [
@@ -209,8 +211,10 @@ class BeamSearchEngine:
 
                 searchable: list[BeamNode] = []
                 for node in beam:
-                    if _is_beam_searchable(
-                        node.masked_emulator_dto, cfg.beam_searchable_action_types
+                    if _is_beam_searchable_for_client(
+                        self._client,
+                        node.masked_emulator_dto,
+                        cfg.beam_searchable_action_types,
                     ):
                         searchable.append(node)
                     elif _is_macro_resolved(node):
@@ -635,6 +639,19 @@ def _is_macro_resolved(node: BeamNode) -> bool:
     regardless of whether search stopped because of depth, rejection, or time budget.
     """
     return node.terminal or not is_continuation_decision(node.masked_emulator_dto)
+
+
+def _is_beam_searchable_for_client(
+    client: Any,
+    dto: Mapping[str, Any],
+    allowed_action_types: frozenset[str],
+) -> bool:
+    if (
+        getattr(client, "instance_type", None) == "whole_run"
+        and dto.get("boundary") not in _WHOLE_RUN_COMBAT_BOUNDARIES
+    ):
+        return False
+    return _is_beam_searchable(dto, allowed_action_types)
 
 
 def _is_beam_searchable(dto: Mapping[str, Any], allowed_action_types: frozenset[str]) -> bool:
