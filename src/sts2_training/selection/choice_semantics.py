@@ -7,6 +7,7 @@ names, card IDs, labels, or incidental option fields.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -49,6 +50,8 @@ CHOICE_ZONES = frozenset(
     }
 )
 CHOICE_MODIFIERS = frozenset({"upgrade"})
+
+_OPAQUE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -155,8 +158,11 @@ def pending_choice_context(masked_emulator_dto: JsonObject) -> PendingChoiceCont
 
 
 def choice_option_id(action: JsonObject) -> str | None:
-    """Return the opaque decision-local option ID attached to a choice-card action."""
-    return _token_or_none(action.get("optionId"))
+    """Return the opaque option ID from canonical ``LegalAction.parameters`` only."""
+    parameters = action.get("parameters")
+    if not isinstance(parameters, Mapping):
+        return None
+    return _token_or_none(parameters.get("optionId"))
 
 
 def _enum_or_none(value: Any, allowed: frozenset[str]) -> str | None:
@@ -176,7 +182,9 @@ def _bool_or_none(value: Any) -> bool | None:
 
 
 def _token_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) and bool(value) else None
+    if not isinstance(value, str):
+        return None
+    return value if _OPAQUE_TOKEN_RE.fullmatch(value) else None
 
 
 def _token_sequence(value: Any) -> tuple[str, ...]:
