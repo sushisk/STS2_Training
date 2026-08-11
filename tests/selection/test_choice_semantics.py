@@ -81,6 +81,7 @@ def test_choice_option_id_reads_only_canonical_parameters_identity():
         == "option-3"
     )
     assert choice_option_id({"action_type": "choice_card", "optionId": "option-3"}) is None
+    assert choice_option_id({"action_type": "card", "parameters": {"optionId": "option-3"}}) is None
     assert choice_option_id({"action_type": "choice_card", "parameters": {"cardId": "STRIKE"}}) is None
     assert choice_option_id({"action_type": "choice_card", "parameters": {"optionId": 3}}) is None
 
