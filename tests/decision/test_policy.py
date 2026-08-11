@@ -227,6 +227,33 @@ class PriorHeuristicPolicyTest(unittest.TestCase):
         self.assertIn("3", [c.action_id for c in candidates])
         self.assertIn("0", [c.action_id for c in candidates])
 
+    def test_lethal_pressure_preserves_a_card_branch_with_many_potions(self) -> None:
+        legal_actions = [
+            _action("end", "system"),
+            _card_action("card", "STRIKE", target_type="SingleEnemy"),
+            *[
+                _action(
+                    f"p{i}",
+                    "potion",
+                    parameters={"potionSlot": i, "targetType": "Self"},
+                )
+                for i in range(3)
+            ],
+        ]
+        dto = {
+            "hp": 10,
+            "energy": 3,
+            "hand": [{"id": "STRIKE", "type": "Attack", "cost": 1}],
+            "potions": [{"rarity": "Common"} for _ in range(3)],
+            "enemies": [{"isAlive": True, "intent": {"attackDamage": 20}}],
+        }
+
+        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=4)
+        ids = [candidate.action_id for candidate in candidates]
+
+        self.assertIn("card", ids)
+        self.assertIn("end", ids)
+
     def test_choice_target_prefers_low_hp_enemy_with_dangerous_intent(self) -> None:
         legal_actions = [
             _action(
@@ -264,7 +291,7 @@ class PriorHeuristicPolicyTest(unittest.TestCase):
 
         self.assertEqual(candidates[0].action_id, "11")
 
-    def test_choice_card_uses_pending_choice_card_quality(self) -> None:
+    def test_choice_card_uses_pending_choice_card_quality_when_semantics_are_known(self) -> None:
         legal_actions = [
             _action("20", "choice_card", label="CURSE_A"),
             _action("21", "choice_card", label="RARE_ATTACK"),
@@ -272,6 +299,7 @@ class PriorHeuristicPolicyTest(unittest.TestCase):
         ]
         dto = {
             "pendingChoice": {
+                "semantics": "gain",
                 "selectedCount": 0,
                 "minSelect": 1,
                 "maxSelect": 1,
@@ -286,6 +314,86 @@ class PriorHeuristicPolicyTest(unittest.TestCase):
         candidates = policy.propose(legal_actions, dto, top_k=1)
 
         self.assertEqual(candidates[0].action_id, "21")
+
+    def test_choice_card_is_neutral_when_semantics_are_unknown(self) -> None:
+        legal_actions = [
+            _action("20", "choice_card", label="CURSE_A"),
+            _action("21", "choice_card", label="RARE_ATTACK"),
+        ]
+        dto = {
+            "pendingChoice": {
+                "selectedCount": 0,
+                "minSelect": 1,
+                "maxSelect": 1,
+                "options": [
+                    {"id": "CURSE_A", "type": "Curse", "rarity": "Curse", "cost": 0},
+                    {"id": "RARE_ATTACK", "type": "Attack", "rarity": "Rare", "cost": 2},
+                ],
+            }
+        }
+
+        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=2)
+
+        self.assertEqual([candidate.action_id for candidate in candidates], ["20", "21"])
+
+    def test_discard_semantics_reverse_card_quality(self) -> None:
+        legal_actions = [
+            _action("20", "choice_card", label="CURSE_A"),
+            _action("21", "choice_card", label="RARE_ATTACK"),
+        ]
+        dto = {
+            "pendingChoice": {
+                "operation": "discard",
+                "options": [
+                    {"id": "CURSE_A", "type": "Curse", "rarity": "Curse", "cost": 0},
+                    {"id": "RARE_ATTACK", "type": "Attack", "rarity": "Rare", "cost": 2},
+                ],
+            }
+        }
+
+        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=1)
+
+        self.assertEqual(candidates[0].action_id, "20")
+
+    def test_confirm_branch_is_retained_before_maximum_selection(self) -> None:
+        legal_actions = [
+            *[_action(str(i), "choice_card", label=f"CARD_{i}") for i in range(5)],
+            _action("confirm", "choice_confirm"),
+        ]
+        dto = {
+            "pendingChoice": {
+                "semantics": "gain",
+                "selectedCount": 1,
+                "minSelect": 1,
+                "maxSelect": 5,
+                "options": [
+                    {"id": f"CARD_{i}", "type": "Attack", "rarity": "Rare", "cost": 0}
+                    for i in range(5)
+                ],
+            }
+        }
+
+        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=4)
+
+        self.assertIn("confirm", [candidate.action_id for candidate in candidates])
+
+    def test_ambiguous_duplicate_cards_do_not_inherit_one_copys_upgrade_bonus(self) -> None:
+        legal_actions = [
+            _card_action("a", "DUP", cost=1),
+            _card_action("b", "OTHER", cost=1),
+        ]
+        dto = {
+            "energy": 3,
+            "hand": [
+                {"id": "DUP", "type": "Attack", "rarity": "Common", "cost": 1, "upgraded": True},
+                {"id": "DUP", "type": "Attack", "rarity": "Common", "cost": 1, "upgraded": False},
+                {"id": "OTHER", "type": "Attack", "rarity": "Common", "cost": 1, "upgraded": False},
+            ],
+        }
+
+        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=2)
+
+        self.assertEqual([candidate.action_id for candidate in candidates], ["a", "b"])
 
     def test_confirm_is_prioritized_after_maximum_choice_count(self) -> None:
         legal_actions = [
