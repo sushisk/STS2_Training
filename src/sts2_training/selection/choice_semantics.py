@@ -158,7 +158,9 @@ def pending_choice_context(masked_emulator_dto: JsonObject) -> PendingChoiceCont
 
 
 def choice_option_id(action: JsonObject) -> str | None:
-    """Return the opaque option ID from canonical ``LegalAction.parameters`` only."""
+    """Return a choice-card action's opaque ID from canonical parameters only."""
+    if action.get("action_type") != "choice_card":
+        return None
     parameters = action.get("parameters")
     if not isinstance(parameters, Mapping):
         return None
