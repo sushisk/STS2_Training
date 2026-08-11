@@ -23,7 +23,9 @@ def _action(
     }
 
 
-def _card_action(action_id: str, card_id: str, *, cost: int = 1, target_type: str = "Self") -> dict:
+def _card_action(
+    action_id: str, card_id: str, *, cost: int = 1, target_type: str = "Self"
+) -> dict:
     return _action(
         action_id,
         "card",
@@ -44,376 +46,216 @@ class _CountingAction(dict):
 
 
 class PriorHeuristicPolicyTest(unittest.TestCase):
-    def test_keeps_end_turn_in_small_combat_shortlist(self) -> None:
-        legal_actions = [
-            _action("a-end", "system"),
-            _action("a-card1", "card"),
-            _action("a-card2", "card"),
-            _action("a-choice", "choice_card"),
+    def test_policy_only_ranks_without_structural_injection(self) -> None:
+        actions = [
+            _action("end", "system"),
+            _action("card-1", "card"),
+            _action("card-2", "card"),
         ]
-        policy = PriorHeuristicPolicy()
 
-        candidates = policy.propose(legal_actions, {}, top_k=2)
+        candidates = PriorHeuristicPolicy().propose(actions, {}, top_k=2)
 
-        self.assertEqual([c.action_id for c in candidates], ["a-card1", "a-end"])
-        self.assertTrue(all(isinstance(c, ActionCandidate) for c in candidates))
-
-    def test_top_one_still_uses_best_ranked_action(self) -> None:
-        legal_actions = [_action("a-end", "system"), _action("a-card", "card")]
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, {}, top_k=1)
-
-        self.assertEqual([c.action_id for c in candidates], ["a-card"])
-
-    def test_falls_back_to_other_categories_when_none_of_priority_present(self) -> None:
-        legal_actions = [_action("a-end", "system"), _action("a-potion", "potion")]
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, {}, top_k=5)
-
-        self.assertEqual({c.action_id for c in candidates}, {"a-end", "a-potion"})
+        self.assertEqual([candidate.action_id for candidate in candidates], ["card-1", "card-2"])
+        self.assertTrue(all(isinstance(candidate, ActionCandidate) for candidate in candidates))
 
     def test_excludes_unavailable_actions(self) -> None:
-        legal_actions = [
-            _action("a-card1", "card", is_available=False),
-            _action("a-card2", "card"),
-        ]
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, {}, top_k=5)
-
-        self.assertEqual([c.action_id for c in candidates], ["a-card2"])
+        candidates = PriorHeuristicPolicy().propose(
+            [
+                _action("a", "card", is_available=False),
+                _action("b", "card"),
+            ],
+            {},
+            top_k=3,
+        )
+        self.assertEqual([candidate.action_id for candidate in candidates], ["b"])
 
     def test_availability_is_checked_once_per_action(self) -> None:
         actions = [
-            _CountingAction(_action("a-card1", "card")),
-            _CountingAction(_action("a-card2", "card", is_available=False)),
+            _CountingAction(_action("a", "card")),
+            _CountingAction(_action("b", "card", is_available=False)),
         ]
-        policy = PriorHeuristicPolicy()
 
-        policy.propose(actions, {}, top_k=5)
+        PriorHeuristicPolicy().propose(actions, {}, top_k=3)
 
         self.assertEqual([action.availability_reads for action in actions], [1, 1])
 
     def test_empty_when_no_available_actions(self) -> None:
-        legal_actions = [_action("a-card1", "card", is_available=False)]
-        policy = PriorHeuristicPolicy()
-
-        self.assertEqual(policy.propose(legal_actions, {}, top_k=5), [])
+        self.assertEqual(
+            PriorHeuristicPolicy().propose(
+                [_action("a", "card", is_available=False)], {}, top_k=2
+            ),
+            [],
+        )
 
     def test_top_k_truncates(self) -> None:
-        legal_actions = [_action(f"a-card{i}", "card") for i in range(5)]
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, {}, top_k=2)
-
-        self.assertEqual(len(candidates), 2)
+        actions = [_action(str(index), "card") for index in range(5)]
+        self.assertEqual(len(PriorHeuristicPolicy().propose(actions, {}, top_k=2)), 2)
 
     def test_rejects_non_positive_top_k(self) -> None:
-        policy = PriorHeuristicPolicy()
         with self.assertRaises(ValueError):
-            policy.propose([_action("a", "card")], {}, top_k=0)
+            PriorHeuristicPolicy().propose([_action("a", "card")], {}, top_k=0)
 
     def test_rng_tie_break_is_deterministic_for_seeded_rng(self) -> None:
-        legal_actions = [_action(f"a-card{i}", "card") for i in range(10)]
-        policy_a = PriorHeuristicPolicy(rng=random.Random(42))
-        policy_b = PriorHeuristicPolicy(rng=random.Random(42))
-
-        result_a = [c.action_id for c in policy_a.propose(legal_actions, {}, top_k=10)]
-        result_b = [c.action_id for c in policy_b.propose(legal_actions, {}, top_k=10)]
-
+        actions = [_action(str(index), "card") for index in range(10)]
+        result_a = [
+            candidate.action_id
+            for candidate in PriorHeuristicPolicy(rng=random.Random(42)).propose(
+                actions, {}, top_k=10
+            )
+        ]
+        result_b = [
+            candidate.action_id
+            for candidate in PriorHeuristicPolicy(rng=random.Random(42)).propose(
+                actions, {}, top_k=10
+            )
+        ]
         self.assertEqual(result_a, result_b)
 
     def test_propose_batch_default_matches_looping_propose(self) -> None:
-        legal_actions = [_action("a-card1", "card")]
+        actions = [_action("a", "card")]
         policy = PriorHeuristicPolicy()
+        batched = policy.propose_batch([(actions, {}), (actions, {})], top_k=1)
+        self.assertEqual(batched, [policy.propose(actions, {}, top_k=1)] * 2)
 
-        batched = policy.propose_batch([(legal_actions, {}), (legal_actions, {})], top_k=1)
-
-        self.assertEqual(len(batched), 2)
-        self.assertEqual(batched[0], policy.propose(legal_actions, {}, top_k=1))
-
-    def test_lethal_incoming_damage_prioritizes_defensive_skill_over_attack_and_power(self) -> None:
-        legal_actions = [
-            _action("0", "system"),
-            _card_action("1", "STRIKE_IRONCLAD", target_type="SingleEnemy"),
-            _card_action("2", "DEFEND_IRONCLAD"),
-            _card_action("3", "SCALING_POWER"),
+    def test_lethal_incoming_damage_prioritizes_defensive_skill(self) -> None:
+        actions = [
+            _card_action("strike", "STRIKE", target_type="SingleEnemy"),
+            _card_action("defend", "DEFEND_IRONCLAD"),
+            _card_action("power", "SCALING_POWER"),
         ]
         dto = {
             "hp": 12,
-            "maxHp": 80,
             "block": 0,
             "energy": 3,
             "hand": [
-                {"id": "STRIKE_IRONCLAD", "type": "Attack", "rarity": "Basic", "cost": 1},
-                {"id": "DEFEND_IRONCLAD", "type": "Skill", "rarity": "Basic", "cost": 1},
+                {"id": "STRIKE", "type": "Attack", "cost": 1},
+                {"id": "DEFEND_IRONCLAD", "type": "Skill", "cost": 1},
                 {"id": "SCALING_POWER", "type": "Power", "rarity": "Rare", "cost": 1},
             ],
             "enemies": [
-                {
-                    "index": 0,
-                    "hp": 40,
-                    "maxHp": 40,
-                    "isAlive": True,
-                    "intent": {"attackDamage": 15, "attackRepeats": 1},
-                }
+                {"isAlive": True, "intent": {"attackDamage": 15, "attackRepeats": 1}}
             ],
         }
-        policy = PriorHeuristicPolicy()
 
-        candidates = policy.propose(legal_actions, dto, top_k=3)
+        candidates = PriorHeuristicPolicy().propose(actions, dto, top_k=3)
 
-        self.assertEqual(candidates[0].action_id, "2")
-        self.assertIn("0", [c.action_id for c in candidates])
+        self.assertEqual(candidates[0].action_id, "defend")
 
     def test_safe_turn_prefers_scaling_power_over_basic_attack(self) -> None:
-        legal_actions = [
-            _card_action("1", "STRIKE_IRONCLAD", target_type="SingleEnemy"),
-            _card_action("2", "SCALING_POWER"),
+        actions = [
+            _card_action("strike", "STRIKE", target_type="SingleEnemy"),
+            _card_action("power", "SCALING_POWER"),
         ]
         dto = {
             "hp": 70,
-            "maxHp": 80,
             "energy": 3,
             "hand": [
-                {"id": "STRIKE_IRONCLAD", "type": "Attack", "rarity": "Basic", "cost": 1},
+                {"id": "STRIKE", "type": "Attack", "cost": 1},
                 {"id": "SCALING_POWER", "type": "Power", "rarity": "Rare", "cost": 1},
             ],
-            "enemies": [{"index": 0, "hp": 50, "maxHp": 50, "isAlive": True, "intent": {}}],
+            "enemies": [{"isAlive": True, "intent": {}}],
         }
-        policy = PriorHeuristicPolicy()
+        self.assertEqual(
+            PriorHeuristicPolicy().propose(actions, dto, top_k=1)[0].action_id,
+            "power",
+        )
 
-        candidates = policy.propose(legal_actions, dto, top_k=1)
-
-        self.assertEqual(candidates[0].action_id, "2")
-
-    def test_lethal_pressure_promotes_potion_into_top_candidates(self) -> None:
-        legal_actions = [
-            _action("0", "system"),
-            _card_action("1", "STRIKE_A", target_type="SingleEnemy"),
-            _card_action("2", "STRIKE_B", target_type="SingleEnemy"),
-            _action(
-                "3",
-                "potion",
-                label="BLOCK_POTION",
-                parameters={"potionId": "BLOCK_POTION", "potionSlot": 0, "targetType": "Self"},
-            ),
-        ]
-        dto = {
-            "hp": 10,
-            "maxHp": 80,
-            "energy": 3,
-            "hand": [
-                {"id": "STRIKE_A", "type": "Attack", "cost": 1},
-                {"id": "STRIKE_B", "type": "Attack", "cost": 1},
-            ],
-            "potions": [{"id": "BLOCK_POTION", "rarity": "Common", "targetType": "Self"}],
-            "enemies": [
-                {
-                    "index": 0,
-                    "hp": 50,
-                    "maxHp": 50,
-                    "isAlive": True,
-                    "intent": {"attackDamage": 20},
-                }
-            ],
-        }
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, dto, top_k=3)
-
-        self.assertIn("3", [c.action_id for c in candidates])
-        self.assertIn("0", [c.action_id for c in candidates])
-
-    def test_lethal_pressure_preserves_a_card_branch_with_many_potions(self) -> None:
-        legal_actions = [
-            _action("end", "system"),
-            _card_action("card", "STRIKE", target_type="SingleEnemy"),
-            *[
-                _action(
-                    f"p{i}",
-                    "potion",
-                    parameters={"potionSlot": i, "targetType": "Self"},
-                )
-                for i in range(3)
-            ],
+    def test_lethal_pressure_promotes_potion(self) -> None:
+        actions = [
+            _card_action("strike", "STRIKE", target_type="SingleEnemy"),
+            _action("potion", "potion", parameters={"potionSlot": 0, "targetType": "Self"}),
         ]
         dto = {
             "hp": 10,
             "energy": 3,
             "hand": [{"id": "STRIKE", "type": "Attack", "cost": 1}],
-            "potions": [{"rarity": "Common"} for _ in range(3)],
+            "potions": [{"rarity": "Common"}],
             "enemies": [{"isAlive": True, "intent": {"attackDamage": 20}}],
         }
 
-        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=4)
-        ids = [candidate.action_id for candidate in candidates]
+        candidates = PriorHeuristicPolicy().propose(actions, dto, top_k=2)
 
-        self.assertIn("card", ids)
-        self.assertIn("end", ids)
+        self.assertEqual(candidates[0].action_id, "potion")
 
-    def test_choice_target_prefers_low_hp_enemy_with_dangerous_intent(self) -> None:
-        legal_actions = [
+    def test_choice_target_prefers_low_hp_dangerous_enemy(self) -> None:
+        actions = [
             _action(
-                "10",
+                "safe",
                 "choice_target",
                 parameters={"enemyIndex": 0, "hp": 35, "maxHp": 40, "block": 0},
             ),
             _action(
-                "11",
+                "dangerous",
                 "choice_target",
                 parameters={"enemyIndex": 1, "hp": 5, "maxHp": 40, "block": 0},
             ),
         ]
         dto = {
             "enemies": [
-                {
-                    "index": 0,
-                    "hp": 35,
-                    "maxHp": 40,
-                    "isAlive": True,
-                    "intent": {"attackDamage": 5},
-                },
-                {
-                    "index": 1,
-                    "hp": 5,
-                    "maxHp": 40,
-                    "isAlive": True,
-                    "intent": {"attackDamage": 18},
-                },
+                {"index": 0, "isAlive": True, "intent": {"attackDamage": 5}},
+                {"index": 1, "isAlive": True, "intent": {"attackDamage": 18}},
             ]
         }
-        policy = PriorHeuristicPolicy()
+        self.assertEqual(
+            PriorHeuristicPolicy().propose(actions, dto, top_k=1)[0].action_id,
+            "dangerous",
+        )
 
-        candidates = policy.propose(legal_actions, dto, top_k=1)
-
-        self.assertEqual(candidates[0].action_id, "11")
-
-    def test_choice_card_uses_pending_choice_card_quality_when_semantics_are_known(self) -> None:
-        legal_actions = [
-            _action("20", "choice_card", label="CURSE_A"),
-            _action("21", "choice_card", label="RARE_ATTACK"),
-            _action("22", "choice_confirm"),
+    def test_choice_card_stays_neutral_even_with_incidental_semantics_keys(self) -> None:
+        actions = [
+            _action("curse", "choice_card", label="CURSE"),
+            _action("rare", "choice_card", label="RARE"),
         ]
-        dto = {
-            "pendingChoice": {
-                "semantics": "gain",
-                "selectedCount": 0,
-                "minSelect": 1,
-                "maxSelect": 1,
-                "options": [
-                    {"id": "CURSE_A", "type": "Curse", "rarity": "Curse", "cost": 0},
-                    {"id": "RARE_ATTACK", "type": "Attack", "rarity": "Rare", "cost": 2},
-                ],
-            }
-        }
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, dto, top_k=1)
-
-        self.assertEqual(candidates[0].action_id, "21")
-
-    def test_choice_card_is_neutral_when_semantics_are_unknown(self) -> None:
-        legal_actions = [
-            _action("20", "choice_card", label="CURSE_A"),
-            _action("21", "choice_card", label="RARE_ATTACK"),
+        options = [
+            {"id": "CURSE", "type": "Curse", "rarity": "Curse", "cost": 0},
+            {"id": "RARE", "type": "Attack", "rarity": "Rare", "cost": 2},
         ]
-        dto = {
-            "pendingChoice": {
-                "selectedCount": 0,
-                "minSelect": 1,
-                "maxSelect": 1,
-                "options": [
-                    {"id": "CURSE_A", "type": "Curse", "rarity": "Curse", "cost": 0},
-                    {"id": "RARE_ATTACK", "type": "Attack", "rarity": "Rare", "cost": 2},
-                ],
-            }
-        }
+        for pending_extra in (
+            {},
+            {"semantics": "gain"},
+            {"choiceSemantics": "gain"},
+            {"operation": "discard"},
+            {"choiceType": "upgrade"},
+            {"kind": "exhaust"},
+        ):
+            with self.subTest(pending_extra=pending_extra):
+                dto = {"pendingChoice": {"options": options, **pending_extra}}
+                candidates = PriorHeuristicPolicy().propose(actions, dto, top_k=2)
+                self.assertEqual(
+                    [candidate.action_id for candidate in candidates],
+                    ["curse", "rare"],
+                )
 
-        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=2)
-
-        self.assertEqual([candidate.action_id for candidate in candidates], ["20", "21"])
-
-    def test_discard_semantics_reverse_card_quality(self) -> None:
-        legal_actions = [
-            _action("20", "choice_card", label="CURSE_A"),
-            _action("21", "choice_card", label="RARE_ATTACK"),
-        ]
-        dto = {
-            "pendingChoice": {
-                "operation": "discard",
-                "options": [
-                    {"id": "CURSE_A", "type": "Curse", "rarity": "Curse", "cost": 0},
-                    {"id": "RARE_ATTACK", "type": "Attack", "rarity": "Rare", "cost": 2},
-                ],
-            }
-        }
-
-        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=1)
-
-        self.assertEqual(candidates[0].action_id, "20")
-
-    def test_confirm_branch_is_retained_before_maximum_selection(self) -> None:
-        legal_actions = [
-            *[_action(str(i), "choice_card", label=f"CARD_{i}") for i in range(5)],
+    def test_confirm_scores_above_choice_after_maximum_selection(self) -> None:
+        actions = [
+            _action("card", "choice_card"),
             _action("confirm", "choice_confirm"),
         ]
         dto = {
-            "pendingChoice": {
-                "semantics": "gain",
-                "selectedCount": 1,
-                "minSelect": 1,
-                "maxSelect": 5,
-                "options": [
-                    {"id": f"CARD_{i}", "type": "Attack", "rarity": "Rare", "cost": 0}
-                    for i in range(5)
-                ],
-            }
+            "pendingChoice": {"selectedCount": 1, "minSelect": 1, "maxSelect": 1}
         }
+        self.assertEqual(
+            PriorHeuristicPolicy().propose(actions, dto, top_k=1)[0].action_id,
+            "confirm",
+        )
 
-        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=4)
-
-        self.assertIn("confirm", [candidate.action_id for candidate in candidates])
-
-    def test_ambiguous_duplicate_cards_do_not_inherit_one_copys_upgrade_bonus(self) -> None:
-        legal_actions = [
-            _card_action("a", "DUP", cost=1),
-            _card_action("b", "OTHER", cost=1),
+    def test_ambiguous_duplicate_does_not_inherit_one_copy_upgrade(self) -> None:
+        actions = [
+            _card_action("dup", "DUP", cost=1),
+            _card_action("other", "OTHER", cost=1),
         ]
         dto = {
             "energy": 3,
             "hand": [
-                {"id": "DUP", "type": "Attack", "rarity": "Common", "cost": 1, "upgraded": True},
-                {"id": "DUP", "type": "Attack", "rarity": "Common", "cost": 1, "upgraded": False},
-                {"id": "OTHER", "type": "Attack", "rarity": "Common", "cost": 1, "upgraded": False},
+                {"id": "DUP", "type": "Attack", "cost": 1, "upgraded": True},
+                {"id": "DUP", "type": "Attack", "cost": 1, "upgraded": False},
+                {"id": "OTHER", "type": "Attack", "cost": 1, "upgraded": False},
             ],
         }
 
-        candidates = PriorHeuristicPolicy().propose(legal_actions, dto, top_k=2)
+        candidates = PriorHeuristicPolicy().propose(actions, dto, top_k=2)
 
-        self.assertEqual([candidate.action_id for candidate in candidates], ["a", "b"])
-
-    def test_confirm_is_prioritized_after_maximum_choice_count(self) -> None:
-        legal_actions = [
-            _action("20", "choice_card", label="ATTACK"),
-            _action("22", "choice_confirm"),
-            _action("23", "choice_skip"),
-        ]
-        dto = {
-            "pendingChoice": {
-                "selectedCount": 1,
-                "minSelect": 1,
-                "maxSelect": 1,
-                "options": [{"id": "ATTACK", "type": "Attack", "rarity": "Common", "cost": 1}],
-            }
-        }
-        policy = PriorHeuristicPolicy()
-
-        candidates = policy.propose(legal_actions, dto, top_k=1)
-
-        self.assertEqual(candidates[0].action_id, "22")
+        self.assertEqual([candidate.action_id for candidate in candidates], ["dup", "other"])
 
 
 if __name__ == "__main__":
