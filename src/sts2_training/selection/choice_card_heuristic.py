@@ -40,9 +40,9 @@ def choice_card_preference_scores(
     """Return per-action preference scores when the full canonical choice is usable.
 
     The result is all-or-nothing for one pending choice. If any available ``choice_card``
-    action cannot be matched to exactly one public option via ``optionId``, an empty dict
-    is returned so callers preserve the previous neutral behavior instead of ranking a
-    partially-understood choice.
+    action cannot be matched to exactly one public option via ``optionId``, or multiple
+    actions claim the same option identity, an empty dict is returned so callers preserve
+    the previous neutral behavior instead of ranking a partially-understood choice.
     """
 
     choice_actions = [
@@ -82,11 +82,15 @@ def choice_card_preference_scores(
         options_by_id[option_id] = option
 
     scores: dict[str, float] = {}
+    action_option_ids: set[str] = set()
     for action in choice_actions:
         action_id = action.get("action_id")
         option_id = choice_option_id(action)
         if not isinstance(action_id, str) or not action_id or option_id is None:
             return {}
+        if option_id in action_option_ids:
+            return {}
+        action_option_ids.add(option_id)
         option = options_by_id.get(option_id)
         if option is None:
             return {}
