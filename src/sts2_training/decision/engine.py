@@ -3,9 +3,11 @@
 
 Search-budget configuration and Combat decision scope are intentionally separate:
 `BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
-engine owns which Combat decision phases are eligible for Beam Search. Structural branch
-coverage is likewise separate from policy ranking so learned policies cannot silently
-change Beam topology.
+engine owns the default Combat decision phases eligible for Beam Search. Explicit
+`BeamSearchConfig.beam_searchable_action_types` values remain authoritative when a
+caller supplies a config, so wrapper construction never silently widens semantic scope.
+Structural branch coverage is likewise separate from policy ranking so learned policies
+cannot silently change Beam topology.
 """
 
 from __future__ import annotations
@@ -41,10 +43,11 @@ class DecisionOutcome:
 class CombatDecisionEngine:
     """Root-only Combat decision engine.
 
-    `beam_action_types` is the semantic domain capability. It defaults to the full
-    Combat domain including interactive continuations and is applied independently of
-    shallow/standard/deep/wide performance presets. Callers that intentionally need a
-    narrower legacy scope must opt into that set explicitly.
+    With no explicit `beam_config`, the semantic Beam domain defaults to the full Combat
+    scope, including interactive continuations. When a caller supplies `beam_config`, its
+    `beam_searchable_action_types` is preserved. `beam_action_types` can make the semantic
+    scope explicit, but if it is supplied together with a config it must match that
+    config; conflicting sources fail fast instead of silently overriding one another.
 
     Whatever `PolicyModel` is supplied is wrapped in `CoverageConstrainedPolicy`, so
     structural branch-recall invariants survive replacing the heuristic prior with a
@@ -58,17 +61,38 @@ class CombatDecisionEngine:
         policy: PolicyModel | None = None,
         value_fn: ValueModel | None = None,
         beam_config: BeamSearchConfig | None = None,
-        beam_action_types: frozenset[str] = COMBAT_BEAM_ACTION_TYPES,
+        beam_action_types: frozenset[str] | None = None,
         fallback_selector: HeuristicCombatSelector | None = None,
     ) -> None:
         self._client = client
         ranked_policy = policy if policy is not None else PriorHeuristicPolicy()
         policy_model = CoverageConstrainedPolicy(ranked_policy)
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
-        budget_config = beam_config if beam_config is not None else resolve_search_mode()
+
+        if beam_config is None:
+            budget_config = resolve_search_mode()
+            resolved_action_types = (
+                COMBAT_BEAM_ACTION_TYPES
+                if beam_action_types is None
+                else frozenset(beam_action_types)
+            )
+        else:
+            budget_config = beam_config
+            configured_action_types = frozenset(budget_config.beam_searchable_action_types)
+            if beam_action_types is None:
+                resolved_action_types = configured_action_types
+            else:
+                requested_action_types = frozenset(beam_action_types)
+                if requested_action_types != configured_action_types:
+                    raise ValueError(
+                        "beam_action_types conflicts with "
+                        "beam_config.beam_searchable_action_types"
+                    )
+                resolved_action_types = requested_action_types
+
         resolved_beam_config = replace(
             budget_config,
-            beam_searchable_action_types=frozenset(beam_action_types),
+            beam_searchable_action_types=frozenset(resolved_action_types),
             simulation_options=(
                 None
                 if budget_config.simulation_options is None
