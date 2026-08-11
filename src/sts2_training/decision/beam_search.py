@@ -470,17 +470,17 @@ class BeamSearchEngine:
             if isinstance(dto, Mapping):
                 resolved.append((node, candidate, branch_id, rng_id, result, dto, result.get("status")))
 
-        # Only terminal outcomes or still-in-scope stable Combat states belong to the
-        # global ValueModel domain. A Whole Run branch that settles into Reward/Map/etc.
-        # without combat_completed is neither scored nor promoted as a stale-value
-        # candidate; the caller falls back once no Combat frontier remains.
+        # Preserve the historical Combat-client behavior of value-scoring a resolved
+        # non-continuation child even when that child will not be expanded further. Whole
+        # Run is stricter: a Reward/Map/Event boundary without combat_completed is outside
+        # the Combat ValueModel domain and must not be scored or promoted with stale value.
         value_entries = [
             entry
             for entry in resolved
             if _is_terminal(entry[5])
             or (
                 not is_continuation_decision(entry[5])
-                and _is_beam_searchable_for_client(
+                and not _is_whole_run_unresolved_out_of_scope(
                     self._client,
                     entry[5],
                     cfg.beam_searchable_action_types,
@@ -514,7 +514,7 @@ class BeamSearchEngine:
             combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
             continuation_steps = node.continuation_steps + 1 if is_continuation_action else 0
             terminal = _is_terminal(dto)
-            if not terminal and not _is_beam_searchable_for_client(
+            if _is_whole_run_unresolved_out_of_scope(
                 self._client,
                 dto,
                 cfg.beam_searchable_action_types,
@@ -731,19 +731,33 @@ def _is_beam_searchable_for_client(
     return _is_beam_searchable(dto, allowed_action_types)
 
 
+def _is_whole_run_unresolved_out_of_scope(
+    client: Any,
+    dto: Mapping[str, Any],
+    allowed_action_types: frozenset[str],
+) -> bool:
+    return (
+        getattr(client, "instance_type", None) == "whole_run"
+        and not _is_terminal(dto)
+        and not _is_beam_searchable_for_client(client, dto, allowed_action_types)
+    )
+
+
 def _has_unresolved_out_of_scope_result(
     client: Any,
     branch_results: Mapping[str, Any],
     allowed_action_types: frozenset[str],
 ) -> bool:
+    if getattr(client, "instance_type", None) != "whole_run":
+        return False
     for result in branch_results.values():
         if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
             continue
         dto = result.get("masked_emulator_dto")
-        if (
-            isinstance(dto, Mapping)
-            and not _is_terminal(dto)
-            and not _is_beam_searchable_for_client(client, dto, allowed_action_types)
+        if isinstance(dto, Mapping) and _is_whole_run_unresolved_out_of_scope(
+            client,
+            dto,
+            allowed_action_types,
         ):
             return True
     return False
