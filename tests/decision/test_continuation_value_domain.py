@@ -108,13 +108,16 @@ class ContinuationValueDomainTest(unittest.TestCase):
             }
         }
 
-        _next, finished, _ms, hit_depth, _limit = engine._score_frontier(  # noqa: SLF001
+        next_beam, finished, _ms, hit_depth, _limit = engine._score_frontier(  # noqa: SLF001
             [(parent, ActionCandidate("confirm"), "b1", 1)], branch_results
         )
 
         self.assertEqual(value.batches, [[stable_dto]])
-        self.assertTrue(hit_depth)
-        self.assertEqual(finished[0].value, 42.0)
+        self.assertFalse(hit_depth)
+        self.assertEqual(finished, [])
+        self.assertEqual(len(next_beam), 1)
+        self.assertEqual(next_beam[0].value, 42.0)
+        self.assertEqual(next_beam[0].combat_depth, 1)
 
 
 if __name__ == "__main__":
