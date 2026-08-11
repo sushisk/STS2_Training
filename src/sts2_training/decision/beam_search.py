@@ -231,6 +231,36 @@ class BeamSearchEngine:
                     reason = "no_candidates"
                     break
 
+                (
+                    beam,
+                    waiting_stable,
+                    items,
+                    item_meta,
+                    capacity_finished,
+                    capacity_limited,
+                ) = self._fit_whole_run_frontier_to_active_capacity(
+                    beam,
+                    waiting_stable,
+                    items,
+                    item_meta,
+                )
+                finished.extend(capacity_finished)
+                if capacity_limited:
+                    released = await self._release_unneeded_whole_run_branches(
+                        instance_id,
+                        all_branch_ids,
+                        released_branch_ids,
+                        beam,
+                        waiting_stable,
+                        deadline=search_deadline,
+                    )
+                    if not released:
+                        reason = "active_branch_cleanup_failed"
+                        break
+                if not items:
+                    reason = "active_branch_capacity"
+                    break
+
                 branch_results, fatal_reason = await self._emulate_depth_batch(
                     instance_id, items, item_meta, all_branch_ids, stats, search_deadline
                 )
@@ -297,12 +327,13 @@ class BeamSearchEngine:
                         reason = "beam_exhausted"
                         break
 
-                # Whole Run's max_branches is shared active capacity, not just a per-call
-                # item ceiling. Once a depth is fully materialized, only the next live
-                # frontier (plus stable siblings waiting on a continuation) can ever be
-                # used as a parent again. Release every other Whole Run Branch before the
-                # next depth so pruned parents/children cannot accumulate against that cap.
-                await self._release_unneeded_whole_run_branches(
+                # Whole Run uses the published max_emulate_actions_items value as both
+                # the per-request item ceiling and the total active Branch capacity. Once
+                # a depth is materialized, release every Branch that can no longer become
+                # a parent. Waiting stable siblings remain live only until the next
+                # iteration's capacity planner decides how many can be retained while
+                # reserving room for the next child frontier.
+                released = await self._release_unneeded_whole_run_branches(
                     instance_id,
                     all_branch_ids,
                     released_branch_ids,
@@ -310,6 +341,9 @@ class BeamSearchEngine:
                     waiting_stable,
                     deadline=search_deadline,
                 )
+                if not released:
+                    reason = "active_branch_cleanup_failed"
+                    break
 
             # A continuation is a local macro-action implementation detail until it
             # resolves to a stable/terminal Combat state. Search termination (including
@@ -396,6 +430,95 @@ class BeamSearchEngine:
                 )
                 item_meta.append((node, candidate, branch_id, rng_id))
         return items, item_meta, policy_ms
+
+    def _fit_whole_run_frontier_to_active_capacity(
+        self,
+        beam: Sequence[BeamNode],
+        waiting_stable: Sequence[BeamNode],
+        items: Sequence[JsonObject],
+        item_meta: Sequence[tuple[BeamNode, ActionCandidate, str, int]],
+    ) -> tuple[
+        list[BeamNode],
+        list[BeamNode],
+        list[JsonObject],
+        list[tuple[BeamNode, ActionCandidate, str, int]],
+        list[BeamNode],
+        bool,
+    ]:
+        """Fit a Whole Run frontier inside RL's shared active Branch budget.
+
+        For Whole Run, ``max_emulate_actions_items`` is the configured Branch capacity:
+        every live non-root parent and waiting stable sibling consumes one slot until it
+        is released, and every newly submitted child consumes another. Chunking cannot
+        make an oversized depth safe because children from earlier chunks remain active.
+
+        Keep the highest-priority beam parents in existing beam order, keep each selected
+        parent's policy candidates in policy order, then use any remaining capacity for
+        the highest-valued waiting stable siblings. Stable nodes pruned only for capacity
+        remain valid local finished candidates even after their RL Branch is released.
+        """
+        capacity = _server_active_branch_capacity(self._client)
+        if capacity is None:
+            return list(beam), list(waiting_stable), list(items), list(item_meta), [], False
+
+        indices_by_parent: dict[str, list[int]] = {}
+        for index, meta in enumerate(item_meta):
+            indices_by_parent.setdefault(meta[0].branch_id, []).append(index)
+
+        selected_beam: list[BeamNode] = []
+        selected_indices: list[int] = []
+        used_slots = 0
+        limited = False
+
+        for node in beam:
+            candidate_indices = indices_by_parent.get(node.branch_id, [])
+            if not candidate_indices:
+                limited = True
+                continue
+            parent_cost = 0 if node.branch_id == ROOT_BRANCH_ID else 1
+            remaining_for_children = capacity - used_slots - parent_cost
+            if remaining_for_children <= 0:
+                limited = True
+                break
+            take = min(len(candidate_indices), remaining_for_children)
+            selected_beam.append(node)
+            selected_indices.extend(candidate_indices[:take])
+            used_slots += parent_cost + take
+            if take < len(candidate_indices):
+                limited = True
+                break
+
+        selected_parent_ids = {node.branch_id for node in selected_beam}
+        pruned_beam = [node for node in beam if node.branch_id not in selected_parent_ids]
+        if pruned_beam:
+            limited = True
+
+        waiting_budget = max(0, capacity - used_slots)
+        ranked_waiting = sorted(waiting_stable, key=lambda node: node.value, reverse=True)
+        kept_waiting = ranked_waiting[:waiting_budget]
+        pruned_waiting = ranked_waiting[waiting_budget:]
+        if pruned_waiting:
+            limited = True
+
+        # Capacity-pruned resolved nodes remain usable local candidates. Unresolved
+        # continuation nodes must never be promoted with their inherited stale value.
+        capacity_finished = [
+            node for node in (*pruned_beam, *pruned_waiting) if _is_macro_resolved(node)
+        ]
+
+        selected_items = [items[index] for index in selected_indices]
+        selected_meta = [item_meta[index] for index in selected_indices]
+        if len(selected_items) != len(items):
+            limited = True
+
+        return (
+            selected_beam,
+            kept_waiting,
+            selected_items,
+            selected_meta,
+            capacity_finished,
+            limited,
+        )
 
     async def _emulate_depth_batch(
         self,
@@ -567,12 +690,12 @@ class BeamSearchEngine:
         waiting_stable: Sequence[BeamNode],
         *,
         deadline: float,
-    ) -> None:
+    ) -> bool:
         if (
             getattr(self._client, "instance_type", None) != "whole_run"
             or not self.config.release_branches_on_finish
         ):
-            return
+            return True
         keep_ids = {
             node.branch_id
             for node in (*beam, *waiting_stable)
@@ -584,11 +707,13 @@ class BeamSearchEngine:
             if branch_id not in keep_ids and branch_id not in released_branch_ids
         ]
         if not releasable:
-            return
+            return True
         if _client_unusable(self._client):
-            return
+            return False
         if await self._cleanup_call("release_branches", instance_id, releasable, deadline):
             released_branch_ids.update(releasable)
+            return True
+        return False
 
     async def _cleanup(
         self,
@@ -670,6 +795,13 @@ def _server_batch_limit(client: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return None
+
+
+def _server_active_branch_capacity(client: Any) -> int | None:
+    """Whole Run's published branch capacity, shared by parents, waiters and children."""
+    if getattr(client, "instance_type", None) != "whole_run":
+        return None
+    return _server_batch_limit(client)
 
 
 def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
