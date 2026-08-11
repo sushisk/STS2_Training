@@ -1,18 +1,9 @@
 """`CombatDecisionEngine`: get_decision -> (beam search | heuristic fallback)
 -> commit_action, over one `AsyncTrainingApiClient`.
 
-Beam search is only useful for ordinary in-combat decisions. The search engine
-checks every explored boundary against `BeamSearchConfig.beam_searchable_action_types`
-and returns a no-candidate result when branching is unsupported, at which point
-this engine falls back to `HeuristicCombatSelector`.
-
-Expected search failures such as a safely rejected `emulate_actions` batch are
-encoded in `BeamSearchResult` and fall back cleanly. Results from an incomplete
-logical beam depth are never committed even if an earlier chunk happened to
-produce a high-scoring candidate, because doing so would make the decision
-depend on chunk ordering. Protocol errors, faulted operations, invalid model
-outputs, and unexpected model exceptions are surfaced instead of being
-converted into heuristic decisions.
+Search-budget configuration and Combat decision scope are intentionally separate:
+`BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
+engine owns which Combat decision phases are eligible for Beam Search.
 """
 
 from __future__ import annotations
@@ -20,12 +11,13 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from sts2_training.api.contract import JsonObject, ROOT_BRANCH_ID
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine, BeamSearchResult
+from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.search_modes import resolve_search_mode
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
@@ -39,16 +31,17 @@ __all__ = ["CombatDecisionEngine", "DecisionOutcome", "NoAvailableActionError"]
 class DecisionOutcome:
     decision: JsonObject
     chosen_action_id: str | None
-    source: str  # "beam_search" | "heuristic_fallback" | "forced_single_action" | "none"
+    source: str
     beam_result: BeamSearchResult | None
 
 
 class CombatDecisionEngine:
-    """Construct ONCE per API client/instance and reuse across every real
-    decision - `BeamSearchEngine` owns a branch-id/rng-id allocator that must
-    stay unique for the instance's whole lifetime (see `BranchIdAllocator`).
+    """Root-only Combat decision engine.
 
-    This engine is root-only: `commit_action` can only advance the root Branch.
+    `beam_action_types` is the semantic domain capability. It defaults to the full
+    Combat domain including interactive continuations and is applied independently of
+    shallow/standard/deep/wide performance presets. Callers that intentionally need a
+    narrower legacy scope must opt into that set explicitly.
     """
 
     def __init__(
@@ -58,12 +51,22 @@ class CombatDecisionEngine:
         policy: PolicyModel | None = None,
         value_fn: ValueModel | None = None,
         beam_config: BeamSearchConfig | None = None,
+        beam_action_types: frozenset[str] = COMBAT_BEAM_ACTION_TYPES,
         fallback_selector: HeuristicCombatSelector | None = None,
     ) -> None:
         self._client = client
         policy_model = policy if policy is not None else PriorHeuristicPolicy()
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
-        resolved_beam_config = beam_config if beam_config is not None else resolve_search_mode()
+        budget_config = beam_config if beam_config is not None else resolve_search_mode()
+        resolved_beam_config = replace(
+            budget_config,
+            beam_searchable_action_types=frozenset(beam_action_types),
+            simulation_options=(
+                None
+                if budget_config.simulation_options is None
+                else dict(budget_config.simulation_options)
+            ),
+        )
         self._beam = BeamSearchEngine(
             client, policy=policy_model, value_fn=value_model, config=resolved_beam_config
         )
@@ -73,7 +76,6 @@ class CombatDecisionEngine:
 
     @property
     def client(self) -> Any:
-        """API client this engine is bound to for its entire branch-ID lifetime."""
         return self._client
 
     @property
@@ -177,11 +179,7 @@ class CombatDecisionEngine:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TransportError("decision timeout elapsed before get_decision")
-        outcome = await self.decide(
-            instance_id,
-            timeout_s=remaining,
-            decision=decision,
-        )
+        outcome = await self.decide(instance_id, timeout_s=remaining, decision=decision)
         if outcome.chosen_action_id is None:
             raise NoAvailableActionError(
                 "no available legal_actions to select from",
@@ -207,10 +205,7 @@ def _beam_result_is_actionable(result: BeamSearchResult) -> bool:
     )
     if not incomplete_depth:
         return True
-    return (
-        result.best_node is not None
-        and result.best_node.depth <= result.stats.depths_completed
-    )
+    return result.best_node is not None and result.best_node.depth <= result.stats.depths_completed
 
 
 def _deadline_from_timeout(timeout_s: float) -> float:
