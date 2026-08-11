@@ -19,10 +19,12 @@ Use `sts2_training.selection.pending_choice_context(masked_emulator_dto)` to rea
 - remaining option IDs
 
 Use `sts2_training.selection.choice_option_id(action)` to read the opaque `optionId`
-attached to a `choice_card` legal action.
+from `choice_card` LegalAction `parameters.optionId`. The accessor deliberately does not
+fall back to top-level action fields, labels, card IDs, or other incidental structure.
 
 Malformed, absent, or future semantic descriptors degrade to
-`operation="unknown"`. Training must stay policy-neutral in that case.
+`operation="unknown"`. Training must stay policy-neutral in that case. Opaque identity
+tokens are format-validated but are never interpreted for mechanic meaning.
 
 ## Rollout
 
