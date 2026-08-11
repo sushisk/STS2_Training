@@ -3,7 +3,9 @@
 
 Search-budget configuration and Combat decision scope are intentionally separate:
 `BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
-engine owns which Combat decision phases are eligible for Beam Search.
+engine owns which Combat decision phases are eligible for Beam Search. Structural branch
+coverage is likewise separate from policy ranking so learned policies cannot silently
+change Beam topology.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any
 from sts2_training.api.contract import JsonObject, ROOT_BRANCH_ID
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine, BeamSearchResult
+from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.search_modes import resolve_search_mode
@@ -42,6 +45,10 @@ class CombatDecisionEngine:
     Combat domain including interactive continuations and is applied independently of
     shallow/standard/deep/wide performance presets. Callers that intentionally need a
     narrower legacy scope must opt into that set explicitly.
+
+    Whatever `PolicyModel` is supplied is wrapped in `CoverageConstrainedPolicy`, so
+    structural branch-recall invariants survive replacing the heuristic prior with a
+    learned or batch-only model.
     """
 
     def __init__(
@@ -55,7 +62,8 @@ class CombatDecisionEngine:
         fallback_selector: HeuristicCombatSelector | None = None,
     ) -> None:
         self._client = client
-        policy_model = policy if policy is not None else PriorHeuristicPolicy()
+        ranked_policy = policy if policy is not None else PriorHeuristicPolicy()
+        policy_model = CoverageConstrainedPolicy(ranked_policy)
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
         budget_config = beam_config if beam_config is not None else resolve_search_mode()
         resolved_beam_config = replace(
