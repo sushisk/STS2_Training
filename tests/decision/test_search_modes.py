@@ -4,6 +4,7 @@ import unittest
 
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.search_modes import (
+    COMBAT_BEAM_ACTION_TYPES,
     DEFAULT_SEARCH_MODE,
     SEARCH_MODES,
     resolve_search_mode,
@@ -82,8 +83,36 @@ class ResolveSearchModeTest(unittest.TestCase):
         self.assertEqual(resolved.beam_width, 2)
         self.assertIsNot(resolved.simulation_options, custom.simulation_options)
 
-    def test_standard_mode_tracks_beam_search_defaults(self) -> None:
-        self.assertEqual(SEARCH_MODES["standard"], BeamSearchConfig())
+    def test_standard_mode_keeps_low_level_shape_but_adds_combat_continuations(self) -> None:
+        low_level = BeamSearchConfig()
+        standard = SEARCH_MODES["standard"]
+
+        self.assertEqual(standard.max_depth, low_level.max_depth)
+        self.assertEqual(standard.beam_width, low_level.beam_width)
+        self.assertEqual(standard.top_k_actions, low_level.top_k_actions)
+        self.assertEqual(standard.max_batch_size, low_level.max_batch_size)
+        self.assertEqual(standard.simulation_options, low_level.simulation_options)
+        self.assertEqual(standard.beam_searchable_action_types, COMBAT_BEAM_ACTION_TYPES)
+        self.assertGreater(
+            len(standard.beam_searchable_action_types),
+            len(low_level.beam_searchable_action_types),
+        )
+
+    def test_every_named_mode_expands_combat_choice_continuations(self) -> None:
+        expected = {
+            "system",
+            "card",
+            "potion",
+            "choice_target",
+            "choice_card",
+            "choice_confirm",
+            "choice_skip",
+        }
+        self.assertEqual(COMBAT_BEAM_ACTION_TYPES, expected)
+
+        for name, config in SEARCH_MODES.items():
+            with self.subTest(mode=name):
+                self.assertEqual(config.beam_searchable_action_types, COMBAT_BEAM_ACTION_TYPES)
 
     def test_every_mode_is_a_valid_beam_search_config(self) -> None:
         for name, config in SEARCH_MODES.items():
