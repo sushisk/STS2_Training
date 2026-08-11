@@ -200,6 +200,7 @@ class BeamSearchEngine:
         waiting_stable: list[BeamNode] = []
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
+        released_branch_ids: set[str] = set()
         reason = "max_depth"
         search_error: BaseException | None = None
 
@@ -248,6 +249,13 @@ class BeamSearchEngine:
                     and not newly_finished
                     and not hit_continuation_limit
                 ):
+                    if _has_unresolved_out_of_scope_result(
+                        self._client,
+                        branch_results,
+                        cfg.beam_searchable_action_types,
+                    ):
+                        reason = "not_beam_searchable"
+                        break
                     raise RuntimeError("all emulate_actions branch results faulted")
                 finished.extend(newly_finished)
 
@@ -289,6 +297,20 @@ class BeamSearchEngine:
                         reason = "beam_exhausted"
                         break
 
+                # Whole Run's max_branches is shared active capacity, not just a per-call
+                # item ceiling. Once a depth is fully materialized, only the next live
+                # frontier (plus stable siblings waiting on a continuation) can ever be
+                # used as a parent again. Release every other Whole Run Branch before the
+                # next depth so pruned parents/children cannot accumulate against that cap.
+                await self._release_unneeded_whole_run_branches(
+                    instance_id,
+                    all_branch_ids,
+                    released_branch_ids,
+                    beam,
+                    waiting_stable,
+                    deadline=search_deadline,
+                )
+
             # A continuation is a local macro-action implementation detail until it
             # resolves to a stable/terminal Combat state. Search termination (including
             # time_budget) must never promote an unresolved continuation just because it
@@ -301,7 +323,11 @@ class BeamSearchEngine:
         finally:
             t0 = time.monotonic()
             try:
-                await self._cleanup(instance_id, all_branch_ids, deadline=overall_deadline)
+                await self._cleanup(
+                    instance_id,
+                    [bid for bid in all_branch_ids if bid not in released_branch_ids],
+                    deadline=overall_deadline,
+                )
             except Exception:
                 if search_error is None:
                     raise
@@ -444,9 +470,22 @@ class BeamSearchEngine:
             if isinstance(dto, Mapping):
                 resolved.append((node, candidate, branch_id, rng_id, result, dto, result.get("status")))
 
-        # Only resolved stable/terminal states belong to the global ValueModel domain.
+        # Only terminal outcomes or still-in-scope stable Combat states belong to the
+        # global ValueModel domain. A Whole Run branch that settles into Reward/Map/etc.
+        # without combat_completed is neither scored nor promoted as a stale-value
+        # candidate; the caller falls back once no Combat frontier remains.
         value_entries = [
-            entry for entry in resolved if _is_terminal(entry[5]) or not is_continuation_decision(entry[5])
+            entry
+            for entry in resolved
+            if _is_terminal(entry[5])
+            or (
+                not is_continuation_decision(entry[5])
+                and _is_beam_searchable_for_client(
+                    self._client,
+                    entry[5],
+                    cfg.beam_searchable_action_types,
+                )
+            )
         ]
         t0 = time.monotonic()
         raw_values = (
@@ -475,6 +514,12 @@ class BeamSearchEngine:
             combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
             continuation_steps = node.continuation_steps + 1 if is_continuation_action else 0
             terminal = _is_terminal(dto)
+            if not terminal and not _is_beam_searchable_for_client(
+                self._client,
+                dto,
+                cfg.beam_searchable_action_types,
+            ):
+                continue
             value = value_by_branch.get(branch_id, node.value)
             decision_point_id = result.get("decision_point_id")
             new_node = BeamNode(
@@ -512,6 +557,38 @@ class BeamSearchEngine:
                 next_beam.append(new_node)
 
         return next_beam, newly_finished, value_ms, hit_max_depth, hit_continuation_limit
+
+    async def _release_unneeded_whole_run_branches(
+        self,
+        instance_id: str,
+        all_branch_ids: list[str],
+        released_branch_ids: set[str],
+        beam: Sequence[BeamNode],
+        waiting_stable: Sequence[BeamNode],
+        *,
+        deadline: float,
+    ) -> None:
+        if (
+            getattr(self._client, "instance_type", None) != "whole_run"
+            or not self.config.release_branches_on_finish
+        ):
+            return
+        keep_ids = {
+            node.branch_id
+            for node in (*beam, *waiting_stable)
+            if node.branch_id != ROOT_BRANCH_ID
+        }
+        releasable = [
+            branch_id
+            for branch_id in all_branch_ids
+            if branch_id not in keep_ids and branch_id not in released_branch_ids
+        ]
+        if not releasable:
+            return
+        if _client_unusable(self._client):
+            return
+        if await self._cleanup_call("release_branches", instance_id, releasable, deadline):
+            released_branch_ids.update(releasable)
 
     async def _cleanup(
         self,
@@ -652,6 +729,24 @@ def _is_beam_searchable_for_client(
     ):
         return False
     return _is_beam_searchable(dto, allowed_action_types)
+
+
+def _has_unresolved_out_of_scope_result(
+    client: Any,
+    branch_results: Mapping[str, Any],
+    allowed_action_types: frozenset[str],
+) -> bool:
+    for result in branch_results.values():
+        if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
+            continue
+        dto = result.get("masked_emulator_dto")
+        if (
+            isinstance(dto, Mapping)
+            and not _is_terminal(dto)
+            and not _is_beam_searchable_for_client(client, dto, allowed_action_types)
+        ):
+            return True
+    return False
 
 
 def _is_beam_searchable(dto: Mapping[str, Any], allowed_action_types: frozenset[str]) -> bool:
