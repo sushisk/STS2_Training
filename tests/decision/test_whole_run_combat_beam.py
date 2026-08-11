@@ -110,6 +110,36 @@ class _WholeRunBoundaryExitClient(_WholeRunBeamClient):
         return {"status": "completed", "branch_results": branch_results}
 
 
+class _WholeRunRewardExitClient(_WholeRunBeamClient):
+    async def emulate_actions(self, instance_id, items, *, timeout_s, simulation_options=None):
+        del instance_id, timeout_s, simulation_options
+        self.emulate_calls.append([dict(item) for item in items])
+        if len(self.emulate_calls) > 1:
+            raise AssertionError("Beam must not expand a non-Combat Whole Run boundary")
+
+        branch_results = {}
+        for item in items:
+            branch_results[item["branch_id"]] = {
+                "status": "completed",
+                "branch_id": item["branch_id"],
+                "parent_branch_id": item["parent_branch_id"],
+                "rng_id": item["rng_id"],
+                "decision_point_id": f"reward-{item['branch_id']}",
+                "branch_log": [],
+                "masked_emulator_dto": {
+                    "boundary": "reward_select",
+                    "legal_actions": [
+                        {
+                            "action_id": "reward-card",
+                            "action_type": "choice_reward_card",
+                            "is_available": True,
+                        }
+                    ],
+                },
+            }
+        return {"status": "completed", "branch_results": branch_results}
+
+
 class _WholeRunCombatCompletionClient(_WholeRunBeamClient):
     async def emulate_actions(self, instance_id, items, *, timeout_s, simulation_options=None):
         del instance_id, timeout_s, simulation_options
@@ -149,6 +179,69 @@ class _WholeRunCombatCompletionClient(_WholeRunBeamClient):
                 "masked_emulator_dto": dto,
             }
         return {"status": "completed", "branch_results": branch_results}
+
+
+class _WholeRunCapacityClient(_WholeRunBeamClient):
+    max_emulate_actions_items = 8
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_branch_ids: set[str] = set()
+        self.max_observed_active = 0
+
+    async def emulate_actions(self, instance_id, items, *, timeout_s, simulation_options=None):
+        del instance_id, timeout_s, simulation_options
+        self.emulate_calls.append([dict(item) for item in items])
+        for item in items:
+            parent = item["parent_branch_id"]
+            if parent != "root" and parent not in self.active_branch_ids:
+                raise AssertionError(f"parent Branch {parent!r} was released too early")
+        if len(items) > self.max_emulate_actions_items:
+            raise AssertionError("request exceeded max_emulate_actions_items")
+        if len(self.active_branch_ids) + len(items) > self.max_emulate_actions_items:
+            raise AssertionError(
+                "Whole Run active Branch capacity exceeded; pruned branches were not released"
+            )
+
+        branch_results = {}
+        legal_actions = [
+            {"action_id": "good", "action_type": "card", "is_available": True},
+            {"action_id": "bad", "action_type": "system", "is_available": True},
+        ]
+        for item in items:
+            self.active_branch_ids.add(item["branch_id"])
+            score = 10.0 if item["action_id"] == "good" else 1.0
+            branch_results[item["branch_id"]] = {
+                "status": "completed",
+                "branch_id": item["branch_id"],
+                "parent_branch_id": item["parent_branch_id"],
+                "rng_id": item["rng_id"],
+                "decision_point_id": f"next-{item['branch_id']}",
+                "branch_log": [],
+                "masked_emulator_dto": {
+                    "boundary": "stable",
+                    "score": score,
+                    "legal_actions": legal_actions,
+                },
+            }
+        self.max_observed_active = max(
+            self.max_observed_active, len(self.active_branch_ids)
+        )
+        return {"status": "completed", "branch_results": branch_results}
+
+    async def cancel_branches(self, instance_id, branch_ids, *, timeout_s):
+        response = await super().cancel_branches(
+            instance_id, branch_ids, timeout_s=timeout_s
+        )
+        self.active_branch_ids.difference_update(branch_ids)
+        return response
+
+    async def release_branches(self, instance_id, branch_ids, *, timeout_s):
+        response = await super().release_branches(
+            instance_id, branch_ids, timeout_s=timeout_s
+        )
+        self.active_branch_ids.difference_update(branch_ids)
+        return response
 
 
 class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
@@ -276,6 +369,80 @@ class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.emulate_calls), 1)
         self.assertEqual(len(client.cancel_calls), 1)
         self.assertEqual(len(client.release_calls), 1)
+
+    async def test_non_combat_non_continuation_exit_is_not_value_scored(self) -> None:
+        client = _WholeRunRewardExitClient()
+        engine = CombatDecisionEngine(
+            client,
+            policy=_Policy(),
+            value_fn=_Value(),
+            beam_config=BeamSearchConfig(
+                max_depth=2,
+                beam_width=2,
+                top_k_actions=2,
+                beam_searchable_action_types=frozenset({"card", "system"}),
+            ),
+            fallback_selector=_Fallback(),
+        )
+        decision = {
+            "decision_point_id": "root-decision",
+            "masked_emulator_dto": {
+                "boundary": "stable",
+                "legal_actions": [
+                    {"action_id": "good", "action_type": "card", "is_available": True},
+                    {"action_id": "bad", "action_type": "system", "is_available": True},
+                ],
+            },
+        }
+
+        outcome = await engine.decide(
+            "inst-whole-run",
+            timeout_s=2.0,
+            decision=decision,
+        )
+
+        self.assertEqual(outcome.source, "heuristic_fallback")
+        self.assertEqual(outcome.chosen_action_id, "good")
+        self.assertIsNotNone(outcome.beam_result)
+        self.assertEqual(outcome.beam_result.reason, "not_beam_searchable")
+        self.assertEqual(len(client.emulate_calls), 1)
+
+    async def test_whole_run_releases_pruned_branches_between_depths(self) -> None:
+        client = _WholeRunCapacityClient()
+        engine = CombatDecisionEngine(
+            client,
+            policy=_Policy(),
+            value_fn=_Value(),
+            beam_config=BeamSearchConfig(
+                max_depth=4,
+                beam_width=2,
+                top_k_actions=2,
+                beam_searchable_action_types=frozenset({"card", "system"}),
+            ),
+        )
+        decision = {
+            "decision_point_id": "root-decision",
+            "masked_emulator_dto": {
+                "boundary": "stable",
+                "legal_actions": [
+                    {"action_id": "good", "action_type": "card", "is_available": True},
+                    {"action_id": "bad", "action_type": "system", "is_available": True},
+                ],
+            },
+        }
+
+        outcome = await engine.decide(
+            "inst-whole-run",
+            timeout_s=2.0,
+            decision=decision,
+        )
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "good")
+        self.assertEqual(len(client.emulate_calls), 4)
+        self.assertLessEqual(client.max_observed_active, client.max_emulate_actions_items)
+        self.assertGreaterEqual(len(client.release_calls), 2)
+        self.assertEqual(client.active_branch_ids, set())
 
     async def test_whole_run_combat_completion_is_scored_as_terminal(self) -> None:
         client = _WholeRunCombatCompletionClient()
