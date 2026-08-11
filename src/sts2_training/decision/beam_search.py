@@ -235,7 +235,12 @@ class BeamSearchEngine:
                 ) = self._score_frontier(item_meta, branch_results)
                 stats.value_ms += value_ms
                 stats.nodes_expanded += len(branch_results)
-                if branch_results and not next_beam and not newly_finished:
+                if (
+                    branch_results
+                    and not next_beam
+                    and not newly_finished
+                    and not hit_continuation_limit
+                ):
                     raise RuntimeError("all emulate_actions branch results faulted")
                 finished.extend(newly_finished)
 
