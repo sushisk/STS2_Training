@@ -26,6 +26,7 @@ from typing import Any
 from sts2_training.api.contract import JsonObject, ROOT_BRANCH_ID
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine, BeamSearchResult
+from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
 from sts2_training.selection.action_classification import available_actions
@@ -48,6 +49,9 @@ class CombatDecisionEngine:
     stay unique for the instance's whole lifetime (see `BranchIdAllocator`).
 
     This engine is root-only: `commit_action` can only advance the root Branch.
+    Structural branch coverage is applied after whatever PolicyModel is supplied,
+    so a learned policy remains a drop-in replacement without changing Beam's
+    minimum branch-recall invariants.
     """
 
     def __init__(
@@ -60,7 +64,8 @@ class CombatDecisionEngine:
         fallback_selector: HeuristicCombatSelector | None = None,
     ) -> None:
         self._client = client
-        policy_model = policy if policy is not None else PriorHeuristicPolicy()
+        ranked_policy = policy if policy is not None else PriorHeuristicPolicy()
+        policy_model = CoverageConstrainedPolicy(ranked_policy)
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
         self._beam = BeamSearchEngine(
             client, policy=policy_model, value_fn=value_model, config=beam_config
