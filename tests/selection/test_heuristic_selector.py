@@ -66,3 +66,40 @@ def test_select_raises_when_nothing_available() -> None:
 
     with pytest.raises(NoAvailableActionError):
         selector.select(legal_actions)
+
+
+def test_select_takes_explicit_empty_slot_potion_reward() -> None:
+    legal_actions = [
+        _action("a-skip", "choice_reward_skip"),
+        _action("a-take", "choice_reward_potion_take"),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0))
+
+    chosen = selector.select(legal_actions)
+
+    assert chosen["action_id"] == "a-take"
+
+
+def test_select_skips_full_belt_potion_reward_instead_of_random_replace() -> None:
+    legal_actions = [
+        _action("a-replace-0", "choice_reward_potion_replace"),
+        _action("a-replace-1", "choice_reward_potion_replace"),
+        _action("a-skip", "choice_reward_skip"),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0))
+
+    chosen = selector.select(legal_actions)
+
+    assert chosen["action_id"] == "a-skip"
+
+
+def test_select_replaces_when_reward_cannot_be_skipped() -> None:
+    legal_actions = [
+        _action("a-replace-0", "choice_reward_potion_replace"),
+        _action("a-replace-1", "choice_reward_potion_replace"),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0))
+
+    chosen = selector.select(legal_actions)
+
+    assert chosen["action_type"] == "choice_reward_potion_replace"
