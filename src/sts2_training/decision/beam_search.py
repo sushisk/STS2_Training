@@ -44,8 +44,8 @@ class BeamSearchConfig:
     max_batch_size: int = 64
     expand_partial: bool = True
     release_branches_on_finish: bool = True
-    # Low-level Beam remains domain-agnostic/conservative. CombatDecisionEngine applies
-    # the full Combat semantic scope separately from performance search modes.
+    # Action-type scope is independent from transport capability. Whole Run search is
+    # enabled only when the active client advertises a positive batch limit.
     beam_searchable_action_types: frozenset[str] = field(
         default_factory=lambda: frozenset({"system", "card", "potion"})
     )
@@ -173,7 +173,10 @@ class BeamSearchEngine:
             return BeamSearchResult(None, None, None, "invalid_root_decision", stats)
         if not root_dto.get("legal_actions"):
             return BeamSearchResult(None, None, None, "no_legal_actions", stats)
-        if getattr(self._client, "instance_type", None) == "whole_run":
+        if (
+            getattr(self._client, "instance_type", None) == "whole_run"
+            and _server_batch_limit(self._client) is None
+        ):
             return BeamSearchResult(None, None, None, "emulate_actions_not_supported", stats)
         if not _is_beam_searchable(root_dto, cfg.beam_searchable_action_types):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
@@ -375,8 +378,8 @@ class BeamSearchEngine:
     ) -> tuple[dict[str, Any], str | None]:
         cfg = self.config
         batch_size = cfg.max_batch_size
-        server_limit = getattr(self._client, "max_emulate_actions_items", None)
-        if isinstance(server_limit, int) and not isinstance(server_limit, bool) and server_limit > 0:
+        server_limit = _server_batch_limit(self._client)
+        if server_limit is not None:
             batch_size = min(batch_size, server_limit)
 
         branch_results: dict[str, Any] = {}
@@ -579,6 +582,13 @@ class BeamSearchEngine:
             )
             return False
         return True
+
+
+def _server_batch_limit(client: Any) -> int | None:
+    value = getattr(client, "max_emulate_actions_items", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
 
 
 def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
