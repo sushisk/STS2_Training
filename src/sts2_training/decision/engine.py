@@ -3,7 +3,7 @@
 
 Search-budget configuration and Combat decision scope are intentionally separate:
 `BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
-engine owns the default Combat decision phases eligible for Beam Search. Explicit
+engine owns the default Combat action types eligible for Beam Search. Explicit
 `BeamSearchConfig.beam_searchable_action_types` values remain authoritative when a
 caller supplies a config, so wrapper construction never silently widens semantic scope.
 Structural branch coverage is likewise separate from policy ranking so learned policies
@@ -31,8 +31,6 @@ from sts2_training.selection.heuristic_selector import HeuristicCombatSelector, 
 
 __all__ = ["CombatDecisionEngine", "DecisionOutcome", "NoAvailableActionError"]
 
-_WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
-
 
 @dataclass(frozen=True)
 class DecisionOutcome:
@@ -53,9 +51,8 @@ class CombatDecisionEngine:
 
     Whatever `PolicyModel` is supplied is wrapped in `CoverageConstrainedPolicy`, so
     structural branch-recall invariants survive replacing the heuristic prior with a
-    learned or batch-only model. Transport capability checks remain inside
-    `BeamSearchEngine`; Whole Run semantic admission additionally requires a Combat
-    boundary here.
+    learned or batch-only model. `BeamSearchEngine` owns transport capability and
+    Whole Run boundary admission for every frontier depth.
     """
 
     def __init__(
@@ -189,7 +186,7 @@ class CombatDecisionEngine:
 
         result: BeamSearchResult | None = None
         remaining = deadline - time.monotonic()
-        if remaining > 0 and _beam_semantically_allowed(self._client, dto):
+        if remaining > 0:
             result = await self._beam.search(instance_id, current_decision, timeout_s=remaining)
         if result is not None and _beam_result_is_actionable(result):
             return DecisionOutcome(current_decision, result.best_root_action_id, "beam_search", result)
@@ -234,12 +231,6 @@ class CombatDecisionEngine:
             outcome.chosen_action_id,
             timeout_s=remaining,
         )
-
-
-def _beam_semantically_allowed(client: Any, dto: Mapping[str, Any]) -> bool:
-    if getattr(client, "instance_type", None) != "whole_run":
-        return True
-    return dto.get("boundary") in _WHOLE_RUN_COMBAT_BOUNDARIES
 
 
 def _beam_result_is_actionable(result: BeamSearchResult) -> bool:
