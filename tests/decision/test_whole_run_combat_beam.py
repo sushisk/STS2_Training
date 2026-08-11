@@ -21,6 +21,11 @@ class _Value(ValueModel):
         return float(masked_emulator_dto["score"])
 
 
+class _Fallback:
+    def select(self, legal_actions):
+        return legal_actions[0]
+
+
 class _WholeRunBeamClient:
     instance_type = "whole_run"
     max_emulate_actions_items = 8
@@ -87,10 +92,11 @@ class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
         decision = {
             "decision_point_id": "root-decision",
             "masked_emulator_dto": {
+                "boundary": "stable",
                 "legal_actions": [
                     {"action_id": "good", "action_type": "card", "is_available": True},
                     {"action_id": "bad", "action_type": "system", "is_available": True},
-                ]
+                ],
             },
         }
 
@@ -106,6 +112,52 @@ class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.emulate_calls[0]), 2)
         self.assertEqual(len(client.cancel_calls), 1)
         self.assertEqual(len(client.release_calls), 1)
+
+    async def test_non_combat_whole_run_boundary_skips_beam_even_with_combat_like_actions(
+        self,
+    ) -> None:
+        client = _WholeRunBeamClient()
+        engine = CombatDecisionEngine(
+            client,
+            policy=_Policy(),
+            value_fn=_Value(),
+            beam_config=BeamSearchConfig(
+                max_depth=1,
+                beam_width=2,
+                top_k_actions=2,
+                beam_searchable_action_types=frozenset({"choice_confirm", "choice_skip"}),
+            ),
+            fallback_selector=_Fallback(),
+        )
+        decision = {
+            "decision_point_id": "event-decision",
+            "masked_emulator_dto": {
+                "boundary": "event_choice",
+                "legal_actions": [
+                    {
+                        "action_id": "confirm",
+                        "action_type": "choice_confirm",
+                        "is_available": True,
+                    },
+                    {
+                        "action_id": "skip",
+                        "action_type": "choice_skip",
+                        "is_available": True,
+                    },
+                ],
+            },
+        }
+
+        outcome = await engine.decide(
+            "inst-whole-run",
+            timeout_s=2.0,
+            decision=decision,
+        )
+
+        self.assertEqual(outcome.source, "heuristic_fallback")
+        self.assertEqual(outcome.chosen_action_id, "confirm")
+        self.assertIsNone(outcome.beam_result)
+        self.assertEqual(client.emulate_calls, [])
 
     def test_run_victory_receives_victory_bonus(self) -> None:
         value = HeuristicValueFunction().evaluate(
