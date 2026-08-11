@@ -6,9 +6,9 @@ model-free bootstrap implementation: it uses only information already exposed in
 expensive emulator/value-function evaluation.
 
 The heuristic is intentionally coarse. It does not try to reproduce card rules in
-Python; the Emulator remains authoritative. Its job is branch recall: keep a useful
-mix of offense, defense/utility, potions, target choices, and End Turn inside a small
-`top_k`, so beam search spends its simulations on stronger candidates.
+Python; the Emulator remains authoritative. Structural branch-retention constraints are
+applied separately by the Combat engine's candidate-coverage layer so replacing this
+policy with a learned model does not change Beam topology.
 """
 
 from __future__ import annotations
@@ -56,44 +56,6 @@ _RARITY_SCORE = {
     "Common": 0.5,
 }
 
-_CHOICE_CARD_TYPE_SCORE = {
-    "Attack": 1.5,
-    "Skill": 1.0,
-    "Power": 0.5,
-    "Curse": -100.0,
-    "Status": -50.0,
-}
-
-_CHOICE_RARITY_SCORE = {
-    "Rare": 4.0,
-    "Uncommon": 2.0,
-    "Common": 1.0,
-}
-
-# Card quality is only directionally useful for operations that select a card to
-# receive/use/upgrade. For discard/exhaust/remove-style choices the preference can be
-# reversed. Until the wire exposes normalized choice semantics to Training, keep the
-# prior neutral instead of guessing from card metadata.
-_KNOWN_POSITIVE_CHOICE_SEMANTICS = frozenset(
-    {
-        "gain",
-        "obtain",
-        "pick",
-        "play",
-        "replay",
-        "retrieve",
-        "upgrade",
-    }
-)
-_KNOWN_NEGATIVE_CHOICE_SEMANTICS = frozenset(
-    {
-        "discard",
-        "exhaust",
-        "remove",
-        "transform",
-    }
-)
-
 
 @dataclass(frozen=True)
 class ActionCandidate:
@@ -113,7 +75,12 @@ class _CombatContext:
 
 
 class PolicyModel:
-    """Proposes candidate actions for one decision, best-first, capped at `top_k`."""
+    """Ranks candidate actions for one decision, best-first, capped at `top_k`.
+
+    Structural coverage is deliberately not part of this contract. The candidate layer
+    may add required branch types after ranking so learned policies remain drop-in
+    replacements for the heuristic prior.
+    """
 
     def propose(
         self,
@@ -136,16 +103,14 @@ class PolicyModel:
 
 
 class PriorHeuristicPolicy(PolicyModel):
-    """Cheap, state-aware branch prior used before a learned policy exists.
+    """Cheap, state-aware action prior used before a learned policy exists.
 
-    The scorer deliberately consumes only public DTO fields. It favors cards that fit
-    the current danger level, promotes potions when incoming damage is severe, ranks
-    target choices by killability and enemy attack intent, and conservatively handles
-    pending-card choices whose semantics are not known.
-
-    Structural branches are retained in small shortlists: End Turn for ordinary combat,
-    at least one playable card when cards exist, and one legal confirm/skip action for a
-    pending choice. `rng`, when supplied, randomizes only equal-score ties.
+    The scorer consumes only contracted/public combat fields. It favors cards that fit
+    the current danger level, promotes potions when incoming damage is severe, and ranks
+    target choices by killability and enemy attack intent. `choice_card` options remain
+    neutral until the wire contract exposes one canonical normalized choice-semantics
+    field; Training intentionally does not guess semantics from incidental DTO keys.
+    `rng`, when supplied, randomizes only equal-score ties.
     """
 
     def __init__(self, rng: random.Random | None = None) -> None:
@@ -172,21 +137,9 @@ class PriorHeuristicPolicy(PolicyModel):
             return []
 
         context = _combat_context(masked_emulator_dto, available)
-        choice_card_positions: dict[int, int] = {}
-        choice_position = 0
-        for action in available:
-            if action.get("action_type") == CHOICE_CARD_ACTION_TYPE:
-                choice_card_positions[id(action)] = choice_position
-                choice_position += 1
-
         scored: list[tuple[float, float, int, JsonObject]] = []
         for index, action in enumerate(available):
-            score = _score_action(
-                action,
-                masked_emulator_dto,
-                context,
-                choice_card_position=choice_card_positions.get(id(action)),
-            )
+            score = _score_action(action, masked_emulator_dto, context)
             tie_break = self._rng.random() if self._rng is not None else 0.0
             scored.append((score, tie_break, index, action))
 
@@ -195,74 +148,16 @@ class PriorHeuristicPolicy(PolicyModel):
         else:
             scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
 
-        selected = scored[:top_k]
-        selected = _retain_structural_branches(selected, scored, available, top_k=top_k)
-        return [ActionCandidate(action_id=action["action_id"]) for _, _, _, action in selected]
-
-
-def _retain_structural_branches(
-    selected: list[tuple[float, float, int, JsonObject]],
-    scored: list[tuple[float, float, int, JsonObject]],
-    available: Sequence[JsonObject],
-    *,
-    top_k: int,
-) -> list[tuple[float, float, int, JsonObject]]:
-    if top_k < 2:
-        return selected
-
-    required: list[tuple[float, float, int, JsonObject]] = []
-    if _is_regular_combat_action_set(available):
-        best_system = _best_row_of_type(scored, {_SYSTEM_ACTION_TYPE})
-        best_card = _best_row_of_type(scored, {CARD_ACTION_TYPE})
-        if best_system is not None:
-            required.append(best_system)
-        if best_card is not None:
-            required.append(best_card)
-        if top_k >= 3:
-            best_potion = _best_row_of_type(scored, {_POTION_ACTION_TYPE})
-            if best_potion is not None:
-                required.append(best_potion)
-
-    completion = _best_row_of_type(scored, {CHOICE_CONFIRM_ACTION_TYPE, CHOICE_SKIP_ACTION_TYPE})
-    if completion is not None and any(
-        action.get("action_type") == CHOICE_CARD_ACTION_TYPE for action in available
-    ):
-        required.append(completion)
-
-    required = required[:top_k]
-    for row in required:
-        selected = _reserve_row(selected, row, protected_rows=required)
-
-    selected.sort(key=scored.index)
-    return selected
-
-
-def _best_row_of_type(
-    scored: Sequence[tuple[float, float, int, JsonObject]], action_types: set[str]
-) -> tuple[float, float, int, JsonObject] | None:
-    return next((row for row in scored if row[3].get("action_type") in action_types), None)
-
-
-def _reserve_row(
-    selected: list[tuple[float, float, int, JsonObject]],
-    required: tuple[float, float, int, JsonObject],
-    *,
-    protected_rows: Sequence[tuple[float, float, int, JsonObject]],
-) -> list[tuple[float, float, int, JsonObject]]:
-    if required in selected:
-        return selected
-    for index in range(len(selected) - 1, -1, -1):
-        if selected[index] not in protected_rows:
-            return selected[:index] + [required] + selected[index + 1 :]
-    return selected
+        return [
+            ActionCandidate(action_id=action["action_id"])
+            for _, _, _, action in scored[:top_k]
+        ]
 
 
 def _score_action(
     action: JsonObject,
     dto: Mapping[str, Any],
     context: _CombatContext,
-    *,
-    choice_card_position: int | None,
 ) -> float:
     action_type = action.get("action_type")
     score = _ACTION_TYPE_BASE_SCORE.get(action_type, -10.0)
@@ -276,7 +171,10 @@ def _score_action(
     if action_type == _CHOICE_TARGET_ACTION_TYPE:
         return score + _score_target(action, dto)
     if action_type == CHOICE_CARD_ACTION_TYPE:
-        return score + _score_choice_card(action, dto, choice_card_position)
+        # No canonical normalized choice operation exists in the live wire contract.
+        # Card rarity/type can be directionally wrong for discard/exhaust/remove choices,
+        # so keep option ranking neutral until that semantics is contractually exposed.
+        return score
     if action_type in (CHOICE_CONFIRM_ACTION_TYPE, CHOICE_SKIP_ACTION_TYPE):
         return score + _score_choice_completion(action_type, dto)
     return score
@@ -376,46 +274,6 @@ def _score_target(action: JsonObject, dto: Mapping[str, Any]) -> float:
     enemy = _enemy_for_target(params, dto)
     incoming = _enemy_attack(enemy)
     return 20.0 * (1.0 - min(1.0, effective_hp_ratio)) + min(25.0, incoming * 0.75)
-
-
-def _score_choice_card(
-    action: JsonObject,
-    dto: Mapping[str, Any],
-    choice_card_position: int | None,
-) -> float:
-    semantics = _choice_semantics(dto)
-    if semantics is None:
-        return 0.0
-
-    card = _choice_option_for(action, dto, choice_card_position)
-    if not card:
-        return 0.0
-
-    quality = _CHOICE_RARITY_SCORE.get(_string(card.get("rarity")), 0.0)
-    quality += _CHOICE_CARD_TYPE_SCORE.get(_string(card.get("type")), 0.0)
-    if card.get("upgraded") is True:
-        quality += 2.0
-    cost = _finite_number(card.get("cost"))
-    if cost is not None:
-        quality += max(0.0, 3.0 - cost)
-
-    if semantics in _KNOWN_POSITIVE_CHOICE_SEMANTICS:
-        return quality
-    if semantics in _KNOWN_NEGATIVE_CHOICE_SEMANTICS:
-        return -quality
-    return 0.0
-
-
-def _choice_semantics(dto: Mapping[str, Any]) -> str | None:
-    pending = _mapping(dto.get("pendingChoice"))
-    for key in ("semantics", "choiceSemantics", "operation", "choiceType", "kind"):
-        value = _string(pending.get(key))
-        if value:
-            normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
-            for known in _KNOWN_POSITIVE_CHOICE_SEMANTICS | _KNOWN_NEGATIVE_CHOICE_SEMANTICS:
-                if normalized == known or normalized.endswith("_" + known):
-                    return known
-    return None
 
 
 def _score_choice_completion(action_type: str, dto: Mapping[str, Any]) -> float:
@@ -532,37 +390,12 @@ def _enemy_for_target(params: Mapping[str, Any], dto: Mapping[str, Any]) -> Mapp
     return {}
 
 
-def _choice_option_for(
-    action: JsonObject,
-    dto: Mapping[str, Any],
-    choice_card_position: int | None,
-) -> Mapping[str, Any]:
-    options = _mapping_sequence(_mapping(dto.get("pendingChoice")).get("options"))
-    if choice_card_position is not None and 0 <= choice_card_position < len(options):
-        return options[choice_card_position]
-
-    params = _mapping(action.get("parameters"))
-    card_id = _string(params.get("cardId")) or _string(action.get("label"))
-    if card_id is not None:
-        for option in options:
-            if option.get("id") == card_id:
-                return option
-    return {}
-
-
 def _enemy_attack(enemy: Mapping[str, Any]) -> float:
     intent = _mapping(enemy.get("intent"))
     damage = max(0.0, _finite_number(intent.get("attackDamage")) or 0.0)
     repeats_value = _finite_number(intent.get("attackRepeats"))
     repeats = max(0.0, 1.0 if repeats_value is None else repeats_value)
     return damage * repeats
-
-
-def _is_regular_combat_action_set(actions: Sequence[JsonObject]) -> bool:
-    action_types = {action.get("action_type") for action in actions}
-    return _SYSTEM_ACTION_TYPE in action_types and bool(
-        action_types & {CARD_ACTION_TYPE, _POTION_ACTION_TYPE}
-    )
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
