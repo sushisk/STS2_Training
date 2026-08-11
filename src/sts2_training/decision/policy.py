@@ -70,6 +70,30 @@ _CHOICE_RARITY_SCORE = {
     "Common": 1.0,
 }
 
+# Card quality is only directionally useful for operations that select a card to
+# receive/use/upgrade. For discard/exhaust/remove-style choices the preference can be
+# reversed. Until the wire exposes normalized choice semantics to Training, keep the
+# prior neutral instead of guessing from card metadata.
+_KNOWN_POSITIVE_CHOICE_SEMANTICS = frozenset(
+    {
+        "gain",
+        "obtain",
+        "pick",
+        "play",
+        "replay",
+        "retrieve",
+        "upgrade",
+    }
+)
+_KNOWN_NEGATIVE_CHOICE_SEMANTICS = frozenset(
+    {
+        "discard",
+        "exhaust",
+        "remove",
+        "transform",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ActionCandidate:
@@ -89,14 +113,7 @@ class _CombatContext:
 
 
 class PolicyModel:
-    """Proposes candidate actions for one decision (`legal_actions` plus the
-    full `masked_emulator_dto` they came from), best-first, capped at `top_k`.
-
-    Implement `propose` for scalar inference, or override `propose_batch`
-    directly for a batch-only learned model. A batch-only model does not need
-    to provide a dummy scalar implementation merely to satisfy an abstract
-    base-class contract.
-    """
+    """Proposes candidate actions for one decision, best-first, capped at `top_k`."""
 
     def propose(
         self,
@@ -113,12 +130,6 @@ class PolicyModel:
         *,
         top_k: int,
     ) -> list[list[ActionCandidate]]:
-        """Batched counterpart of `propose`, one entry per request, in order.
-
-        Override this directly in a learned policy for real batched inference;
-        the default here is a plain loop and carries none of the throughput
-        benefit the batched call is meant to provide.
-        """
         return [
             self.propose(legal_actions, dto, top_k=top_k) for legal_actions, dto in requests
         ]
@@ -129,14 +140,12 @@ class PriorHeuristicPolicy(PolicyModel):
 
     The scorer deliberately consumes only public DTO fields. It favors cards that fit
     the current danger level, promotes potions when incoming damage is severe, ranks
-    target choices by killability and enemy attack intent, and understands basic
-    pending-card-choice quality. It never reimplements card effects; beam simulation
-    and the value function remain authoritative.
+    target choices by killability and enemy attack intent, and conservatively handles
+    pending-card choices whose semantics are not known.
 
-    For ordinary combat decisions, one End Turn/system action is retained whenever
-    `top_k >= 2`. This prevents a hand with many playable cards from crowding the
-    turn-boundary branch out of the beam entirely. `rng`, when supplied, randomizes
-    only equal-score ties rather than discarding the heuristic ordering.
+    Structural branches are retained in small shortlists: End Turn for ordinary combat,
+    at least one playable card when cards exist, and one legal confirm/skip action for a
+    pending choice. `rng`, when supplied, randomizes only equal-score ties.
     """
 
     def __init__(self, rng: random.Random | None = None) -> None:
@@ -152,8 +161,6 @@ class PriorHeuristicPolicy(PolicyModel):
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
             raise ValueError("top_k must be a positive integer")
 
-        # Filter in exactly one pass. Besides avoiding redundant work, this keeps the
-        # availability contract simple for proxy/mocked Mapping implementations.
         available: list[JsonObject] = []
         for action in legal_actions:
             if action.get("is_available") is False:
@@ -189,20 +196,65 @@ class PriorHeuristicPolicy(PolicyModel):
             scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
 
         selected = scored[:top_k]
-
-        # End Turn is strategically different from "play another card" and is the
-        # transition that exposes enemy-turn consequences. Reserve one slot for it in
-        # a real combat-action decision, matching the turn-beam design requirement.
-        if top_k >= 2 and _is_regular_combat_action_set(available):
-            best_system = next(
-                (row for row in scored if row[3].get("action_type") == _SYSTEM_ACTION_TYPE),
-                None,
-            )
-            if best_system is not None and best_system not in selected:
-                selected = selected[:-1] + [best_system]
-                selected.sort(key=lambda row: scored.index(row))
-
+        selected = _retain_structural_branches(selected, scored, available, top_k=top_k)
         return [ActionCandidate(action_id=action["action_id"]) for _, _, _, action in selected]
+
+
+def _retain_structural_branches(
+    selected: list[tuple[float, float, int, JsonObject]],
+    scored: list[tuple[float, float, int, JsonObject]],
+    available: Sequence[JsonObject],
+    *,
+    top_k: int,
+) -> list[tuple[float, float, int, JsonObject]]:
+    if top_k < 2:
+        return selected
+
+    required: list[tuple[float, float, int, JsonObject]] = []
+    if _is_regular_combat_action_set(available):
+        best_system = _best_row_of_type(scored, {_SYSTEM_ACTION_TYPE})
+        best_card = _best_row_of_type(scored, {CARD_ACTION_TYPE})
+        if best_system is not None:
+            required.append(best_system)
+        if best_card is not None:
+            required.append(best_card)
+        if top_k >= 3:
+            best_potion = _best_row_of_type(scored, {_POTION_ACTION_TYPE})
+            if best_potion is not None:
+                required.append(best_potion)
+
+    completion = _best_row_of_type(scored, {CHOICE_CONFIRM_ACTION_TYPE, CHOICE_SKIP_ACTION_TYPE})
+    if completion is not None and any(
+        action.get("action_type") == CHOICE_CARD_ACTION_TYPE for action in available
+    ):
+        required.append(completion)
+
+    required = required[:top_k]
+    for row in required:
+        selected = _reserve_row(selected, row, protected_rows=required)
+
+    selected.sort(key=scored.index)
+    return selected
+
+
+def _best_row_of_type(
+    scored: Sequence[tuple[float, float, int, JsonObject]], action_types: set[str]
+) -> tuple[float, float, int, JsonObject] | None:
+    return next((row for row in scored if row[3].get("action_type") in action_types), None)
+
+
+def _reserve_row(
+    selected: list[tuple[float, float, int, JsonObject]],
+    required: tuple[float, float, int, JsonObject],
+    *,
+    protected_rows: Sequence[tuple[float, float, int, JsonObject]],
+) -> list[tuple[float, float, int, JsonObject]]:
+    if required in selected:
+        return selected
+    for index in range(len(selected) - 1, -1, -1):
+        if selected[index] not in protected_rows:
+            return selected[:index] + [required] + selected[index + 1 :]
+    return selected
 
 
 def _score_action(
@@ -253,11 +305,9 @@ def _score_playable_card(
     if cost is None:
         cost = _finite_number(card.get("cost"))
     if cost is not None:
-        # Cheap actions are easier to combine in one turn, but keep this bonus small so
-        # expensive high-impact cards can still win on card-type/threat context.
         score += max(0.0, 2.0 - cost) * 1.5
         if context.energy is not None and cost > context.energy:
-            score -= 100.0  # defensive guard; normally such a card is not available.
+            score -= 100.0
 
     danger = min(1.0, context.danger_ratio)
     if card_type == "Skill":
@@ -267,9 +317,6 @@ def _score_playable_card(
     elif card_type == "Attack":
         score += 4.0 * (1.0 - danger)
 
-    # Starter Defends are known defensive cards across characters. This narrow hint is
-    # intentionally much smaller than an effect table: the Emulator still decides what
-    # the card actually does; it only helps the prior react to obvious lethal pressure.
     if card_id is not None and card_id.startswith("DEFEND"):
         score += 10.0 * danger
 
@@ -284,9 +331,6 @@ def _score_potion(
     dto: Mapping[str, Any],
     context: _CombatContext,
 ) -> float:
-    # Potions are consumable, so they sit below normal cards in safe states. As damage
-    # pressure rises, ensure beam search actually explores spending one rather than
-    # losing while preserving it.
     danger = min(1.0, context.danger_ratio)
     score = 30.0 * danger
     if context.lethal_threat:
@@ -299,7 +343,6 @@ def _score_potion(
 
     potion = _potion_for(action, dto)
     rarity = _string(potion.get("rarity"))
-    # Small conservation prior only; emergency pressure above dominates it.
     if rarity == "Rare":
         score -= 4.0
     elif rarity == "Uncommon":
@@ -332,9 +375,6 @@ def _score_target(action: JsonObject, dto: Mapping[str, Any]) -> float:
 
     enemy = _enemy_for_target(params, dto)
     incoming = _enemy_attack(enemy)
-
-    # Prefer targets that are closer to removal, with a substantial bonus for removing
-    # enemies currently representing immediate incoming damage.
     return 20.0 * (1.0 - min(1.0, effective_hp_ratio)) + min(25.0, incoming * 0.75)
 
 
@@ -343,18 +383,39 @@ def _score_choice_card(
     dto: Mapping[str, Any],
     choice_card_position: int | None,
 ) -> float:
+    semantics = _choice_semantics(dto)
+    if semantics is None:
+        return 0.0
+
     card = _choice_option_for(action, dto, choice_card_position)
     if not card:
         return 0.0
 
-    score = _CHOICE_RARITY_SCORE.get(_string(card.get("rarity")), 0.0)
-    score += _CHOICE_CARD_TYPE_SCORE.get(_string(card.get("type")), 0.0)
+    quality = _CHOICE_RARITY_SCORE.get(_string(card.get("rarity")), 0.0)
+    quality += _CHOICE_CARD_TYPE_SCORE.get(_string(card.get("type")), 0.0)
     if card.get("upgraded") is True:
-        score += 2.0
+        quality += 2.0
     cost = _finite_number(card.get("cost"))
     if cost is not None:
-        score += max(0.0, 3.0 - cost)
-    return score
+        quality += max(0.0, 3.0 - cost)
+
+    if semantics in _KNOWN_POSITIVE_CHOICE_SEMANTICS:
+        return quality
+    if semantics in _KNOWN_NEGATIVE_CHOICE_SEMANTICS:
+        return -quality
+    return 0.0
+
+
+def _choice_semantics(dto: Mapping[str, Any]) -> str | None:
+    pending = _mapping(dto.get("pendingChoice"))
+    for key in ("semantics", "choiceSemantics", "operation", "choiceType", "kind"):
+        value = _string(pending.get(key))
+        if value:
+            normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+            for known in _KNOWN_POSITIVE_CHOICE_SEMANTICS | _KNOWN_NEGATIVE_CHOICE_SEMANTICS:
+                if normalized == known or normalized.endswith("_" + known):
+                    return known
+    return None
 
 
 def _score_choice_completion(action_type: str, dto: Mapping[str, Any]) -> float:
@@ -400,10 +461,6 @@ def _combat_context(
 
 
 def _hand_card_for(action: JsonObject, dto: Mapping[str, Any]) -> Mapping[str, Any]:
-    # `action_id` is deliberately opaque on the Training wire. Match against the
-    # public semantic parameters instead of relying on the Emulator's current numeric
-    # hand-index implementation detail. Duplicate copies normally share type/rarity;
-    # cost/target matching narrows the rare per-instance differences.
     params = _mapping(action.get("parameters"))
     card_id = _string(params.get("cardId"))
     if card_id is None:
@@ -419,14 +476,32 @@ def _hand_card_for(action: JsonObject, dto: Mapping[str, Any]) -> Mapping[str, A
 
     action_cost = _finite_number(params.get("cost"))
     target_type = _string(params.get("targetType"))
-    for card in matches:
-        card_cost = _finite_number(card.get("cost"))
-        card_target = _string(card.get("targetType"))
-        if (action_cost is None or card_cost == action_cost) and (
-            target_type is None or card_target == target_type
-        ):
-            return card
-    return matches[0]
+    narrowed = [
+        card
+        for card in matches
+        if (action_cost is None or _finite_number(card.get("cost")) == action_cost)
+        and (target_type is None or _string(card.get("targetType")) == target_type)
+    ]
+    if len(narrowed) == 1:
+        return narrowed[0]
+    if narrowed:
+        matches = narrowed
+    return _common_card_metadata(matches)
+
+
+def _common_card_metadata(cards: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """Return only metadata that is identical across ambiguous card copies."""
+    if not cards:
+        return {}
+    common: dict[str, Any] = {}
+    keys = set(cards[0])
+    for card in cards[1:]:
+        keys &= set(card)
+    for key in keys:
+        first = cards[0].get(key)
+        if all(card.get(key) == first for card in cards[1:]):
+            common[key] = first
+    return common
 
 
 def _potion_for(action: JsonObject, dto: Mapping[str, Any]) -> Mapping[str, Any]:
