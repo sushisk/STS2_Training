@@ -1,9 +1,8 @@
 """Placeholder decision logic for the initial data-collection stage.
 
-Picks uniformly at random within a priority-ordered `action_type` category, so that
-combat decisions can be driven end-to-end (and logged) before any learned or
-hand-tuned per-category logic exists. See `how_to_use.md` for the expected input
-shape and where this plugs into the API client.
+Picks uniformly at random within a priority-ordered `action_type` category, with one
+canonical-semantics-aware rule for `choice_card` decisions. See `how_to_use.md` for the
+expected input shape and where this plugs into the API client.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from sts2_training.selection.action_classification import (
     available_actions,
     group_by_action_type,
 )
+from sts2_training.selection.choice_card_heuristic import choice_card_preference_scores
 
 _CATEGORY_PRIORITY = (
     CARD_ACTION_TYPE,
@@ -51,20 +51,26 @@ class NoAvailableActionError(RuntimeError):
 
 
 class HeuristicCombatSelector:
-    """Classifies `legal_actions` by `action_type` and picks one at random.
+    """Classifies `legal_actions` by `action_type` and chooses one candidate.
 
     Categories are tried in `_CATEGORY_PRIORITY` order; the first non-empty category
-    is chosen from. Reward decisions receive one conservative potion-specific rule:
-    take a potion when an empty-slot TAKE is explicitly published, otherwise prefer
-    skipping a full-belt PotionReward over randomly discarding an existing potion; if
-    skipping is disallowed, choose among the available replacement slots. Other unknown
-    action types continue to fall back to a single random pool.
+    is chosen from. Canonical v1 `choice_card` semantics use the same card-quality
+    preference as the Beam prior, while missing/malformed/future semantics remain
+    random. Reward decisions receive one conservative potion-specific rule: take a
+    potion when an empty-slot TAKE is explicitly published, otherwise prefer skipping a
+    full-belt PotionReward over randomly discarding an existing potion; if skipping is
+    disallowed, choose among the available replacement slots. Other unknown action types
+    continue to fall back to a single random pool.
     """
 
     def __init__(self, rng: random.Random | None = None) -> None:
         self._rng = rng or random.Random()
 
-    def select(self, legal_actions: Sequence[JsonObject]) -> JsonObject:
+    def select(
+        self,
+        legal_actions: Sequence[JsonObject],
+        masked_emulator_dto: Mapping[str, Any] | None = None,
+    ) -> JsonObject:
         actions = available_actions(legal_actions)
         if not actions:
             raise NoAvailableActionError("no available legal_actions to select from")
@@ -81,12 +87,33 @@ class HeuristicCombatSelector:
                 return self._choose(reward_skips)
             return self._choose(potion_replacements)
 
+        dto = masked_emulator_dto if masked_emulator_dto is not None else {}
         for action_type in _CATEGORY_PRIORITY:
             candidates = by_type.get(action_type)
-            if candidates:
-                return self._choose(candidates)
+            if not candidates:
+                continue
+            if action_type == CHOICE_CARD_ACTION_TYPE:
+                return self._choose_choice_card(candidates, dto)
+            return self._choose(candidates)
 
         return self._choose(actions)
+
+    def _choose_choice_card(
+        self,
+        candidates: Sequence[JsonObject],
+        masked_emulator_dto: Mapping[str, Any],
+    ) -> JsonObject:
+        scores = choice_card_preference_scores(candidates, masked_emulator_dto)
+        if not scores:
+            return self._choose(candidates)
+
+        best_score = max(scores.values())
+        preferred = [
+            action
+            for action in candidates
+            if scores.get(action.get("action_id")) == best_score
+        ]
+        return self._choose(preferred or candidates)
 
     def _choose(self, candidates: Sequence[JsonObject]) -> JsonObject:
         return candidates[self._rng.randrange(len(candidates))]
