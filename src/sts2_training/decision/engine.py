@@ -12,6 +12,7 @@ cannot silently change Beam topology.
 
 from __future__ import annotations
 
+import inspect
 import math
 import time
 from collections.abc import Mapping, Sequence
@@ -187,7 +188,7 @@ class CombatDecisionEngine:
         if result is not None and _beam_result_is_actionable(result):
             return DecisionOutcome(current_decision, result.best_root_action_id, "beam_search", result)
 
-        chosen = self._fallback.select(legal_actions)
+        chosen = _select_fallback(self._fallback, legal_actions, dto)
         if not isinstance(chosen, Mapping):
             raise RuntimeError("fallback selector must return an available legal action mapping")
         chosen_action_id = chosen.get("action_id")
@@ -227,6 +228,30 @@ class CombatDecisionEngine:
             outcome.chosen_action_id,
             timeout_s=remaining,
         )
+
+
+def _select_fallback(
+    fallback_selector: Any,
+    legal_actions: Sequence[Mapping[str, Any]],
+    masked_emulator_dto: Mapping[str, Any],
+) -> Any:
+    """Call context-aware selectors without breaking the legacy one-argument contract.
+
+    Signature binding is used before invocation rather than catching ``TypeError`` from
+    the selector itself, so a real selector bug is never mistaken for an old signature.
+    If a callable does not expose an inspectable signature, the legacy call is the safe
+    compatibility default.
+    """
+
+    select = fallback_selector.select
+    try:
+        inspect.signature(select).bind(
+            legal_actions,
+            masked_emulator_dto=masked_emulator_dto,
+        )
+    except (TypeError, ValueError):
+        return select(legal_actions)
+    return select(legal_actions, masked_emulator_dto=masked_emulator_dto)
 
 
 def _beam_result_is_actionable(result: BeamSearchResult) -> bool:

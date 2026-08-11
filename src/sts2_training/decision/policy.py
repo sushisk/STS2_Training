@@ -23,6 +23,7 @@ from sts2_training.selection.action_classification import (
     CHOICE_CONFIRM_ACTION_TYPE,
     CHOICE_SKIP_ACTION_TYPE,
 )
+from sts2_training.selection.choice_card_heuristic import choice_card_preference_scores
 
 JsonObject = Mapping[str, Any]
 
@@ -66,6 +67,7 @@ class ActionCandidate:
 class _CombatContext:
     observation: CombatObservation
     playable_cards: int
+    choice_card_scores: Mapping[str, float]
 
 
 class PolicyModel:
@@ -100,10 +102,11 @@ class PriorHeuristicPolicy(PolicyModel):
     """Cheap, state-aware action prior used before a learned policy exists.
 
     The scorer consumes the shared normalized `CombatObservation`. It favors cards that
-    fit current danger, promotes potions under pressure, and ranks targets using
-    killability and normalized enemy attack intent. `choice_card` options remain neutral
-    until the wire contract exposes one canonical normalized choice-semantics field.
-    `rng`, when supplied, randomizes only equal-score ties.
+    fit current danger, promotes potions under pressure, ranks targets using killability
+    and normalized enemy attack intent, and uses only canonical v1 `choice_card`
+    semantics/`optionId` identity for card-choice quality. Unknown, malformed, future, or
+    inconsistent choice metadata remains neutral. `rng`, when supplied, randomizes only
+    equal-score ties.
     """
 
     def __init__(self, rng: random.Random | None = None) -> None:
@@ -134,6 +137,9 @@ class PriorHeuristicPolicy(PolicyModel):
             observation=observation,
             playable_cards=sum(
                 1 for action in available if action.get("action_type") == CARD_ACTION_TYPE
+            ),
+            choice_card_scores=choice_card_preference_scores(
+                available, masked_emulator_dto
             ),
         )
         scored: list[tuple[float, float, int, JsonObject]] = []
@@ -170,6 +176,9 @@ def _score_action(
     if action_type == _CHOICE_TARGET_ACTION_TYPE:
         return score + _score_target(action, context.observation)
     if action_type == CHOICE_CARD_ACTION_TYPE:
+        action_id = action.get("action_id")
+        if isinstance(action_id, str):
+            return score + context.choice_card_scores.get(action_id, 0.0)
         return score
     if action_type in (CHOICE_CONFIRM_ACTION_TYPE, CHOICE_SKIP_ACTION_TYPE):
         return score + _score_choice_completion(action_type, dto)
