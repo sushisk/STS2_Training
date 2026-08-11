@@ -18,6 +18,9 @@ CARD_ACTION_TYPE = "card"
 CHOICE_CARD_ACTION_TYPE = "choice_card"
 CHOICE_CONFIRM_ACTION_TYPE = "choice_confirm"
 CHOICE_SKIP_ACTION_TYPE = "choice_skip"
+CHOICE_REWARD_POTION_TAKE_ACTION_TYPE = "choice_reward_potion_take"
+CHOICE_REWARD_POTION_REPLACE_ACTION_TYPE = "choice_reward_potion_replace"
+CHOICE_REWARD_SKIP_ACTION_TYPE = "choice_reward_skip"
 
 
 def available_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
@@ -47,6 +50,18 @@ def choice_confirm_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObje
 
 def choice_skip_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
     return _actions_of_type(legal_actions, CHOICE_SKIP_ACTION_TYPE)
+
+
+def reward_potion_take_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
+    return _actions_of_type(legal_actions, CHOICE_REWARD_POTION_TAKE_ACTION_TYPE)
+
+
+def reward_potion_replace_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
+    return _actions_of_type(legal_actions, CHOICE_REWARD_POTION_REPLACE_ACTION_TYPE)
+
+
+def reward_skip_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
+    return _actions_of_type(legal_actions, CHOICE_REWARD_SKIP_ACTION_TYPE)
 
 
 def group_by_action_type(
