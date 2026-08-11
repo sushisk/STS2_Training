@@ -10,6 +10,7 @@ import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.policy import PriorHeuristicPolicy
 from sts2_training.decision.value import HeuristicValueFunction
@@ -68,7 +69,11 @@ class _FakeConnection:
                 "branch_id": "root",
                 "decision_point_id": "d-root-2",
                 "branch_log": [],
-                "masked_emulator_dto": {"legal_actions": [{"action_id": "noop", "action_type": "system"}]},
+                "masked_emulator_dto": {
+                    "legal_actions": [
+                        {"action_id": "noop", "action_type": "system"}
+                    ]
+                },
             }
 
         if operation == "emulate_actions":
@@ -130,6 +135,17 @@ def _victory_dto() -> dict:
     }
 
 
+def _defeat_dto() -> dict:
+    return {
+        "terminal": True,
+        "outcome": "defeat",
+        "hp": 0,
+        "maxHp": 50,
+        "enemies": [{"hp": 10, "maxHp": 10, "isAlive": True, "intent": {}}],
+        "legal_actions": [],
+    }
+
+
 def _alive_dto() -> dict:
     return {
         "hp": 40,
@@ -143,6 +159,8 @@ _COMBAT_ACTIONS = [
     {"action_id": "strike", "action_type": "card", "is_available": True},
     {"action_id": "end", "action_type": "system", "is_available": True},
 ]
+
+_LEGACY_COMBAT_ACTION_TYPES = frozenset({"system", "card", "potion"})
 
 
 class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
@@ -158,8 +176,16 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
             "masked_emulator_dto": {"legal_actions": _COMBAT_ACTIONS},
         }
         connection.emulate_results = {
-            ("root", "strike"): {"status": "completed", "decision_point_id": "d-b1", "masked_emulator_dto": _victory_dto()},
-            ("root", "end"): {"status": "completed", "decision_point_id": "d-b2", "masked_emulator_dto": _alive_dto()},
+            ("root", "strike"): {
+                "status": "completed",
+                "decision_point_id": "d-b1",
+                "masked_emulator_dto": _victory_dto(),
+            },
+            ("root", "end"): {
+                "status": "completed",
+                "decision_point_id": "d-b2",
+                "masked_emulator_dto": _alive_dto(),
+            },
         }
         client = await self._client(connection)
         engine = CombatDecisionEngine(
@@ -177,6 +203,131 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
         response = await engine.decide_and_commit("inst-001", timeout_s=5.0)
         self.assertEqual(response["status"], "completed")
         self.assertEqual(connection.committed_action_ids, ["strike"])
+
+    async def test_default_engine_beam_searches_choice_target(self) -> None:
+        connection = _FakeConnection()
+        actions = [
+            {
+                "action_id": "target-good",
+                "action_type": "choice_target",
+                "is_available": True,
+            },
+            {
+                "action_id": "target-bad",
+                "action_type": "choice_target",
+                "is_available": True,
+            },
+        ]
+        connection.root_decision = {
+            "decision_point_id": "d-root-target",
+            "masked_emulator_dto": {"legal_actions": actions},
+        }
+        connection.emulate_results = {
+            ("root", "target-good"): {
+                "status": "completed",
+                "decision_point_id": "d-target-good",
+                "masked_emulator_dto": _victory_dto(),
+            },
+            ("root", "target-bad"): {
+                "status": "completed",
+                "decision_point_id": "d-target-bad",
+                "masked_emulator_dto": _defeat_dto(),
+            },
+        }
+        client = await self._client(connection)
+        engine = CombatDecisionEngine(client)
+
+        outcome = await engine.decide("inst-001", timeout_s=5.0)
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "target-good")
+        self.assertIn("emulate_actions", [m["operation"] for m in connection.messages])
+
+    async def test_default_engine_beam_searches_choice_card(self) -> None:
+        connection = _FakeConnection()
+        actions = [
+            {
+                "action_id": "choice-good",
+                "action_type": "choice_card",
+                "is_available": True,
+            },
+            {
+                "action_id": "choice-bad",
+                "action_type": "choice_card",
+                "is_available": True,
+            },
+        ]
+        connection.root_decision = {
+            "decision_point_id": "d-root-card-choice",
+            "masked_emulator_dto": {"legal_actions": actions},
+        }
+        connection.emulate_results = {
+            ("root", "choice-good"): {
+                "status": "completed",
+                "decision_point_id": "d-choice-good",
+                "masked_emulator_dto": _victory_dto(),
+            },
+            ("root", "choice-bad"): {
+                "status": "completed",
+                "decision_point_id": "d-choice-bad",
+                "masked_emulator_dto": _defeat_dto(),
+            },
+        }
+        client = await self._client(connection)
+        engine = CombatDecisionEngine(client)
+
+        outcome = await engine.decide("inst-001", timeout_s=5.0)
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "choice-good")
+        self.assertIn("emulate_actions", [m["operation"] for m in connection.messages])
+
+    async def test_explicit_beam_config_scope_is_preserved(self) -> None:
+        connection = _FakeConnection()
+        actions = [
+            {
+                "action_id": "target-a",
+                "action_type": "choice_target",
+                "is_available": True,
+            },
+            {
+                "action_id": "target-b",
+                "action_type": "choice_target",
+                "is_available": True,
+            },
+        ]
+        connection.root_decision = {
+            "decision_point_id": "d-root-target",
+            "masked_emulator_dto": {"legal_actions": actions},
+        }
+        client = await self._client(connection)
+        engine = CombatDecisionEngine(
+            client,
+            beam_config=BeamSearchConfig(
+                max_depth=1,
+                beam_searchable_action_types=_LEGACY_COMBAT_ACTION_TYPES,
+            ),
+            fallback_selector=HeuristicCombatSelector(rng=random.Random(0)),
+        )
+
+        outcome = await engine.decide("inst-001", timeout_s=5.0)
+
+        self.assertEqual(
+            engine.beam_search.config.beam_searchable_action_types,
+            _LEGACY_COMBAT_ACTION_TYPES,
+        )
+        self.assertEqual(outcome.source, "heuristic_fallback")
+        self.assertNotIn("emulate_actions", [m["operation"] for m in connection.messages])
+
+    def test_conflicting_explicit_beam_scope_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "beam_action_types conflicts"):
+            CombatDecisionEngine(
+                object(),
+                beam_config=BeamSearchConfig(
+                    beam_searchable_action_types=_LEGACY_COMBAT_ACTION_TYPES
+                ),
+                beam_action_types=COMBAT_BEAM_ACTION_TYPES,
+            )
 
     async def test_falls_back_to_heuristic_when_batch_rejected(self) -> None:
         connection = _FakeConnection()
@@ -203,25 +354,41 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
             "decision_point_id": "d-root",
             "masked_emulator_dto": {
                 "legal_actions": [
-                    {"action_id": "opt-1", "action_type": "choice_reward_card", "is_available": True},
-                    {"action_id": "opt-2", "action_type": "choice_reward_card", "is_available": True},
+                    {
+                        "action_id": "opt-1",
+                        "action_type": "choice_reward_card",
+                        "is_available": True,
+                    },
+                    {
+                        "action_id": "opt-2",
+                        "action_type": "choice_reward_card",
+                        "is_available": True,
+                    },
                 ]
             },
         }
         client = await self._client(connection)
-        engine = CombatDecisionEngine(client, fallback_selector=HeuristicCombatSelector(rng=random.Random(0)))
+        engine = CombatDecisionEngine(
+            client,
+            fallback_selector=HeuristicCombatSelector(rng=random.Random(0)),
+        )
 
         outcome = await engine.decide("inst-001", timeout_s=5.0)
 
         self.assertEqual(outcome.source, "heuristic_fallback")
-        self.assertEqual([m["operation"] for m in connection.messages], ["start_instance", "get_decision"])
+        self.assertEqual(
+            [m["operation"] for m in connection.messages],
+            ["start_instance", "get_decision"],
+        )
 
     async def test_forced_single_action_skips_beam_search_and_fallback(self) -> None:
         connection = _FakeConnection()
         connection.root_decision = {
             "decision_point_id": "d-root",
             "masked_emulator_dto": {
-                "legal_actions": [{"action_id": "only", "action_type": "system", "is_available": True}]
+                "legal_actions": [
+                    {"action_id": "only", "action_type": "system", "is_available": True}
+                ]
             },
         }
         client = await self._client(connection)
@@ -231,7 +398,10 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.source, "forced_single_action")
         self.assertEqual(outcome.chosen_action_id, "only")
-        self.assertEqual([m["operation"] for m in connection.messages], ["start_instance", "get_decision"])
+        self.assertEqual(
+            [m["operation"] for m in connection.messages],
+            ["start_instance", "get_decision"],
+        )
 
     async def test_no_legal_actions_yields_none_outcome(self) -> None:
         connection = _FakeConnection()

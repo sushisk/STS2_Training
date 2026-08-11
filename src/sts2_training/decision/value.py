@@ -1,19 +1,14 @@
-"""`ValueModel`: scores one Combat `masked_emulator_dto`.
+"""`ValueModel`: scores resolved Combat states for global Beam pruning.
 
-`BeamSearchEngine` calls `evaluate_batch` once per beam depth, covering every
-node scored at that depth in a single call - a real learned value net should
-override `evaluate_batch` directly (one batched forward pass) to hit the
-~1ms/batch latency budget this is designed around; the default `evaluate_batch`
-here just loops over `evaluate`.
+The ValueModel domain is deliberately **stable/terminal Combat state**, not an
+interactive pending continuation. `BeamSearchEngine` resolves `choice_target`,
+`choice_card`, `choice_confirm`, and `choice_skip` locally as part of the initiating
+macro-action and only then calls `evaluate_batch`. A learned value model therefore does
+not need a separate training target for partially resolved choice UI states.
 
-`HeuristicValueFunction` is the no-model default: hand-picked features (HP/
-enemy-HP ratios, block, predicted incoming damage, powers) combined through
-fixed weights, the same idea as the OLD Combat package's `StateEvaluator` but
-rebuilt against the actual RL/Training wire schema
-(`rl_training_dto_documentation.md` section 3, "そのまま公開する情報") instead
-of the old in-process `engine_state` shape. It exists so `BeamSearchEngine`/
-`CombatDecisionEngine` are runnable and testable before any trained value
-checkpoint exists - swap in a real model by implementing `ValueModel`.
+`HeuristicValueFunction` and `PriorHeuristicPolicy` share `CombatObservation` for wire
+normalization, so HP/block/enemy-intent/power interpretation cannot silently drift
+between ranking and value code.
 """
 
 from __future__ import annotations
@@ -21,6 +16,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from sts2_training.decision.combat_observation import CombatObservation
 
 JsonObject = Mapping[str, Any]
 
@@ -42,28 +39,22 @@ DEFAULT_POWER_VALUES: dict[str, float] = {}
 
 
 class ValueModel:
-    """Scores one `masked_emulator_dto`; higher is better for Training.
+    """Scores one resolved stable/terminal Combat DTO; higher is better.
 
-    Implement `evaluate` for scalar inference, or override `evaluate_batch`
-    directly for a batch-only learned model. Batch-only implementations do not
-    need a dummy scalar method just to satisfy an abstract base class.
+    Pending interactive continuation DTOs are outside this interface's semantic domain.
+    Beam resolves those locally before invoking the model. Implement `evaluate` for
+    scalar inference or override `evaluate_batch` for real batched learned inference.
     """
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
         raise NotImplementedError("ValueModel must override evaluate or evaluate_batch")
 
     def evaluate_batch(self, dtos: Sequence[Mapping[str, Any]]) -> list[float]:
-        """Batched counterpart of `evaluate`, one entry per dto, in order.
-
-        Override this directly in a learned value net for real batched
-        inference; the default here is a plain loop and carries none of the
-        throughput benefit the batched call is meant to provide.
-        """
         return [self.evaluate(dto) for dto in dtos]
 
 
 class HeuristicValueFunction(ValueModel):
-    """Hand-written ValueModel used for lightweight beam pruning."""
+    """Hand-written ValueModel used for lightweight global beam pruning."""
 
     def __init__(
         self,
@@ -98,67 +89,39 @@ class HeuristicValueFunction(ValueModel):
         if outcome == "defeat":
             return self._weights["defeat_penalty"]
         features = self._extract_features(masked_emulator_dto)
-        return sum(self._weights.get(name, 0.0) * feature for name, feature in features.items())
-
-    def _extract_features(self, dto: Mapping[str, Any]) -> dict[str, float]:
-        hp = _num(dto.get("hp"))
-        max_hp = max(1.0, _num(dto.get("maxHp"), default=1.0))
-        block = max(0.0, _num(dto.get("block")))
-
-        all_enemies = _mapping_sequence(dto, "enemies")
-        enemies: list[tuple[int, Mapping[str, Any]]] = []
-        for index, enemy in enumerate(all_enemies):
-            is_alive = enemy.get("isAlive", True)
-            if not isinstance(is_alive, bool):
-                raise ValueError(f"heuristic input enemies[{index}].isAlive must be a boolean")
-            if is_alive:
-                enemies.append((index, enemy))
-
-        # Keep dead enemies in the denominator so killing a nearly-dead enemy cannot
-        # make aggregate enemy_hp_ratio look worse merely by shrinking max HP.
-        enemy_hp = sum(max(0.0, _num(enemy.get("hp"))) for enemy in all_enemies)
-        enemy_max_hp = (
-            sum(max(1.0, _num(enemy.get("maxHp"), default=1.0)) for enemy in all_enemies) or 1.0
+        return sum(
+            self._weights.get(name, 0.0) * feature for name, feature in features.items()
         )
 
-        incoming_before_block = 0.0
-        for index, enemy in enemies:
-            intent = enemy.get("intent")
-            if intent is None:
-                continue
-            if not isinstance(intent, Mapping):
-                raise ValueError(
-                    f"heuristic input enemies[{index}].intent must be a mapping when provided"
-                )
-            damage = intent.get("attackDamage")
-            if damage is None:
-                continue
-            repeats = max(0.0, _num(intent.get("attackRepeats"), default=1.0))
-            incoming_before_block += max(0.0, _num(damage) * repeats)
-        incoming = max(0.0, incoming_before_block - block)
+    def _extract_features(self, dto: Mapping[str, Any]) -> dict[str, float]:
+        observation = CombatObservation.from_dto(dto, strict=True)
+        all_enemies = observation.enemies
+        alive_enemies = observation.alive_enemies
 
-        player_powers = _mapping_sequence(dto, "playerPowers")
-        player_power_type_score = _typed_power_score(player_powers, "playerPowers")
+        enemy_hp = sum(enemy.hp for enemy in all_enemies)
+        enemy_max_hp = sum(enemy.max_hp for enemy in all_enemies) or 1.0
+
+        player_power_type_score = _typed_power_score(
+            observation.player_powers, "playerPowers"
+        )
         named_power_score = _named_power_score(
-            player_powers, self._power_values, "playerPowers"
+            observation.player_powers, self._power_values, "playerPowers"
         )
 
         enemy_power_type_score = 0.0
-        for index, enemy in enemies:
-            raw_powers = enemy.get("powers")
-            if raw_powers is None:
-                raw_powers = enemy.get("enemyPowers")
+        for index, enemy in enumerate(alive_enemies):
             field_name = f"enemies[{index}].powers"
-            enemy_powers = _mapping_sequence_value(raw_powers, field_name)
-            enemy_power_type_score -= _typed_power_score(enemy_powers, field_name)
-            named_power_score -= _named_power_score(enemy_powers, self._power_values, field_name)
+            enemy_power_type_score -= _typed_power_score(enemy.powers, field_name)
+            named_power_score -= _named_power_score(
+                enemy.powers, self._power_values, field_name
+            )
 
         return {
-            "player_hp_ratio": hp / max_hp,
-            "player_block": block,
+            "player_hp_ratio": observation.hp / observation.max_hp,
+            "player_block": observation.block,
             "enemy_hp_ratio": enemy_hp / enemy_max_hp,
-            "predicted_incoming_damage": incoming,
-            "enemies_alive": float(len(enemies)),
+            "predicted_incoming_damage": observation.incoming_damage,
+            "enemies_alive": float(len(alive_enemies)),
             "buff_debuff_score": player_power_type_score,
             "enemy_buff_debuff_score": enemy_power_type_score,
             "named_power_score": named_power_score,
@@ -225,23 +188,6 @@ def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
         if victory is False:
             return "defeat"
     return None
-
-
-def _mapping_sequence(dto: Mapping[str, Any], field_name: str) -> list[Mapping[str, Any]]:
-    return _mapping_sequence_value(dto.get(field_name), field_name)
-
-
-def _mapping_sequence_value(value: Any, field_name: str) -> list[Mapping[str, Any]]:
-    if value is None:
-        return []
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"heuristic input {field_name} must be a sequence of mappings")
-    normalized: list[Mapping[str, Any]] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"heuristic input {field_name}[{index}] must be a mapping")
-        normalized.append(item)
-    return normalized
 
 
 def _validated_finite_number(value: Any, label: str) -> float:

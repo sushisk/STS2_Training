@@ -9,12 +9,15 @@ import math
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.search_modes import SEARCH_MODES
 from sts2_training.runner.episode import EpisodeLimitExceeded, EpisodeRunner, build_engine, start_and_run
 from sts2_training.selection.heuristic_selector import NoAvailableActionError
 
 _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
+_LEGACY_SCOPE = frozenset({"system", "card", "potion"})
 
 
 def _common(request: dict) -> dict:
@@ -74,7 +77,11 @@ class _FakeConnection:
         if operation == "close_instance":
             self.close_instance_calls += 1
             self.close_instance_instance_ids.append(request["instance_id"])
-            return {**_common(request), "instance_id": request["instance_id"], "status": "completed"}
+            return {
+                **_common(request),
+                "instance_id": request["instance_id"],
+                "status": "completed",
+            }
 
         raise AssertionError(f"unexpected operation: {operation}")
 
@@ -88,8 +95,6 @@ class _FakeConnection:
 def _decision(decision_point_id: str, *, legal_actions=None, **dto_extra) -> dict:
     resolved_legal_actions = legal_actions if legal_actions is not None else [_ACTION]
     dto = {"legal_actions": resolved_legal_actions, **dto_extra}
-    # Most empty-action fixtures are terminal. Callers can pass terminal=False to
-    # exercise the protocol-valid but runner-invalid non-terminal no-action boundary.
     if not resolved_legal_actions and "terminal" not in dto and "run_terminal" not in dto:
         dto["terminal"] = True
         dto.setdefault("outcome", "victory")
@@ -97,7 +102,9 @@ def _decision(decision_point_id: str, *, legal_actions=None, **dto_extra) -> dic
 
 
 class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
-    async def _client_and_connection(self, decisions: list[dict]) -> tuple[AsyncTrainingApiClient, _FakeConnection]:
+    async def _client_and_connection(
+        self, decisions: list[dict]
+    ) -> tuple[AsyncTrainingApiClient, _FakeConnection]:
         connection = _FakeConnection(decisions)
         client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
         await client.start_instance({"instance_type": "combat"}, timeout_s=1.0)
@@ -183,7 +190,12 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.close_instance_calls, 1)
 
     async def test_max_decisions_raises_but_still_closes_instance(self) -> None:
-        decisions = [_decision("d0"), _decision("d1"), _decision("d2"), _decision("d3", legal_actions=[])]
+        decisions = [
+            _decision("d0"),
+            _decision("d1"),
+            _decision("d2"),
+            _decision("d3", legal_actions=[]),
+        ]
         client, connection = await self._client_and_connection(decisions)
         runner = EpisodeRunner(client)
 
@@ -218,9 +230,6 @@ class EpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.close_instance_calls, 0)
 
     async def test_close_instance_skipped_when_session_invalid(self) -> None:
-        # A real client with session_invalid already set rejects every operation up
-        # front (including get_decision), so this exercises _close_best_effort
-        # directly instead of going through run().
         class _StubClient:
             session_invalid = True
             pending_retry = None
@@ -264,16 +273,45 @@ class BuildEngineTest(unittest.TestCase):
         engine = build_engine(client=object())
 
         self.assertIsInstance(engine, CombatDecisionEngine)
+        self.assertEqual(
+            engine.beam_search.config.beam_searchable_action_types,
+            COMBAT_BEAM_ACTION_TYPES,
+        )
 
     def test_search_mode_and_beam_max_depth_configure_the_built_engine(self) -> None:
         engine = build_engine(client=object(), search_mode="deep", beam_max_depth=9)
 
         self.assertEqual(engine.beam_search.config.max_depth, 9)
+        self.assertEqual(
+            engine.beam_search.config.beam_searchable_action_types,
+            COMBAT_BEAM_ACTION_TYPES,
+        )
 
-    def test_named_mode_alone_is_applied(self) -> None:
+    def test_named_mode_alone_is_applied_without_changing_combat_scope(self) -> None:
         engine = build_engine(client=object(), search_mode="wide")
 
-        self.assertEqual(engine.beam_search.config.beam_width, SEARCH_MODES["wide"].beam_width)
+        self.assertEqual(
+            engine.beam_search.config.beam_width,
+            SEARCH_MODES["wide"].beam_width,
+        )
+        self.assertEqual(
+            engine.beam_search.config.beam_searchable_action_types,
+            COMBAT_BEAM_ACTION_TYPES,
+        )
+
+    def test_explicit_config_scope_is_preserved_by_runner(self) -> None:
+        explicit = BeamSearchConfig(
+            max_depth=3,
+            beam_searchable_action_types=_LEGACY_SCOPE,
+        )
+
+        engine = build_engine(client=object(), search_mode=explicit)
+
+        self.assertEqual(engine.beam_search.config.max_depth, 3)
+        self.assertEqual(
+            engine.beam_search.config.beam_searchable_action_types,
+            _LEGACY_SCOPE,
+        )
 
     def test_explicit_engine_is_returned_as_is(self) -> None:
         client = object()
@@ -303,18 +341,19 @@ class BuildEngineTest(unittest.TestCase):
 
 
 class StartAndRunTest(unittest.IsolatedAsyncioTestCase):
-    """Unlike `EpisodeRunnerTest`, starts from a fresh (not yet started) client -
-    `start_and_run` calls `start_instance` itself, which is the one extra step it
-    adds on top of `EpisodeRunner.run`.
-    """
-
     async def test_starts_instance_and_runs_to_completion(self) -> None:
-        decisions = [_decision("d0"), _decision("d1", legal_actions=[], outcome="victory")]
+        decisions = [
+            _decision("d0"),
+            _decision("d1", legal_actions=[], outcome="victory"),
+        ]
         connection = _FakeConnection(decisions)
         client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
 
         result = await start_and_run(
-            client, {"instance_type": "combat"}, decision_timeout_s=5.0, search_mode="shallow"
+            client,
+            {"instance_type": "combat"},
+            decision_timeout_s=5.0,
+            search_mode="shallow",
         )
 
         self.assertEqual(result.instance_id, "inst-001")

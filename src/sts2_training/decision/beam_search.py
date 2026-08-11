@@ -1,19 +1,11 @@
-"""`BeamSearchEngine`: policy-guided beam search over `AsyncTrainingApiClient`.
+"""Policy-guided Combat beam search over `AsyncTrainingApiClient`.
 
-Per `docs/STS2_wire_contract_v0.7.md`'s Beam integration guidance, one beam
-depth is sent as one logical `emulate_actions` batch. The batch is chunked
-when necessary to respect both the configured upper bound and the active RL
-instance's published `max_emulate_actions_items` capability.
-
-`emulate_actions` is synchronous at the RL coordinator boundary -
-`BranchManager.poll()` only returns once every Branch dispatched by the call
-has reached a terminal outcome, so a response's `branch_results` entries are
-always `completed`/`partial`/`faulted`, never `queued`/`running`. This engine
-does not poll for stragglers; there are none to poll for.
-
-Branches created during a search are Training-owned bookkeeping the RL side
-needs cleaned up explicitly (`cancel_branches` + `release_branches`) once
-they're no longer needed.
+Ordinary combat actions consume `max_depth`. Interactive choice continuations are
+resolved as local macro-action steps: continuation DTOs are expanded using policy order
+without passing those intermediate states through the global ValueModel. Stable/terminal
+states are value-scored only after the continuation resolves. This keeps ValueModel's
+meaning centered on resolved Combat states while still bounding continuation work with
+`max_continuation_steps` and `beam_width`.
 """
 
 from __future__ import annotations
@@ -28,13 +20,17 @@ from typing import Any
 
 from sts2_training.api.contract import ROOT_BRANCH_ID, RequestRejectedError
 from sts2_training.api.transport import TransportError
+from sts2_training.decision.combat_decision import (
+    CONTINUATION_ACTION_TYPES,
+    action_type_for_id,
+    available_action_types,
+    is_continuation_decision,
+)
 from sts2_training.decision.policy import ActionCandidate, PolicyModel
 from sts2_training.decision.value import ValueModel
 
 JsonObject = dict[str, Any]
-
 _LOG = logging.getLogger(__name__)
-
 _RESOLVED_STATUSES = frozenset({"completed", "partial"})
 
 
@@ -45,17 +41,24 @@ class BeamSearchConfig:
     max_depth: int = 2
     simulation_options: Mapping[str, Any] | None = None
     time_budget_ms: float | None = None
-    # Local upper bound. The active RL instance may publish a smaller
-    # max_emulate_actions_items capability, which always wins.
     max_batch_size: int = 64
     expand_partial: bool = True
     release_branches_on_finish: bool = True
+    # Low-level Beam remains domain-agnostic/conservative. CombatDecisionEngine applies
+    # the full Combat semantic scope separately from performance search modes.
     beam_searchable_action_types: frozenset[str] = field(
         default_factory=lambda: frozenset({"system", "card", "potion"})
     )
+    max_continuation_steps: int = 8
 
     def __post_init__(self) -> None:
-        for name in ("beam_width", "top_k_actions", "max_depth", "max_batch_size"):
+        for name in (
+            "beam_width",
+            "top_k_actions",
+            "max_depth",
+            "max_batch_size",
+            "max_continuation_steps",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
@@ -80,6 +83,8 @@ class BeamNode:
     depth: int
     value: float
     root_action_id: str | None
+    combat_depth: int = 0
+    continuation_steps: int = 0
     branch_log: tuple[Any, ...] = ()
     terminal: bool = False
 
@@ -106,16 +111,6 @@ class BeamSearchResult:
 
 
 class BranchIdAllocator:
-    """Issues branch_id/rng_id values unique for as long as this allocator
-    lives.
-
-    Branch IDs are "instance内で生涯一意" per the RL/Training DTO contract -
-    never reused, even after cancel/release. Construct ONE allocator per API
-    client/instance (`BeamSearchEngine` owns one for its own lifetime) and
-    reuse it across every real decision's beam search, not just within a
-    single `search()` call.
-    """
-
     def __init__(self, prefix: str | None = None) -> None:
         self._prefix = prefix or uuid.uuid4().hex[:8]
         self._branch_counter = 0
@@ -131,9 +126,7 @@ class BranchIdAllocator:
 
 
 class BeamSearchEngine:
-    """Construct once per `AsyncTrainingApiClient` instance/session and reuse
-    across every real decision - see `BranchIdAllocator`.
-    """
+    """Construct once per API client/instance so branch/rng IDs stay unique."""
 
     def __init__(
         self,
@@ -174,48 +167,39 @@ class BeamSearchEngine:
 
         stats = BeamSearchStats()
         t_start = time.monotonic()
-
         root_dto = root_decision.get("masked_emulator_dto")
         root_decision_point_id = root_decision.get("decision_point_id")
         if not isinstance(root_dto, Mapping) or not isinstance(root_decision_point_id, str):
             return BeamSearchResult(None, None, None, "invalid_root_decision", stats)
-
-        root_legal_actions = root_dto.get("legal_actions")
-        if not root_legal_actions:
+        if not root_dto.get("legal_actions"):
             return BeamSearchResult(None, None, None, "no_legal_actions", stats)
-        # Whole Run currently rejects emulate_actions outright. Gate it by the explicit
-        # instance type captured from start_instance rather than by the unrelated
-        # max_emulate_actions_items capacity field: a future capability change must not
-        # silently change which wire protocol this engine believes it is speaking.
         if getattr(self._client, "instance_type", None) == "whole_run":
             return BeamSearchResult(None, None, None, "emulate_actions_not_supported", stats)
         if not _is_beam_searchable(root_dto, cfg.beam_searchable_action_types):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
 
-        # The root is never a selectable result. Scoring it would add a redundant
-        # singleton model call before the first batched frontier evaluation.
-        root_node = BeamNode(
-            branch_id=ROOT_BRANCH_ID,
-            parent_branch_id=ROOT_BRANCH_ID,
-            rng_id=0,
-            decision_point_id=root_decision_point_id,
-            masked_emulator_dto=root_dto,
-            depth=0,
-            value=0.0,
-            root_action_id=None,
-        )
-
-        beam: list[BeamNode] = [root_node]
+        beam: list[BeamNode] = [
+            BeamNode(
+                branch_id=ROOT_BRANCH_ID,
+                parent_branch_id=ROOT_BRANCH_ID,
+                rng_id=0,
+                decision_point_id=root_decision_point_id,
+                masked_emulator_dto=root_dto,
+                depth=0,
+                value=0.0,
+                root_action_id=None,
+            )
+        ]
+        # Stable nodes wait here while sibling macro-actions finish their interactive
+        # continuation. They rejoin only when no unresolved continuation remains.
+        waiting_stable: list[BeamNode] = []
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
         reason = "max_depth"
         search_error: BaseException | None = None
 
         try:
-            for depth in range(cfg.max_depth):
-                if not beam:
-                    reason = "beam_exhausted"
-                    break
+            while beam:
                 if time.monotonic() >= search_deadline:
                     reason = "time_budget"
                     break
@@ -226,7 +210,7 @@ class BeamSearchEngine:
                         node.masked_emulator_dto, cfg.beam_searchable_action_types
                     ):
                         searchable.append(node)
-                    else:
+                    elif _is_macro_resolved(node):
                         finished.append(node)
                 beam = searchable
                 if not beam:
@@ -242,34 +226,69 @@ class BeamSearchEngine:
                 branch_results, fatal_reason = await self._emulate_depth_batch(
                     instance_id, items, item_meta, all_branch_ids, stats, search_deadline
                 )
-
-                next_beam, newly_finished, value_ms = self._score_frontier(
-                    item_meta, branch_results, depth
-                )
+                (
+                    next_beam,
+                    newly_finished,
+                    value_ms,
+                    hit_max_depth,
+                    hit_continuation_limit,
+                ) = self._score_frontier(item_meta, branch_results)
                 stats.value_ms += value_ms
                 stats.nodes_expanded += len(branch_results)
-                if branch_results and not next_beam and not newly_finished:
-                    # The validated client only permits completed/partial/faulted here.
-                    # If no node was scoreable, every returned Branch faulted; silently
-                    # switching to a heuristic root action would hide an emulator failure.
+                if (
+                    branch_results
+                    and not next_beam
+                    and not newly_finished
+                    and not hit_continuation_limit
+                ):
                     raise RuntimeError("all emulate_actions branch results faulted")
                 finished.extend(newly_finished)
 
-                next_beam.sort(key=lambda n: n.value, reverse=True)
-                beam = next_beam[: cfg.beam_width]
+                continuation_nodes = [
+                    node for node in next_beam if is_continuation_decision(node.masked_emulator_dto)
+                ]
+                stable_nodes = [
+                    node for node in next_beam if not is_continuation_decision(node.masked_emulator_dto)
+                ]
+
+                if continuation_nodes:
+                    # Local continuation beam: policy/item order is the pruning signal;
+                    # ValueModel never sees the unresolved pending-choice DTOs.
+                    waiting_stable.extend(stable_nodes)
+                    beam = continuation_nodes[: cfg.beam_width]
+                else:
+                    stable_nodes.extend(waiting_stable)
+                    waiting_stable = []
+                    stable_nodes.sort(key=lambda node: node.value, reverse=True)
+                    beam = stable_nodes[: cfg.beam_width]
 
                 if fatal_reason is not None:
-                    # Keep successfully resolved chunks, but an incomplete logical
-                    # depth must not be reported as completed.
                     reason = fatal_reason
                     break
                 stats.depths_completed += 1
 
-            finished.extend(beam)
+                if not beam:
+                    if waiting_stable:
+                        waiting_stable.sort(key=lambda node: node.value, reverse=True)
+                        beam = waiting_stable[: cfg.beam_width]
+                        waiting_stable = []
+                    elif hit_continuation_limit:
+                        reason = "max_continuation_steps"
+                        break
+                    elif hit_max_depth:
+                        reason = "max_depth"
+                        break
+                    else:
+                        reason = "beam_exhausted"
+                        break
+
+            # A continuation is a local macro-action implementation detail until it
+            # resolves to a stable/terminal Combat state. Search termination (including
+            # time_budget) must never promote an unresolved continuation just because it
+            # still occupies the live beam with an inherited parent value.
+            finished.extend(waiting_stable)
+            finished.extend(node for node in beam if _is_macro_resolved(node))
         except BaseException as exc:
-            # Capture only an exception raised by this search. `sys.exception()` is
-            # unsuitable here because it also exposes an unrelated exception being
-            # handled by the caller, which could make us swallow a cleanup failure.
             search_error = exc
             raise
         finally:
@@ -288,11 +307,14 @@ class BeamSearchEngine:
                 stats.cleanup_ms += (time.monotonic() - t0) * 1000.0
 
         stats.total_ms = (time.monotonic() - t_start) * 1000.0
-
-        actionable = [node for node in finished if node.root_action_id is not None]
+        actionable = [
+            node
+            for node in finished
+            if node.root_action_id is not None and _is_macro_resolved(node)
+        ]
         if not actionable:
             return BeamSearchResult(None, None, None, reason, stats)
-        best_node = max(actionable, key=lambda n: n.value)
+        best_node = max(actionable, key=lambda node: node.value)
         return BeamSearchResult(
             best_node.root_action_id, best_node.value, best_node, reason, stats
         )
@@ -317,7 +339,6 @@ class BeamSearchEngine:
                 raise RuntimeError("PolicyModel.propose_batch entries must be candidate sequences")
             if len(candidates) > self.config.top_k_actions:
                 raise RuntimeError("PolicyModel.propose_batch returned more than top_k candidates")
-
             available_ids = _available_action_ids(node.masked_emulator_dto)
             for candidate in candidates:
                 if not isinstance(candidate, ActionCandidate):
@@ -352,13 +373,6 @@ class BeamSearchEngine:
         stats: BeamSearchStats,
         deadline: float,
     ) -> tuple[dict[str, Any], str | None]:
-        """Send one depth's candidates as one or more bounded requests.
-
-        Returns `(merged_branch_results, fatal_reason)`. `fatal_reason` is
-        `None` on full success; otherwise it names why chunking stopped early,
-        and `merged_branch_results` still holds whatever chunks succeeded
-        before that - callers should score those, not discard them.
-        """
         cfg = self.config
         batch_size = cfg.max_batch_size
         server_limit = getattr(self._client, "max_emulate_actions_items", None)
@@ -372,7 +386,6 @@ class BeamSearchEngine:
                 return branch_results, "time_budget"
             chunk_items = items[start : start + batch_size]
             chunk_meta = item_meta[start : start + batch_size]
-
             t0 = time.monotonic()
             try:
                 response = await self._client.emulate_actions(
@@ -383,15 +396,16 @@ class BeamSearchEngine:
                 )
             except RequestRejectedError as exc:
                 stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
-                # A rejection that invalidated the session cannot safely fall back:
-                # commit_action would itself be illegal afterward.
                 if _client_unusable(self._client):
                     raise
                 fault_kind = exc.response.get("fault_kind")
-                detail = fault_kind if isinstance(fault_kind, str) and fault_kind else type(exc).__name__
+                detail = (
+                    fault_kind
+                    if isinstance(fault_kind, str) and fault_kind
+                    else type(exc).__name__
+                )
                 return branch_results, f"emulate_actions_rejected:{detail}"
             stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
-
             all_branch_ids.extend(meta[2] for meta in chunk_meta)
             stats.branches_created += len(chunk_meta)
             branch_results.update(response.get("branch_results") or {})
@@ -401,8 +415,8 @@ class BeamSearchEngine:
         self,
         item_meta: Sequence[tuple[BeamNode, ActionCandidate, str, int]],
         branch_results: Mapping[str, Any],
-        depth: int,
-    ) -> tuple[list[BeamNode], list[BeamNode], float]:
+        depth: int | None = None,
+    ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool]:
         cfg = self.config
         resolved: list[
             tuple[
@@ -420,21 +434,41 @@ class BeamSearchEngine:
             if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
                 continue
             dto = result.get("masked_emulator_dto")
-            if not isinstance(dto, Mapping):
-                continue
-            resolved.append((node, candidate, branch_id, rng_id, result, dto, result.get("status")))
+            if isinstance(dto, Mapping):
+                resolved.append((node, candidate, branch_id, rng_id, result, dto, result.get("status")))
 
+        # Only resolved stable/terminal states belong to the global ValueModel domain.
+        value_entries = [
+            entry for entry in resolved if _is_terminal(entry[5]) or not is_continuation_decision(entry[5])
+        ]
         t0 = time.monotonic()
-        raw_values = self._value_fn.evaluate_batch([entry[5] for entry in resolved]) if resolved else []
+        raw_values = (
+            self._value_fn.evaluate_batch([entry[5] for entry in value_entries])
+            if value_entries
+            else []
+        )
         value_ms = (time.monotonic() - t0) * 1000.0
-        values = _validated_values(raw_values, expected=len(resolved))
+        values = _validated_values(raw_values, expected=len(value_entries))
+        value_by_branch = {
+            entry[2]: value for entry, value in zip(value_entries, values)
+        }
 
         next_beam: list[BeamNode] = []
         newly_finished: list[BeamNode] = []
-        is_last_depth = depth + 1 >= cfg.max_depth
-        for (node, candidate, branch_id, rng_id, result, dto, status), value in zip(
-            resolved, values
-        ):
+        hit_max_depth = False
+        hit_continuation_limit = False
+
+        for node, candidate, branch_id, rng_id, result, dto, status in resolved:
+            action_type = action_type_for_id(node.masked_emulator_dto, candidate.action_id)
+            if action_type is None:
+                raise RuntimeError(
+                    f"selected action_id {candidate.action_id!r} has no valid action_type"
+                )
+            is_continuation_action = action_type in CONTINUATION_ACTION_TYPES
+            combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
+            continuation_steps = node.continuation_steps + 1 if is_continuation_action else 0
+            terminal = _is_terminal(dto)
+            value = value_by_branch.get(branch_id, node.value)
             decision_point_id = result.get("decision_point_id")
             new_node = BeamNode(
                 branch_id=branch_id,
@@ -442,20 +476,35 @@ class BeamSearchEngine:
                 rng_id=rng_id,
                 decision_point_id=decision_point_id if isinstance(decision_point_id, str) else "",
                 masked_emulator_dto=dto,
-                depth=depth + 1,
+                depth=node.depth + 1,
                 value=value,
                 root_action_id=node.root_action_id or candidate.action_id,
+                combat_depth=combat_depth,
+                continuation_steps=continuation_steps,
                 branch_log=tuple(result.get("branch_log") or ()),
-                terminal=_is_terminal(dto),
+                terminal=terminal,
             )
             cannot_expand = not new_node.decision_point_id or (
                 status == "partial" and not cfg.expand_partial
             )
-            if new_node.terminal or is_last_depth or cannot_expand:
+            if terminal or cannot_expand:
+                newly_finished.append(new_node)
+                continue
+            if is_continuation_decision(dto):
+                if continuation_steps >= cfg.max_continuation_steps:
+                    hit_continuation_limit = True
+                    # Do not rank an unresolved continuation using a stale parent value.
+                    # It is intentionally excluded from actionable finished results.
+                    continue
+                next_beam.append(new_node)
+                continue
+            if combat_depth >= cfg.max_depth:
+                hit_max_depth = True
                 newly_finished.append(new_node)
             else:
                 next_beam.append(new_node)
-        return next_beam, newly_finished, value_ms
+
+        return next_beam, newly_finished, value_ms, hit_max_depth, hit_continuation_limit
 
     async def _cleanup(
         self,
@@ -473,14 +522,10 @@ class BeamSearchEngine:
                 instance_id,
             )
             return
-
-        cancelled = await self._cleanup_call(
-            "cancel_branches", instance_id, branch_ids, deadline
-        )
+        cancelled = await self._cleanup_call("cancel_branches", instance_id, branch_ids, deadline)
         if not cancelled:
             _LOG.warning(
-                "skipping beam search branch release for instance_id=%s because "
-                "cancellation did not complete",
+                "skipping beam search branch release for instance_id=%s because cancellation did not complete",
                 instance_id,
             )
             return
@@ -507,7 +552,6 @@ class BeamSearchEngine:
                 instance_id,
             )
             return False
-
         try:
             await getattr(self._client, operation)(
                 instance_id, branch_ids, timeout_s=min(5.0, remaining)
@@ -553,7 +597,6 @@ def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
 def _validated_values(values: Sequence[Any], *, expected: int) -> list[float]:
     if len(values) != expected:
         raise RuntimeError("ValueModel.evaluate_batch must return exactly one value per dto")
-
     normalized: list[float] = []
     for raw_value in values:
         if isinstance(raw_value, (bool, str, bytes)):
@@ -574,24 +617,19 @@ def _client_unusable(client: Any) -> bool:
     )
 
 
-def _is_beam_searchable(
-    dto: Mapping[str, Any], allowed_action_types: frozenset[str]
-) -> bool:
-    legal_actions = dto.get("legal_actions")
-    if not isinstance(legal_actions, Sequence) or isinstance(legal_actions, (str, bytes)):
-        return False
+def _is_macro_resolved(node: BeamNode) -> bool:
+    """Whether a node is safe to expose as a completed root-action candidate.
 
-    action_types: set[str] = set()
-    for action in legal_actions:
-        if not isinstance(action, Mapping):
-            return False
-        if action.get("is_available") is False:
-            continue
-        action_type = action.get("action_type")
-        if not isinstance(action_type, str):
-            return False
-        action_types.add(action_type)
-    return bool(action_types) and action_types <= allowed_action_types
+    Continuation DTOs inherit their parent's last stable Value while the local macro
+    action is unresolved. They must therefore never enter the global actionable set,
+    regardless of whether search stopped because of depth, rejection, or time budget.
+    """
+    return node.terminal or not is_continuation_decision(node.masked_emulator_dto)
+
+
+def _is_beam_searchable(dto: Mapping[str, Any], allowed_action_types: frozenset[str]) -> bool:
+    action_types = available_action_types(dto)
+    return action_types is not None and bool(action_types) and action_types <= allowed_action_types
 
 
 def _is_terminal(dto: Mapping[str, Any]) -> bool:
