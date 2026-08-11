@@ -15,7 +15,14 @@ def _action(action_id: str, option_id: str) -> dict:
     }
 
 
-def _dto(operation: str, options: list[dict], *, version: int = 1) -> dict:
+def _dto(
+    operation: str,
+    options: list[dict],
+    *,
+    version: int = 1,
+    selected_count: int = 0,
+    selected_option_ids: list[str] | None = None,
+) -> dict:
     return {
         "pendingChoice": {
             "choiceSemantics": {
@@ -23,7 +30,8 @@ def _dto(operation: str, options: list[dict], *, version: int = 1) -> dict:
                 "operation": operation,
             },
             "options": options,
-            "selectedOptionIds": [],
+            "selectedCount": selected_count,
+            "selectedOptionIds": [] if selected_option_ids is None else selected_option_ids,
         }
     }
 
@@ -96,6 +104,54 @@ def test_duplicate_action_option_ids_stay_neutral() -> None:
     )
 
     assert choice_card_preference_scores(actions, dto) == {}
+
+
+def test_duplicate_action_ids_stay_neutral() -> None:
+    actions = [_action("same", "option-0"), _action("same", "option-1")]
+    dto = _dto(
+        "retrieve",
+        [
+            {"id": "GOOD", "type": "Attack", "rarity": "Rare", "optionId": "option-0"},
+            {"id": "BAD", "type": "Curse", "optionId": "option-1"},
+        ],
+    )
+
+    assert choice_card_preference_scores(actions, dto) == {}
+
+
+def test_selected_identity_inconsistency_stays_neutral() -> None:
+    actions = [_action("a", "option-1"), _action("b", "option-2")]
+    options = [
+        {"id": "A", "type": "Curse", "optionId": "option-1"},
+        {"id": "B", "type": "Attack", "rarity": "Rare", "optionId": "option-2"},
+    ]
+
+    assert (
+        choice_card_preference_scores(
+            actions,
+            _dto("discard", options, selected_count=1, selected_option_ids=[]),
+        )
+        == {}
+    )
+    assert (
+        choice_card_preference_scores(
+            actions,
+            _dto(
+                "discard",
+                options,
+                selected_count=2,
+                selected_option_ids=["option-0", "option-0"],
+            ),
+        )
+        == {}
+    )
+    assert (
+        choice_card_preference_scores(
+            actions,
+            _dto("discard", options, selected_count=1, selected_option_ids=["option-1"]),
+        )
+        == {}
+    )
 
 
 def test_unknown_future_or_inconsistent_choice_stays_neutral() -> None:

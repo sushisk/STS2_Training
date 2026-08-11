@@ -74,12 +74,18 @@ class ChoiceCardSemantics:
 
 @dataclass(frozen=True)
 class PendingChoiceContext:
-    """Choice semantics plus decision-local option identity published by RL."""
+    """Choice semantics plus decision-local option identity published by RL.
+
+    ``identity_valid`` is deliberately separate from semantic parsing. A malformed token
+    must never be silently indistinguishable from a genuinely absent selection because
+    downstream policy uses this flag to fail closed.
+    """
 
     semantics: ChoiceCardSemantics
     source_effect_id: str | None
     selected_option_ids: tuple[str, ...]
     option_ids: tuple[str, ...]
+    identity_valid: bool
 
 
 _UNKNOWN = ChoiceCardSemantics(CHOICE_SEMANTICS_VERSION, "unknown")
@@ -128,7 +134,9 @@ def pending_choice_context(masked_emulator_dto: JsonObject) -> PendingChoiceCont
     """Return canonical pending-choice context when a public pendingChoice is present.
 
     Missing/old-producer semantics are represented as ``operation='unknown'`` rather than
-    reconstructed heuristically. Decision-local option IDs remain opaque strings.
+    reconstructed heuristically. Decision-local option IDs remain opaque strings. Identity
+    parsing is fail-closed: malformed or duplicate IDs, selected-count mismatches, and
+    selected/remaining overlap are exposed through ``identity_valid=False``.
     """
     pending = masked_emulator_dto.get("pendingChoice")
     if not isinstance(pending, Mapping):
@@ -139,21 +147,32 @@ def pending_choice_context(masked_emulator_dto: JsonObject) -> PendingChoiceCont
     if not semantics.is_known:
         source_effect_id = None
 
-    selected_option_ids = _token_sequence(pending.get("selectedOptionIds"))
-    option_ids: list[str] = []
-    raw_options = pending.get("options")
-    if isinstance(raw_options, Sequence) and not isinstance(raw_options, (str, bytes)):
-        for option in raw_options:
-            if isinstance(option, Mapping):
-                option_id = _token_or_none(option.get("optionId"))
-                if option_id is not None:
-                    option_ids.append(option_id)
+    selected_option_ids, selected_valid = _token_sequence(pending.get("selectedOptionIds"))
+    option_ids, options_valid = _option_id_sequence(pending.get("options"))
+
+    selected_count = pending.get("selectedCount")
+    selected_count_valid = (
+        isinstance(selected_count, int)
+        and not isinstance(selected_count, bool)
+        and selected_count >= 0
+        and selected_count == len(selected_option_ids)
+    )
+
+    identity_valid = (
+        selected_valid
+        and options_valid
+        and selected_count_valid
+        and len(set(selected_option_ids)) == len(selected_option_ids)
+        and len(set(option_ids)) == len(option_ids)
+        and set(selected_option_ids).isdisjoint(option_ids)
+    )
 
     return PendingChoiceContext(
         semantics=semantics,
         source_effect_id=source_effect_id,
         selected_option_ids=selected_option_ids,
-        option_ids=tuple(option_ids),
+        option_ids=option_ids,
+        identity_valid=identity_valid,
     )
 
 
@@ -189,7 +208,32 @@ def _token_or_none(value: Any) -> str | None:
     return value if _OPAQUE_TOKEN_RE.fullmatch(value) else None
 
 
-def _token_sequence(value: Any) -> tuple[str, ...]:
+def _token_sequence(value: Any) -> tuple[tuple[str, ...], bool]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return ()
-    return tuple(token for item in value if (token := _token_or_none(item)) is not None)
+        return (), False
+    tokens: list[str] = []
+    valid = True
+    for item in value:
+        token = _token_or_none(item)
+        if token is None:
+            valid = False
+            continue
+        tokens.append(token)
+    return tuple(tokens), valid
+
+
+def _option_id_sequence(value: Any) -> tuple[tuple[str, ...], bool]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return (), False
+    option_ids: list[str] = []
+    valid = True
+    for option in value:
+        if not isinstance(option, Mapping):
+            valid = False
+            continue
+        option_id = _token_or_none(option.get("optionId"))
+        if option_id is None:
+            valid = False
+            continue
+        option_ids.append(option_id)
+    return tuple(option_ids), valid

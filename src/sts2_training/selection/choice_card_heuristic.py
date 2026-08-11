@@ -39,10 +39,10 @@ def choice_card_preference_scores(
 ) -> dict[str, float]:
     """Return per-action preference scores when the full canonical choice is usable.
 
-    The result is all-or-nothing for one pending choice. If any available ``choice_card``
-    action cannot be matched to exactly one public option via ``optionId``, or multiple
-    actions claim the same option identity, an empty dict is returned so callers preserve
-    the previous neutral behavior instead of ranking a partially-understood choice.
+    The result is all-or-nothing for one pending choice. If public selected/remaining
+    identity is internally inconsistent, any available ``choice_card`` action cannot be
+    matched to exactly one option, or action/option IDs are duplicated, an empty dict is
+    returned so callers preserve neutral behavior.
     """
 
     choice_actions = [
@@ -52,7 +52,7 @@ def choice_card_preference_scores(
         return {}
 
     context = pending_choice_context(masked_emulator_dto)
-    if context is None or not context.semantics.is_known:
+    if context is None or not context.semantics.is_known or not context.identity_valid:
         return {}
 
     operation = context.semantics.operation
@@ -82,14 +82,16 @@ def choice_card_preference_scores(
         options_by_id[option_id] = option
 
     scores: dict[str, float] = {}
+    action_ids: set[str] = set()
     action_option_ids: set[str] = set()
     for action in choice_actions:
         action_id = action.get("action_id")
         option_id = choice_option_id(action)
         if not isinstance(action_id, str) or not action_id or option_id is None:
             return {}
-        if option_id in action_option_ids:
+        if action_id in action_ids or option_id in action_option_ids:
             return {}
+        action_ids.add(action_id)
         action_option_ids.add(option_id)
         option = options_by_id.get(option_id)
         if option is None:
