@@ -1,4 +1,4 @@
-"""Whole Run Combat Beam capability regressions."""
+"""Whole Run Combat Beam boundary and terminal-outcome regressions."""
 
 from __future__ import annotations
 
@@ -106,6 +106,47 @@ class _WholeRunBoundaryExitClient(_WholeRunBeamClient):
                         },
                     ],
                 },
+            }
+        return {"status": "completed", "branch_results": branch_results}
+
+
+class _WholeRunCombatCompletionClient(_WholeRunBeamClient):
+    async def emulate_actions(self, instance_id, items, *, timeout_s, simulation_options=None):
+        del instance_id, timeout_s, simulation_options
+        self.emulate_calls.append([dict(item) for item in items])
+        if len(self.emulate_calls) > 1:
+            raise AssertionError("combat completion must terminate the Beam branch")
+
+        branch_results = {}
+        for item in items:
+            if item["action_id"] == "win":
+                dto = {
+                    # Whole Run settles past Combat before publishing the next boundary.
+                    # `transition` is therefore the authoritative combat-end signal.
+                    "boundary": "reward_select",
+                    "transition": {"kind": "combat_completed", "victory": True},
+                    "legal_actions": [
+                        {
+                            "action_id": "reward-card",
+                            "action_type": "choice_reward_card",
+                            "is_available": True,
+                        }
+                    ],
+                }
+            else:
+                dto = {
+                    "run_terminal": True,
+                    "outcome": "defeat",
+                    "legal_actions": [],
+                }
+            branch_results[item["branch_id"]] = {
+                "status": "completed",
+                "branch_id": item["branch_id"],
+                "parent_branch_id": item["parent_branch_id"],
+                "rng_id": item["rng_id"],
+                "decision_point_id": f"next-{item['branch_id']}",
+                "branch_log": [],
+                "masked_emulator_dto": dto,
             }
         return {"status": "completed", "branch_results": branch_results}
 
@@ -232,6 +273,46 @@ class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.chosen_action_id, "good")
         self.assertIsNotNone(outcome.beam_result)
         self.assertEqual(outcome.beam_result.reason, "not_beam_searchable")
+        self.assertEqual(len(client.emulate_calls), 1)
+        self.assertEqual(len(client.cancel_calls), 1)
+        self.assertEqual(len(client.release_calls), 1)
+
+    async def test_whole_run_combat_completion_is_scored_as_terminal(self) -> None:
+        client = _WholeRunCombatCompletionClient()
+        engine = CombatDecisionEngine(
+            client,
+            policy=_Policy(),
+            value_fn=HeuristicValueFunction(),
+            beam_config=BeamSearchConfig(
+                max_depth=2,
+                beam_width=2,
+                top_k_actions=2,
+                beam_searchable_action_types=frozenset({"card", "system"}),
+            ),
+        )
+        decision = {
+            "decision_point_id": "root-decision",
+            "masked_emulator_dto": {
+                "boundary": "stable",
+                "legal_actions": [
+                    {"action_id": "win", "action_type": "card", "is_available": True},
+                    {"action_id": "lose", "action_type": "system", "is_available": True},
+                ],
+            },
+        }
+
+        outcome = await engine.decide(
+            "inst-whole-run",
+            timeout_s=2.0,
+            decision=decision,
+        )
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "win")
+        self.assertIsNotNone(outcome.beam_result)
+        self.assertIsNotNone(outcome.beam_result.best_node)
+        self.assertTrue(outcome.beam_result.best_node.terminal)
+        self.assertEqual(outcome.beam_result.best_value, DEFAULT_WEIGHTS["victory_bonus"])
         self.assertEqual(len(client.emulate_calls), 1)
         self.assertEqual(len(client.cancel_calls), 1)
         self.assertEqual(len(client.release_calls), 1)
