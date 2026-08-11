@@ -1,10 +1,10 @@
 """Grouping of `masked_emulator_dto.legal_actions` entries by `action_type`.
 
-Adapted from the OLD project's `choice_data.py` classification idea, but scoped to
-fields that the live API v0.5 response actually carries (see
-`rl_training_dto_documentation.md`). The OLD `choice_meaning` categorization relied on
-an offline `resolved.normalizedChoiceOperation` annotation produced by RL's teacher-data
-export pipeline, which has no live equivalent here, so it is intentionally not ported.
+Adapted from the OLD project's `choice_data.py` classification idea. Canonical live
+mechanic meaning for card choices now lives in `pendingChoice.choiceSemantics` and must
+be consumed through `choice_semantics.py`; this module intentionally remains structural
+and never infers discard/exhaust/upgrade/etc. from prompts, card IDs, selector names, or
+incidental keys.
 """
 
 from __future__ import annotations
