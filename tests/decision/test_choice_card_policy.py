@@ -29,6 +29,7 @@ def _dto(operation: str, *, version: int = 1) -> dict:
                     "optionId": "option-bad",
                 },
             ],
+            "selectedCount": 0,
             "selectedOptionIds": [],
         }
     }
