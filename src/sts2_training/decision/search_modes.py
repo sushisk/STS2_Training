@@ -18,7 +18,29 @@ from dataclasses import replace
 
 from sts2_training.decision.beam_search import BeamSearchConfig
 
-__all__ = ["DEFAULT_SEARCH_MODE", "SEARCH_MODES", "resolve_search_mode"]
+__all__ = [
+    "COMBAT_BEAM_ACTION_TYPES",
+    "DEFAULT_SEARCH_MODE",
+    "SEARCH_MODES",
+    "resolve_search_mode",
+]
+
+
+# Combat card/potion plays can stop at an interactive continuation before their effect
+# is fully resolved. The high-level search modes therefore keep those continuation
+# decisions inside Beam Search instead of treating them as a non-combat boundary.
+# Keep run-level choices (reward/map/shop/event/rest) out of this set.
+COMBAT_BEAM_ACTION_TYPES = frozenset(
+    {
+        "system",
+        "card",
+        "potion",
+        "choice_target",
+        "choice_card",
+        "choice_confirm",
+        "choice_skip",
+    }
+)
 
 
 def _copy_config(config: BeamSearchConfig, *, max_depth: int | None = None) -> BeamSearchConfig:
@@ -35,10 +57,25 @@ def _copy_config(config: BeamSearchConfig, *, max_depth: int | None = None) -> B
 # Kept small - add a mode only for a genuinely different tradeoff, not every
 # parameter combination (use an explicit BeamSearchConfig for anything bespoke).
 _SEARCH_MODE_TEMPLATES: dict[str, BeamSearchConfig] = {
-    "shallow": BeamSearchConfig(max_depth=1, beam_width=4, top_k_actions=3),  # throughput over quality
-    "standard": BeamSearchConfig(),
-    "deep": BeamSearchConfig(max_depth=4, beam_width=8, top_k_actions=4),  # more lookahead, same width
-    "wide": BeamSearchConfig(max_depth=2, beam_width=16, top_k_actions=6),  # more candidates, same depth
+    "shallow": BeamSearchConfig(
+        max_depth=1,
+        beam_width=4,
+        top_k_actions=3,
+        beam_searchable_action_types=COMBAT_BEAM_ACTION_TYPES,
+    ),  # throughput over quality
+    "standard": BeamSearchConfig(beam_searchable_action_types=COMBAT_BEAM_ACTION_TYPES),
+    "deep": BeamSearchConfig(
+        max_depth=4,
+        beam_width=8,
+        top_k_actions=4,
+        beam_searchable_action_types=COMBAT_BEAM_ACTION_TYPES,
+    ),  # more lookahead, same width
+    "wide": BeamSearchConfig(
+        max_depth=2,
+        beam_width=16,
+        top_k_actions=6,
+        beam_searchable_action_types=COMBAT_BEAM_ACTION_TYPES,
+    ),  # more candidates, same depth
 }
 
 
