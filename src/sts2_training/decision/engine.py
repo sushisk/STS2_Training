@@ -27,6 +27,7 @@ from sts2_training.api.contract import JsonObject, ROOT_BRANCH_ID
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine, BeamSearchResult
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
+from sts2_training.decision.search_modes import resolve_search_mode
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
 from sts2_training.selection.action_classification import available_actions
 from sts2_training.selection.heuristic_selector import HeuristicCombatSelector, NoAvailableActionError
@@ -62,8 +63,9 @@ class CombatDecisionEngine:
         self._client = client
         policy_model = policy if policy is not None else PriorHeuristicPolicy()
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
+        resolved_beam_config = beam_config if beam_config is not None else resolve_search_mode()
         self._beam = BeamSearchEngine(
-            client, policy=policy_model, value_fn=value_model, config=beam_config
+            client, policy=policy_model, value_fn=value_model, config=resolved_beam_config
         )
         self._fallback = (
             fallback_selector if fallback_selector is not None else HeuristicCombatSelector()
