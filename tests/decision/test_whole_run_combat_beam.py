@@ -75,6 +75,41 @@ class _WholeRunBeamClient:
         }
 
 
+class _WholeRunBoundaryExitClient(_WholeRunBeamClient):
+    async def emulate_actions(self, instance_id, items, *, timeout_s, simulation_options=None):
+        del instance_id, timeout_s, simulation_options
+        self.emulate_calls.append([dict(item) for item in items])
+        if len(self.emulate_calls) > 1:
+            raise AssertionError("Beam must not expand a non-Combat Whole Run boundary")
+
+        branch_results = {}
+        for item in items:
+            branch_results[item["branch_id"]] = {
+                "status": "completed",
+                "branch_id": item["branch_id"],
+                "parent_branch_id": item["parent_branch_id"],
+                "rng_id": item["rng_id"],
+                "decision_point_id": f"event-{item['branch_id']}",
+                "branch_log": [],
+                "masked_emulator_dto": {
+                    "boundary": "event_choice",
+                    "legal_actions": [
+                        {
+                            "action_id": "confirm",
+                            "action_type": "choice_confirm",
+                            "is_available": True,
+                        },
+                        {
+                            "action_id": "skip",
+                            "action_type": "choice_skip",
+                            "is_available": True,
+                        },
+                    ],
+                },
+            }
+        return {"status": "completed", "branch_results": branch_results}
+
+
 class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
     async def test_capable_whole_run_uses_beam_search(self) -> None:
         client = _WholeRunBeamClient()
@@ -156,8 +191,50 @@ class WholeRunCombatBeamTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.source, "heuristic_fallback")
         self.assertEqual(outcome.chosen_action_id, "confirm")
-        self.assertIsNone(outcome.beam_result)
+        self.assertIsNotNone(outcome.beam_result)
+        self.assertEqual(outcome.beam_result.reason, "not_beam_searchable")
         self.assertEqual(client.emulate_calls, [])
+
+    async def test_whole_run_branch_leaving_combat_scope_is_not_expanded(self) -> None:
+        client = _WholeRunBoundaryExitClient()
+        engine = CombatDecisionEngine(
+            client,
+            policy=_Policy(),
+            value_fn=_Value(),
+            beam_config=BeamSearchConfig(
+                max_depth=2,
+                beam_width=2,
+                top_k_actions=2,
+                beam_searchable_action_types=frozenset(
+                    {"card", "system", "choice_confirm", "choice_skip"}
+                ),
+            ),
+            fallback_selector=_Fallback(),
+        )
+        decision = {
+            "decision_point_id": "root-decision",
+            "masked_emulator_dto": {
+                "boundary": "stable",
+                "legal_actions": [
+                    {"action_id": "good", "action_type": "card", "is_available": True},
+                    {"action_id": "bad", "action_type": "system", "is_available": True},
+                ],
+            },
+        }
+
+        outcome = await engine.decide(
+            "inst-whole-run",
+            timeout_s=2.0,
+            decision=decision,
+        )
+
+        self.assertEqual(outcome.source, "heuristic_fallback")
+        self.assertEqual(outcome.chosen_action_id, "good")
+        self.assertIsNotNone(outcome.beam_result)
+        self.assertEqual(outcome.beam_result.reason, "not_beam_searchable")
+        self.assertEqual(len(client.emulate_calls), 1)
+        self.assertEqual(len(client.cancel_calls), 1)
+        self.assertEqual(len(client.release_calls), 1)
 
     def test_run_victory_receives_victory_bonus(self) -> None:
         value = HeuristicValueFunction().evaluate(
