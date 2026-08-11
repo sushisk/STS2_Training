@@ -70,7 +70,43 @@ def test_malformed_v1_factor_degrades_to_unknown():
     assert semantics.is_known is False
 
 
-def test_choice_option_id_reads_only_explicit_opaque_identity():
-    assert choice_option_id({"action_type": "choice_card", "optionId": "option-3"}) == "option-3"
-    assert choice_option_id({"action_type": "choice_card", "cardId": "STRIKE"}) is None
-    assert choice_option_id({"action_type": "choice_card", "optionId": 3}) is None
+def test_choice_option_id_reads_only_canonical_parameters_identity():
+    assert (
+        choice_option_id(
+            {
+                "action_type": "choice_card",
+                "parameters": {"optionId": "option-3", "cardId": "STRIKE"},
+            }
+        )
+        == "option-3"
+    )
+    assert choice_option_id({"action_type": "choice_card", "optionId": "option-3"}) is None
+    assert choice_option_id({"action_type": "choice_card", "parameters": {"cardId": "STRIKE"}}) is None
+    assert choice_option_id({"action_type": "choice_card", "parameters": {"optionId": 3}}) is None
+
+
+def test_choice_identity_rejects_malformed_opaque_tokens():
+    dto = {
+        "pendingChoice": {
+            "choiceSemantics": {"version": 1, "operation": "discard"},
+            "sourceEffectId": "bad token with spaces",
+            "selectedOptionIds": ["option-0", "bad token"],
+            "options": [
+                {"optionId": "option-1"},
+                {"optionId": "bad token"},
+            ],
+        }
+    }
+
+    context = pending_choice_context(dto)
+
+    assert context is not None
+    assert context.source_effect_id is None
+    assert context.selected_option_ids == ("option-0",)
+    assert context.option_ids == ("option-1",)
+    assert (
+        choice_option_id(
+            {"action_type": "choice_card", "parameters": {"optionId": "bad token"}}
+        )
+        is None
+    )
