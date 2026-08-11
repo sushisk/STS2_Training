@@ -187,7 +187,7 @@ class CombatDecisionEngine:
         if result is not None and _beam_result_is_actionable(result):
             return DecisionOutcome(current_decision, result.best_root_action_id, "beam_search", result)
 
-        chosen = self._fallback.select(legal_actions)
+        chosen = self._fallback.select(legal_actions, masked_emulator_dto=dto)
         if not isinstance(chosen, Mapping):
             raise RuntimeError("fallback selector must return an available legal action mapping")
         chosen_action_id = chosen.get("action_id")
