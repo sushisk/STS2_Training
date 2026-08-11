@@ -176,6 +176,8 @@ def _power_id(power: Mapping[str, Any], field_name: str) -> str | None:
 
 def _terminal_outcome(dto: Mapping[str, Any]) -> str | None:
     outcome = dto.get("outcome")
+    if outcome == "run_victory":
+        return "victory"
     if outcome in ("victory", "defeat"):
         return outcome
     transition = dto.get("transition")

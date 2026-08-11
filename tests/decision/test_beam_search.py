@@ -38,7 +38,7 @@ class _FakeConnection:
         self.messages: list[dict] = []
         self.decisions: dict[str, dict] = {}
         self.emulate_results: dict[tuple[str, str], dict] = {}
-        # None mirrors a Whole Run instance, which never publishes this capability.
+        # None models legacy Whole Run servers that do not advertise this capability.
         self.max_emulate_actions_items: int | None = 64
         self.reject_emulate_actions = False
         # 1-indexed emulate_actions call number at which rejection starts (for testing
@@ -367,11 +367,10 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason, "not_beam_searchable")
         self.assertEqual([m["operation"] for m in connection.messages], ["start_instance"])
 
-    async def test_instance_without_emulate_actions_capability_is_not_beam_searched(self) -> None:
-        # Whole Run instances never publish max_emulate_actions_items (see
-        # AsyncTrainingApiClient._accept_start_instance) - combat's own protocol
-        # validation requires the capability for instance_type "combat", so this uses
-        # a non-combat instance_type instead of the shared `_client()` helper.
+    async def test_legacy_whole_run_without_emulate_actions_capability_is_not_beam_searched(self) -> None:
+        # Older Whole Run servers may omit max_emulate_actions_items. Combat instances
+        # require it during protocol validation, so use whole_run here to exercise Beam's
+        # compatibility guard through the real AsyncTrainingApiClient.
         connection = _FakeConnection()
         connection.max_emulate_actions_items = None
         client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]

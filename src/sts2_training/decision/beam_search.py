@@ -32,6 +32,7 @@ from sts2_training.decision.value import ValueModel
 JsonObject = dict[str, Any]
 _LOG = logging.getLogger(__name__)
 _RESOLVED_STATUSES = frozenset({"completed", "partial"})
+_WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
 
 
 @dataclass
@@ -44,8 +45,7 @@ class BeamSearchConfig:
     max_batch_size: int = 64
     expand_partial: bool = True
     release_branches_on_finish: bool = True
-    # Low-level Beam remains domain-agnostic/conservative. CombatDecisionEngine applies
-    # the full Combat semantic scope separately from performance search modes.
+    # Action-type scope is independent from transport capability and Whole Run boundary.
     beam_searchable_action_types: frozenset[str] = field(
         default_factory=lambda: frozenset({"system", "card", "potion"})
     )
@@ -173,9 +173,14 @@ class BeamSearchEngine:
             return BeamSearchResult(None, None, None, "invalid_root_decision", stats)
         if not root_dto.get("legal_actions"):
             return BeamSearchResult(None, None, None, "no_legal_actions", stats)
-        if getattr(self._client, "instance_type", None) == "whole_run":
+        if (
+            getattr(self._client, "instance_type", None) == "whole_run"
+            and _server_batch_limit(self._client) is None
+        ):
             return BeamSearchResult(None, None, None, "emulate_actions_not_supported", stats)
-        if not _is_beam_searchable(root_dto, cfg.beam_searchable_action_types):
+        if not _is_beam_searchable_for_client(
+            self._client, root_dto, cfg.beam_searchable_action_types
+        ):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
 
         beam: list[BeamNode] = [
@@ -195,6 +200,7 @@ class BeamSearchEngine:
         waiting_stable: list[BeamNode] = []
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
+        released_branch_ids: set[str] = set()
         reason = "max_depth"
         search_error: BaseException | None = None
 
@@ -206,8 +212,10 @@ class BeamSearchEngine:
 
                 searchable: list[BeamNode] = []
                 for node in beam:
-                    if _is_beam_searchable(
-                        node.masked_emulator_dto, cfg.beam_searchable_action_types
+                    if _is_beam_searchable_for_client(
+                        self._client,
+                        node.masked_emulator_dto,
+                        cfg.beam_searchable_action_types,
                     ):
                         searchable.append(node)
                     elif _is_macro_resolved(node):
@@ -221,6 +229,36 @@ class BeamSearchEngine:
                 stats.policy_ms += policy_ms
                 if not items:
                     reason = "no_candidates"
+                    break
+
+                (
+                    beam,
+                    waiting_stable,
+                    items,
+                    item_meta,
+                    capacity_finished,
+                    capacity_limited,
+                ) = self._fit_whole_run_frontier_to_active_capacity(
+                    beam,
+                    waiting_stable,
+                    items,
+                    item_meta,
+                )
+                finished.extend(capacity_finished)
+                if capacity_limited:
+                    released = await self._release_unneeded_whole_run_branches(
+                        instance_id,
+                        all_branch_ids,
+                        released_branch_ids,
+                        beam,
+                        waiting_stable,
+                        deadline=search_deadline,
+                    )
+                    if not released:
+                        reason = "active_branch_cleanup_failed"
+                        break
+                if not items:
+                    reason = "active_branch_capacity"
                     break
 
                 branch_results, fatal_reason = await self._emulate_depth_batch(
@@ -241,6 +279,13 @@ class BeamSearchEngine:
                     and not newly_finished
                     and not hit_continuation_limit
                 ):
+                    if _has_unresolved_out_of_scope_result(
+                        self._client,
+                        branch_results,
+                        cfg.beam_searchable_action_types,
+                    ):
+                        reason = "not_beam_searchable"
+                        break
                     raise RuntimeError("all emulate_actions branch results faulted")
                 finished.extend(newly_finished)
 
@@ -282,6 +327,24 @@ class BeamSearchEngine:
                         reason = "beam_exhausted"
                         break
 
+                # Whole Run uses the published max_emulate_actions_items value as both
+                # the per-request item ceiling and the total active Branch capacity. Once
+                # a depth is materialized, release every Branch that can no longer become
+                # a parent. Waiting stable siblings remain live only until the next
+                # iteration's capacity planner decides how many can be retained while
+                # reserving room for the next child frontier.
+                released = await self._release_unneeded_whole_run_branches(
+                    instance_id,
+                    all_branch_ids,
+                    released_branch_ids,
+                    beam,
+                    waiting_stable,
+                    deadline=search_deadline,
+                )
+                if not released:
+                    reason = "active_branch_cleanup_failed"
+                    break
+
             # A continuation is a local macro-action implementation detail until it
             # resolves to a stable/terminal Combat state. Search termination (including
             # time_budget) must never promote an unresolved continuation just because it
@@ -294,7 +357,11 @@ class BeamSearchEngine:
         finally:
             t0 = time.monotonic()
             try:
-                await self._cleanup(instance_id, all_branch_ids, deadline=overall_deadline)
+                await self._cleanup(
+                    instance_id,
+                    [bid for bid in all_branch_ids if bid not in released_branch_ids],
+                    deadline=overall_deadline,
+                )
             except Exception:
                 if search_error is None:
                     raise
@@ -364,6 +431,95 @@ class BeamSearchEngine:
                 item_meta.append((node, candidate, branch_id, rng_id))
         return items, item_meta, policy_ms
 
+    def _fit_whole_run_frontier_to_active_capacity(
+        self,
+        beam: Sequence[BeamNode],
+        waiting_stable: Sequence[BeamNode],
+        items: Sequence[JsonObject],
+        item_meta: Sequence[tuple[BeamNode, ActionCandidate, str, int]],
+    ) -> tuple[
+        list[BeamNode],
+        list[BeamNode],
+        list[JsonObject],
+        list[tuple[BeamNode, ActionCandidate, str, int]],
+        list[BeamNode],
+        bool,
+    ]:
+        """Fit a Whole Run frontier inside RL's shared active Branch budget.
+
+        For Whole Run, ``max_emulate_actions_items`` is the configured Branch capacity:
+        every live non-root parent and waiting stable sibling consumes one slot until it
+        is released, and every newly submitted child consumes another. Chunking cannot
+        make an oversized depth safe because children from earlier chunks remain active.
+
+        Keep the highest-priority beam parents in existing beam order, keep each selected
+        parent's policy candidates in policy order, then use any remaining capacity for
+        the highest-valued waiting stable siblings. Stable nodes pruned only for capacity
+        remain valid local finished candidates even after their RL Branch is released.
+        """
+        capacity = _server_active_branch_capacity(self._client)
+        if capacity is None:
+            return list(beam), list(waiting_stable), list(items), list(item_meta), [], False
+
+        indices_by_parent: dict[str, list[int]] = {}
+        for index, meta in enumerate(item_meta):
+            indices_by_parent.setdefault(meta[0].branch_id, []).append(index)
+
+        selected_beam: list[BeamNode] = []
+        selected_indices: list[int] = []
+        used_slots = 0
+        limited = False
+
+        for node in beam:
+            candidate_indices = indices_by_parent.get(node.branch_id, [])
+            if not candidate_indices:
+                limited = True
+                continue
+            parent_cost = 0 if node.branch_id == ROOT_BRANCH_ID else 1
+            remaining_for_children = capacity - used_slots - parent_cost
+            if remaining_for_children <= 0:
+                limited = True
+                break
+            take = min(len(candidate_indices), remaining_for_children)
+            selected_beam.append(node)
+            selected_indices.extend(candidate_indices[:take])
+            used_slots += parent_cost + take
+            if take < len(candidate_indices):
+                limited = True
+                break
+
+        selected_parent_ids = {node.branch_id for node in selected_beam}
+        pruned_beam = [node for node in beam if node.branch_id not in selected_parent_ids]
+        if pruned_beam:
+            limited = True
+
+        waiting_budget = max(0, capacity - used_slots)
+        ranked_waiting = sorted(waiting_stable, key=lambda node: node.value, reverse=True)
+        kept_waiting = ranked_waiting[:waiting_budget]
+        pruned_waiting = ranked_waiting[waiting_budget:]
+        if pruned_waiting:
+            limited = True
+
+        # Capacity-pruned resolved nodes remain usable local candidates. Unresolved
+        # continuation nodes must never be promoted with their inherited stale value.
+        capacity_finished = [
+            node for node in (*pruned_beam, *pruned_waiting) if _is_macro_resolved(node)
+        ]
+
+        selected_items = [items[index] for index in selected_indices]
+        selected_meta = [item_meta[index] for index in selected_indices]
+        if len(selected_items) != len(items):
+            limited = True
+
+        return (
+            selected_beam,
+            kept_waiting,
+            selected_items,
+            selected_meta,
+            capacity_finished,
+            limited,
+        )
+
     async def _emulate_depth_batch(
         self,
         instance_id: str,
@@ -375,8 +531,8 @@ class BeamSearchEngine:
     ) -> tuple[dict[str, Any], str | None]:
         cfg = self.config
         batch_size = cfg.max_batch_size
-        server_limit = getattr(self._client, "max_emulate_actions_items", None)
-        if isinstance(server_limit, int) and not isinstance(server_limit, bool) and server_limit > 0:
+        server_limit = _server_batch_limit(self._client)
+        if server_limit is not None:
             batch_size = min(batch_size, server_limit)
 
         branch_results: dict[str, Any] = {}
@@ -437,9 +593,22 @@ class BeamSearchEngine:
             if isinstance(dto, Mapping):
                 resolved.append((node, candidate, branch_id, rng_id, result, dto, result.get("status")))
 
-        # Only resolved stable/terminal states belong to the global ValueModel domain.
+        # Preserve the historical Combat-client behavior of value-scoring a resolved
+        # non-continuation child even when that child will not be expanded further. Whole
+        # Run is stricter: a Reward/Map/Event boundary without combat_completed is outside
+        # the Combat ValueModel domain and must not be scored or promoted with stale value.
         value_entries = [
-            entry for entry in resolved if _is_terminal(entry[5]) or not is_continuation_decision(entry[5])
+            entry
+            for entry in resolved
+            if _is_terminal(entry[5])
+            or (
+                not is_continuation_decision(entry[5])
+                and not _is_whole_run_unresolved_out_of_scope(
+                    self._client,
+                    entry[5],
+                    cfg.beam_searchable_action_types,
+                )
+            )
         ]
         t0 = time.monotonic()
         raw_values = (
@@ -468,6 +637,12 @@ class BeamSearchEngine:
             combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
             continuation_steps = node.continuation_steps + 1 if is_continuation_action else 0
             terminal = _is_terminal(dto)
+            if _is_whole_run_unresolved_out_of_scope(
+                self._client,
+                dto,
+                cfg.beam_searchable_action_types,
+            ):
+                continue
             value = value_by_branch.get(branch_id, node.value)
             decision_point_id = result.get("decision_point_id")
             new_node = BeamNode(
@@ -505,6 +680,40 @@ class BeamSearchEngine:
                 next_beam.append(new_node)
 
         return next_beam, newly_finished, value_ms, hit_max_depth, hit_continuation_limit
+
+    async def _release_unneeded_whole_run_branches(
+        self,
+        instance_id: str,
+        all_branch_ids: list[str],
+        released_branch_ids: set[str],
+        beam: Sequence[BeamNode],
+        waiting_stable: Sequence[BeamNode],
+        *,
+        deadline: float,
+    ) -> bool:
+        if (
+            getattr(self._client, "instance_type", None) != "whole_run"
+            or not self.config.release_branches_on_finish
+        ):
+            return True
+        keep_ids = {
+            node.branch_id
+            for node in (*beam, *waiting_stable)
+            if node.branch_id != ROOT_BRANCH_ID
+        }
+        releasable = [
+            branch_id
+            for branch_id in all_branch_ids
+            if branch_id not in keep_ids and branch_id not in released_branch_ids
+        ]
+        if not releasable:
+            return True
+        if _client_unusable(self._client):
+            return False
+        if await self._cleanup_call("release_branches", instance_id, releasable, deadline):
+            released_branch_ids.update(releasable)
+            return True
+        return False
 
     async def _cleanup(
         self,
@@ -581,6 +790,20 @@ class BeamSearchEngine:
         return True
 
 
+def _server_batch_limit(client: Any) -> int | None:
+    value = getattr(client, "max_emulate_actions_items", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _server_active_branch_capacity(client: Any) -> int | None:
+    """Whole Run's published branch capacity, shared by parents, waiters and children."""
+    if getattr(client, "instance_type", None) != "whole_run":
+        return None
+    return _server_batch_limit(client)
+
+
 def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
     legal_actions = dto.get("legal_actions")
     if not isinstance(legal_actions, Sequence) or isinstance(legal_actions, (str, bytes)):
@@ -625,6 +848,51 @@ def _is_macro_resolved(node: BeamNode) -> bool:
     regardless of whether search stopped because of depth, rejection, or time budget.
     """
     return node.terminal or not is_continuation_decision(node.masked_emulator_dto)
+
+
+def _is_beam_searchable_for_client(
+    client: Any,
+    dto: Mapping[str, Any],
+    allowed_action_types: frozenset[str],
+) -> bool:
+    if (
+        getattr(client, "instance_type", None) == "whole_run"
+        and dto.get("boundary") not in _WHOLE_RUN_COMBAT_BOUNDARIES
+    ):
+        return False
+    return _is_beam_searchable(dto, allowed_action_types)
+
+
+def _is_whole_run_unresolved_out_of_scope(
+    client: Any,
+    dto: Mapping[str, Any],
+    allowed_action_types: frozenset[str],
+) -> bool:
+    return (
+        getattr(client, "instance_type", None) == "whole_run"
+        and not _is_terminal(dto)
+        and not _is_beam_searchable_for_client(client, dto, allowed_action_types)
+    )
+
+
+def _has_unresolved_out_of_scope_result(
+    client: Any,
+    branch_results: Mapping[str, Any],
+    allowed_action_types: frozenset[str],
+) -> bool:
+    if getattr(client, "instance_type", None) != "whole_run":
+        return False
+    for result in branch_results.values():
+        if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
+            continue
+        dto = result.get("masked_emulator_dto")
+        if isinstance(dto, Mapping) and _is_whole_run_unresolved_out_of_scope(
+            client,
+            dto,
+            allowed_action_types,
+        ):
+            return True
+    return False
 
 
 def _is_beam_searchable(dto: Mapping[str, Any], allowed_action_types: frozenset[str]) -> bool:

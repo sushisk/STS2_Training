@@ -3,7 +3,7 @@
 
 Search-budget configuration and Combat decision scope are intentionally separate:
 `BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
-engine owns the default Combat decision phases eligible for Beam Search. Explicit
+engine owns the default Combat action types eligible for Beam Search. Explicit
 `BeamSearchConfig.beam_searchable_action_types` values remain authoritative when a
 caller supplies a config, so wrapper construction never silently widens semantic scope.
 Structural branch coverage is likewise separate from policy ranking so learned policies
@@ -52,7 +52,8 @@ class CombatDecisionEngine:
 
     Whatever `PolicyModel` is supplied is wrapped in `CoverageConstrainedPolicy`, so
     structural branch-recall invariants survive replacing the heuristic prior with a
-    learned or batch-only model.
+    learned or batch-only model. `BeamSearchEngine` owns transport capability and
+    Whole Run boundary admission for every frontier depth.
     """
 
     def __init__(
@@ -101,7 +102,10 @@ class CombatDecisionEngine:
             ),
         )
         self._beam = BeamSearchEngine(
-            client, policy=policy_model, value_fn=value_model, config=resolved_beam_config
+            client,
+            policy=policy_model,
+            value_fn=value_model,
+            config=resolved_beam_config,
         )
         self._fallback = (
             fallback_selector if fallback_selector is not None else HeuristicCombatSelector()
