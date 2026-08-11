@@ -130,6 +130,17 @@ def _victory_dto() -> dict:
     }
 
 
+def _defeat_dto() -> dict:
+    return {
+        "terminal": True,
+        "outcome": "defeat",
+        "hp": 0,
+        "maxHp": 50,
+        "enemies": [{"hp": 10, "maxHp": 10, "isAlive": True, "intent": {}}],
+        "legal_actions": [],
+    }
+
+
 def _alive_dto() -> dict:
     return {
         "hp": 40,
@@ -177,6 +188,68 @@ class CombatDecisionEngineTest(unittest.IsolatedAsyncioTestCase):
         response = await engine.decide_and_commit("inst-001", timeout_s=5.0)
         self.assertEqual(response["status"], "completed")
         self.assertEqual(connection.committed_action_ids, ["strike"])
+
+    async def test_default_engine_beam_searches_choice_target(self) -> None:
+        connection = _FakeConnection()
+        actions = [
+            {"action_id": "target-good", "action_type": "choice_target", "is_available": True},
+            {"action_id": "target-bad", "action_type": "choice_target", "is_available": True},
+        ]
+        connection.root_decision = {
+            "decision_point_id": "d-root-target",
+            "masked_emulator_dto": {"legal_actions": actions},
+        }
+        connection.emulate_results = {
+            ("root", "target-good"): {
+                "status": "completed",
+                "decision_point_id": "d-target-good",
+                "masked_emulator_dto": _victory_dto(),
+            },
+            ("root", "target-bad"): {
+                "status": "completed",
+                "decision_point_id": "d-target-bad",
+                "masked_emulator_dto": _defeat_dto(),
+            },
+        }
+        client = await self._client(connection)
+        engine = CombatDecisionEngine(client)
+
+        outcome = await engine.decide("inst-001", timeout_s=5.0)
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "target-good")
+        self.assertIn("emulate_actions", [m["operation"] for m in connection.messages])
+
+    async def test_default_engine_beam_searches_choice_card(self) -> None:
+        connection = _FakeConnection()
+        actions = [
+            {"action_id": "choice-good", "action_type": "choice_card", "is_available": True},
+            {"action_id": "choice-bad", "action_type": "choice_card", "is_available": True},
+        ]
+        connection.root_decision = {
+            "decision_point_id": "d-root-card-choice",
+            "masked_emulator_dto": {"legal_actions": actions},
+        }
+        connection.emulate_results = {
+            ("root", "choice-good"): {
+                "status": "completed",
+                "decision_point_id": "d-choice-good",
+                "masked_emulator_dto": _victory_dto(),
+            },
+            ("root", "choice-bad"): {
+                "status": "completed",
+                "decision_point_id": "d-choice-bad",
+                "masked_emulator_dto": _defeat_dto(),
+            },
+        }
+        client = await self._client(connection)
+        engine = CombatDecisionEngine(client)
+
+        outcome = await engine.decide("inst-001", timeout_s=5.0)
+
+        self.assertEqual(outcome.source, "beam_search")
+        self.assertEqual(outcome.chosen_action_id, "choice-good")
+        self.assertIn("emulate_actions", [m["operation"] for m in connection.messages])
 
     async def test_falls_back_to_heuristic_when_batch_rejected(self) -> None:
         connection = _FakeConnection()
