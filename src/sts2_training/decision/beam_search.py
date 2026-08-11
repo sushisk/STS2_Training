@@ -210,7 +210,7 @@ class BeamSearchEngine:
                         node.masked_emulator_dto, cfg.beam_searchable_action_types
                     ):
                         searchable.append(node)
-                    else:
+                    elif _is_macro_resolved(node):
                         finished.append(node)
                 beam = searchable
                 if not beam:
@@ -282,8 +282,12 @@ class BeamSearchEngine:
                         reason = "beam_exhausted"
                         break
 
+            # A continuation is a local macro-action implementation detail until it
+            # resolves to a stable/terminal Combat state. Search termination (including
+            # time_budget) must never promote an unresolved continuation just because it
+            # still occupies the live beam with an inherited parent value.
             finished.extend(waiting_stable)
-            finished.extend(beam)
+            finished.extend(node for node in beam if _is_macro_resolved(node))
         except BaseException as exc:
             search_error = exc
             raise
@@ -303,7 +307,11 @@ class BeamSearchEngine:
                 stats.cleanup_ms += (time.monotonic() - t0) * 1000.0
 
         stats.total_ms = (time.monotonic() - t_start) * 1000.0
-        actionable = [node for node in finished if node.root_action_id is not None]
+        actionable = [
+            node
+            for node in finished
+            if node.root_action_id is not None and _is_macro_resolved(node)
+        ]
         if not actionable:
             return BeamSearchResult(None, None, None, reason, stats)
         best_node = max(actionable, key=lambda node: node.value)
@@ -607,6 +615,16 @@ def _client_unusable(client: Any) -> bool:
     return getattr(client, "pending_retry", None) is not None or getattr(
         client, "session_invalid", False
     )
+
+
+def _is_macro_resolved(node: BeamNode) -> bool:
+    """Whether a node is safe to expose as a completed root-action candidate.
+
+    Continuation DTOs inherit their parent's last stable Value while the local macro
+    action is unresolved. They must therefore never enter the global actionable set,
+    regardless of whether search stopped because of depth, rejection, or time budget.
+    """
+    return node.terminal or not is_continuation_decision(node.masked_emulator_dto)
 
 
 def _is_beam_searchable(dto: Mapping[str, Any], allowed_action_types: frozenset[str]) -> bool:
