@@ -85,6 +85,19 @@ def test_duplicate_card_ids_are_ranked_by_option_identity() -> None:
     assert scores["upgraded"] > scores["plain"]
 
 
+def test_duplicate_action_option_ids_stay_neutral() -> None:
+    actions = [_action("a", "option-0"), _action("b", "option-0")]
+    dto = _dto(
+        "retrieve",
+        [
+            {"id": "GOOD", "type": "Attack", "rarity": "Rare", "optionId": "option-0"},
+            {"id": "BAD", "type": "Curse", "optionId": "option-1"},
+        ],
+    )
+
+    assert choice_card_preference_scores(actions, dto) == {}
+
+
 def test_unknown_future_or_inconsistent_choice_stays_neutral() -> None:
     actions = [_action("a", "option-0"), _action("b", "option-1")]
     options = [
