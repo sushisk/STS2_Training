@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.self_play import (
     SelfPlayRunResult,
@@ -27,7 +28,7 @@ _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
@@ -84,6 +85,7 @@ class _FakeConnection:
                 if self._committed
                 else {"legal_actions": [_ACTION]}
             )
+            dto["mask_version"] = MASK_VERSION
             dto["godMode"] = self._reported_god_mode()
             return {
                 **_common(request),
@@ -102,6 +104,7 @@ class _FakeConnection:
                 "branch_id": "root",
                 "decision_point_id": "d1",
                 "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
                     "legal_actions": [],
                     "terminal": True,
                     "outcome": "victory",
