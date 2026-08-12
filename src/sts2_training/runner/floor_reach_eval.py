@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextvars
 import json
 import logging
 import random
@@ -28,8 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
-from sts2_training.decision import CombatDecisionEngine
-from sts2_training.decision import engine as engine_module
+from sts2_training.decision import CombatDecisionEngine, DecisionOutcome
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.search_modes import resolve_search_mode
 from sts2_training.runner._cli import _positive_int, add_common_arguments, configure_logging
@@ -69,13 +67,6 @@ class _RunState:
     source_counts: Counter[str] = field(default_factory=Counter)
 
 
-_current_state: contextvars.ContextVar[_RunState | None] = contextvars.ContextVar(
-    "_floor_reach_eval_current_state", default=None
-)
-_orig_decide = engine_module.CombatDecisionEngine.decide
-_patched = False
-
-
 def _record_floor(state: _RunState, dto: Mapping[str, Any]) -> None:
     total_floor = dto.get("totalFloor")
     if not isinstance(total_floor, int) or total_floor <= state.max_total_floor:
@@ -86,33 +77,34 @@ def _record_floor(state: _RunState, dto: Mapping[str, Any]) -> None:
     state.act_index_at_max = act_index if isinstance(act_index, int) else None
 
 
-async def _tracking_decide(self: CombatDecisionEngine, *args: Any, **kwargs: Any) -> Any:
-    outcome = await _orig_decide(self, *args, **kwargs)
-    state = _current_state.get()
-    if state is None:
-        return outcome
+class _TrackingCombatDecisionEngine(CombatDecisionEngine):
+    """Combat engine that records decision metadata for one evaluation run."""
 
-    state.decisions_made += 1
-    state.source_counts[outcome.source] += 1
-    decision = outcome.decision
-    if isinstance(decision, Mapping):
-        dto = decision.get("masked_emulator_dto")
+    def __init__(self, client: Any, *, state: _RunState, **kwargs: Any) -> None:
+        super().__init__(client, **kwargs)
+        self._state = state
+
+    async def decide(
+        self,
+        instance_id: str,
+        *,
+        timeout_s: float,
+        decision: Mapping[str, Any] | None = None,
+    ) -> DecisionOutcome:
+        outcome = await super().decide(instance_id, timeout_s=timeout_s, decision=decision)
+        self._state.decisions_made += 1
+        self._state.source_counts[outcome.source] += 1
+
+        dto = outcome.decision.get("masked_emulator_dto")
         if isinstance(dto, Mapping):
-            _record_floor(state, dto)
-    return outcome
-
-
-def _ensure_patched() -> None:
-    """Install the tracking wrapper once; ``ContextVar`` keeps task state isolated."""
-    global _patched
-    if not _patched:
-        engine_module.CombatDecisionEngine.decide = _tracking_decide
-        _patched = True
+            _record_floor(self._state, dto)
+        return outcome
 
 
 def _build_engine(
     client: Any,
     *,
+    state: _RunState,
     seed: int,
     use_beam: bool,
     search_mode: str | BeamSearchConfig | None,
@@ -121,11 +113,17 @@ def _build_engine(
     fallback_selector = HeuristicCombatSelector(random.Random(seed))
     if use_beam:
         beam_config = resolve_search_mode(search_mode, max_depth=beam_max_depth)
-        return CombatDecisionEngine(
-            client, beam_config=beam_config, fallback_selector=fallback_selector
+        return _TrackingCombatDecisionEngine(
+            client,
+            state=state,
+            beam_config=beam_config,
+            fallback_selector=fallback_selector,
         )
-    return CombatDecisionEngine(
-        client, beam_action_types=frozenset(), fallback_selector=fallback_selector
+    return _TrackingCombatDecisionEngine(
+        client,
+        state=state,
+        beam_action_types=frozenset(),
+        fallback_selector=fallback_selector,
     )
 
 
@@ -142,9 +140,7 @@ async def _run_one(
     search_mode: str | BeamSearchConfig | None,
     beam_max_depth: int | None,
 ) -> FloorReachResult:
-    _ensure_patched()
     state = _RunState()
-    token = _current_state.set(state)
     t0 = time.monotonic()
     outcome_label: str | None = None
     error: str | None = None
@@ -155,6 +151,7 @@ async def _run_one(
         await connection.connect()
         engine = _build_engine(
             client,
+            state=state,
             seed=seed,
             use_beam=use_beam,
             search_mode=search_mode,
@@ -175,7 +172,6 @@ async def _run_one(
         _LOG.exception("floor-reach-eval run %s failed", run_id)
         error = f"{type(exc).__name__}: {exc}"
     finally:
-        _current_state.reset(token)
         if client is not None:
             try:
                 await client.close()
