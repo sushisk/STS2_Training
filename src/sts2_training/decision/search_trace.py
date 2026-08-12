@@ -144,6 +144,9 @@ class StablePruneTrace:
     depths_completed: int
     remaining_time_ms: float | None
     nodes: tuple[StablePruneNodeTrace, ...]
+    # Ordered indices returned by StableFrontierPruner.select(). Membership alone is not
+    # replay-complete because the returned order is the authoritative next-beam order.
+    selected_indices: tuple[int, ...] = ()
     event_type: str = field(default="stable_prune", init=False)
 
     def node_views(self) -> tuple[StablePruneNodeView, ...]:
@@ -151,14 +154,37 @@ class StablePruneTrace:
 
         if len(self.nodes) != self.frontier_size:
             raise ValueError("StablePruneTrace frontier_size must equal len(nodes)")
+        if len(self.selected_indices) > self.k:
+            raise ValueError("StablePruneTrace selected_indices cannot contain more than k entries")
+
+        selected_set: set[int] = set()
+        for index in self.selected_indices:
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError("StablePruneTrace selected_indices must contain integers")
+            if index < 0 or index >= self.frontier_size:
+                raise ValueError("StablePruneTrace selected_indices contain an out-of-range index")
+            if index in selected_set:
+                raise ValueError("StablePruneTrace selected_indices must be unique")
+            selected_set.add(index)
+
         views: list[StablePruneNodeView] = []
         for index, node in enumerate(self.nodes):
             if node.frontier_index_before_prune != index:
                 raise ValueError(
                     "StablePruneTrace nodes must be stored in authoritative frontier order"
                 )
+            if node.kept != (index in selected_set):
+                raise ValueError(
+                    "StablePruneTrace kept membership must match ordered selected_indices"
+                )
             views.append(node.to_prune_view())
         return tuple(views)
+
+    def selected_node_views(self) -> tuple[StablePruneNodeView, ...]:
+        """Reconstruct survivors in the exact order returned by the runtime pruner."""
+
+        views = self.node_views()
+        return tuple(views[index] for index in self.selected_indices)
 
     def to_prune_context(
         self,
