@@ -29,6 +29,9 @@ from sts2_training.decision.pruner_training_data import (
     build_pairwise_examples,
     load_pruner_frontiers,
 )
+from sts2_training.decision.oracle_teacher_provenance import (
+    inspect_oracle_teacher_provenance,
+)
 
 DEFAULT_OUTPUT = Path("tools/output/stable_pruner_weights.json")
 
@@ -156,12 +159,8 @@ def evaluate_ranker(
         learned_regret.append(best_target - max(node.target_value for node in learned))
         baseline_regret.append(best_target - max(node.target_value for node in baseline))
         teacher_mean = sum(node.target_value for node in teacher) / k
-        learned_mean_gap.append(
-            teacher_mean - sum(node.target_value for node in learned) / k
-        )
-        baseline_mean_gap.append(
-            teacher_mean - sum(node.target_value for node in baseline) / k
-        )
+        learned_mean_gap.append(teacher_mean - sum(node.target_value for node in learned) / k)
+        baseline_mean_gap.append(teacher_mean - sum(node.target_value for node in baseline) / k)
 
     return {
         "frontiers": len(frontiers),
@@ -188,8 +187,10 @@ def weights_payload(
     min_target_gap: float,
     terminal_weight: float,
     bootstrap_weight: float,
+    oracle_teacher_provenance: dict[str, Any] | None = None,
+    oracle_dataset_provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "model_type": "pairwise_logistic_linear_pruner",
         "artifact_schema_version": LEARNED_PRUNER_ARTIFACT_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -212,6 +213,11 @@ def weights_payload(
         },
         "metrics": metrics,
     }
+    if oracle_teacher_provenance is not None:
+        payload["oracle_teacher_provenance"] = oracle_teacher_provenance
+    if oracle_dataset_provenance is not None:
+        payload["oracle_dataset_provenance"] = oracle_dataset_provenance
+    return payload
 
 
 def _load(
@@ -257,6 +263,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-target-gap", type=float, default=1e-6)
     parser.add_argument("--terminal-weight", type=float, default=1.0)
     parser.add_argument("--bootstrap-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--allow-mixed-teachers",
+        action="store_true",
+        help="allow Oracle v3 records from multiple teacher provenance fingerprints; "
+        "the full set is recorded in the artifact",
+    )
     return parser.parse_args(argv)
 
 
@@ -267,11 +279,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no *.jsonl files found under {args.log_dir}", file=sys.stderr)
         return 1
 
+    dataset_provenance = inspect_oracle_teacher_provenance(
+        paths,
+        allow_mixed_teachers=args.allow_mixed_teachers,
+    )
     split = split_source_files(
         paths,
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,
         seed=args.seed,
+    )
+    training_provenance = inspect_oracle_teacher_provenance(
+        split.train,
+        allow_mixed_teachers=args.allow_mixed_teachers,
     )
     train_frontiers = _load(
         split.train,
@@ -317,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         min_target_gap=args.min_target_gap,
         terminal_weight=args.terminal_weight,
         bootstrap_weight=args.bootstrap_weight,
+        oracle_teacher_provenance=training_provenance.to_json(),
+        oracle_dataset_provenance=dataset_provenance.to_json(),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
