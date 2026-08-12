@@ -2,7 +2,8 @@
 
 Decision-phase semantics are intentionally not encoded by the mode name. The Combat
 engine applies its domain scope separately; shallow/standard/deep/wide only vary search
-budget knobs such as depth, width, and top-k.
+budget knobs such as depth, width, and top-k. ``none`` keeps the standard budget shape
+for compatibility but disables Beam execution through ``search_mode_uses_beam``.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ __all__ = [
     "DEFAULT_SEARCH_MODE",
     "SEARCH_MODES",
     "resolve_search_mode",
+    "search_mode_uses_beam",
 ]
 
 
@@ -33,6 +35,7 @@ def _copy_config(config: BeamSearchConfig, *, max_depth: int | None = None) -> B
 
 
 _SEARCH_MODE_TEMPLATES: dict[str, BeamSearchConfig] = {
+    "none": BeamSearchConfig(),
     "shallow": BeamSearchConfig(max_depth=1, beam_width=4, top_k_actions=3),
     "standard": BeamSearchConfig(),
     "deep": BeamSearchConfig(max_depth=4, beam_width=8, top_k_actions=4),
@@ -54,7 +57,24 @@ class _SearchModeRegistry(Mapping[str, BeamSearchConfig]):
 
 
 SEARCH_MODES: Mapping[str, BeamSearchConfig] = _SearchModeRegistry()
-DEFAULT_SEARCH_MODE = "standard"
+DEFAULT_SEARCH_MODE = "none"
+
+
+def search_mode_uses_beam(mode: str | BeamSearchConfig | None = None) -> bool:
+    """Return whether a runner search mode should execute Beam Search.
+
+    Explicit ``BeamSearchConfig`` objects remain authoritative configurations and are
+    therefore considered Beam-enabled. ``None`` resolves to ``DEFAULT_SEARCH_MODE``.
+    """
+    if isinstance(mode, BeamSearchConfig):
+        return True
+    resolved_mode = DEFAULT_SEARCH_MODE if mode is None else mode
+    if resolved_mode not in _SEARCH_MODE_TEMPLATES:
+        raise ValueError(
+            f"unknown search mode {resolved_mode!r}; choose one of {sorted(SEARCH_MODES)} "
+            "or pass a BeamSearchConfig directly"
+        )
+    return resolved_mode != "none"
 
 
 def resolve_search_mode(
@@ -66,6 +86,7 @@ def resolve_search_mode(
 
     This function does not alter decision scope. Combat continuation support is a domain
     capability applied by `CombatDecisionEngine`, not a property of the preset name.
+    Use ``search_mode_uses_beam`` for the runner-level execution toggle.
     """
     if mode is None:
         mode = DEFAULT_SEARCH_MODE

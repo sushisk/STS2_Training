@@ -21,19 +21,37 @@ def build_index_html() -> str:
     .enemies .entity-card { max-width:164px; }
     .enemies .portrait { width:86px; height:98px; color:rgba(211,125,96,.72); }
 """,
-        """    .enemies { position:relative; z-index:2; display:flex; gap:16px; align-items:stretch; justify-content:flex-end; min-width:0; overflow-x:auto; padding:18px 2px 0; scrollbar-width:thin; }
-    .enemies .entity { width:clamp(230px,22vw,300px); flex:0 0 clamp(230px,22vw,300px); text-align:left; }
-    .enemies .entity-card { max-width:none; min-height:154px; padding:14px 16px; }
+        """    .enemies { position:relative; z-index:2; display:grid; grid-template-columns:repeat(var(--enemy-count,1),minmax(0,1fr)); gap:8px; align-items:stretch; justify-content:stretch; min-width:0; overflow:hidden; padding:18px 2px 0; }
+    .enemies .entity { width:auto; min-width:0; text-align:left; }
+    .enemies .entity-card { width:100%; max-width:none; min-width:0; min-height:154px; height:100%; padding:14px 12px; }
     .enemy-card .entity-name { margin-bottom:12px; color:#f1e5bd; font-size:16px; font-weight:700; white-space:normal; overflow-wrap:anywhere; }
-    .enemy-facts { display:grid; grid-template-columns:minmax(0,1fr) minmax(72px,auto); gap:8px; margin-bottom:10px; }
-    .enemy-fact { padding:7px 9px; border:1px solid rgba(174,199,190,.18); background:rgba(0,0,0,.22); min-width:0; }
-    .enemy-fact span,.enemy-section-label { display:block; margin-bottom:3px; color:#7f918e; font:8px var(--mono); letter-spacing:.11em; }
-    .enemy-fact strong { display:block; color:#f0d6c6; font:700 12px/1.35 var(--mono); overflow-wrap:anywhere; }
+    .enemy-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-bottom:10px; }
+    .enemy-fact { padding:7px 7px; border:1px solid rgba(174,199,190,.18); background:rgba(0,0,0,.22); min-width:0; }
+    .enemy-fact span,.enemy-section-label { display:block; margin-bottom:3px; color:#7f918e; font:8px var(--mono); letter-spacing:.08em; overflow-wrap:anywhere; }
+    .enemy-fact strong { display:block; min-width:0; color:#f0d6c6; font:700 11px/1.35 var(--mono); overflow-wrap:anywhere; }
     .enemy-card .power-strip { justify-content:flex-start; min-height:0; margin-top:0; }
-    .enemy-card .power { font-size:10px; }
+    .enemy-card .power { min-width:0; font-size:9px; }
     .enemy-none { color:#697a76; font:10px var(--mono); }
+    .enemies.many-enemies { gap:5px; }
+    .enemies.many-enemies .entity-card { padding:10px 7px; }
+    .enemies.many-enemies .enemy-card .entity-name { margin-bottom:7px; font-size:12px; }
+    .enemies.many-enemies .enemy-facts { grid-template-columns:1fr; gap:3px; margin-bottom:7px; }
+    .enemies.many-enemies .enemy-fact { padding:3px 5px; display:grid; grid-template-columns:minmax(46px,auto) minmax(0,1fr); gap:5px; align-items:center; }
+    .enemies.many-enemies .enemy-fact span { margin-bottom:0; }
+    .enemies.many-enemies .enemy-fact strong { text-align:right; font-size:10px; }
+    .enemies.many-enemies .enemy-card .power { font-size:8px; }
 """,
         label="enemy layout",
+    )
+
+    html = _replace_once(
+        html,
+        """    const tags = [value.block ? `<span class=\"chip block\">◇ BLOCK ${esc(value.block)}</span>` : '', ...statuses.slice(0,5).map(s => `<span class=\"chip\">${esc(compact(s,22))}</span>`)].join('');
+""",
+        """    const blockTag = value.block === undefined || value.block === null || value.block === '' ? '' : `<span class=\"chip block\">◇ BLOCK ${esc(value.block)}</span>`;
+    const tags = [blockTag, ...statuses.slice(0,5).map(s => `<span class=\"chip\">${esc(compact(s,22))}</span>`)].join('');
+""",
+        label="player block tag",
     )
 
     html = _replace_once(
@@ -44,12 +62,25 @@ def build_index_html() -> str:
       const intentMove = value.intent === undefined || value.intent === null || value.intent === '' ? '—' : compact(value.intent,40);
       const block = value.block === undefined || value.block === null || value.block === '' ? '0' : value.block;
       const powers = renderPowers(value.powers) || '<div class=\"enemy-none\">—</div>';
-      target.innerHTML = `<div class=\"entity-card enemy-card\"><div class=\"entity-name\">${esc(value.name || `Enemy ${index+1}`)}</div><div class=\"enemy-facts\"><div class=\"enemy-fact\"><span>INTENT MOVE</span><strong>${esc(intentMove)}</strong></div><div class=\"enemy-fact\"><span>BLOCK</span><strong>${esc(block)}</strong></div></div><span class=\"enemy-section-label\">POWER</span>${powers}</div>`;
+      target.innerHTML = `<div class=\"entity-card enemy-card\"><div class=\"entity-name\">${esc(value.name || 'Enemy')}</div><div class=\"enemy-facts\"><div class=\"enemy-fact\"><span>HP</span><strong>${esc(hpText(value))}</strong></div><div class=\"enemy-fact\"><span>INTENT MOVE</span><strong>${esc(intentMove)}</strong></div><div class=\"enemy-fact\"><span>BLOCK</span><strong>${esc(block)}</strong></div></div><span class=\"enemy-section-label\">POWER</span>${powers}</div>`;
       return;
     }
     target.innerHTML = `${intent}<div class=\"entity-card\"><div class=\"portrait\">${icon}</div><div class=\"entity-name\">${esc(value.name || 'Player')}</div><div class=\"hpbar\"><div class=\"hpfill\" style=\"width:${pct(hp,maxHp)}%\"></div></div><div class=\"hptext\">${esc(hpText(value))}</div><div class=\"combat-tags\">${tags}</div>${renderPowers(value.powers)}</div>`;
 """,
         label="enemy renderer",
+    )
+
+    html = _replace_once(
+        html,
+        """    const enemies = Array.isArray(frame.enemies) ? frame.enemies : [];
+    if (!enemies.length) $('enemies').innerHTML='<div class=\"empty\">No enemy state in this frame</div>';
+""",
+        """    const enemies = Array.isArray(frame.enemies) ? frame.enemies : [];
+    $('enemies').style.setProperty('--enemy-count', String(Math.max(1,enemies.length)));
+    $('enemies').classList.toggle('many-enemies', enemies.length >= 3);
+    if (!enemies.length) $('enemies').innerHTML='<div class=\"empty\">No enemy state in this frame</div>';
+""",
+        label="enemy count layout",
     )
 
     html = _replace_once(
