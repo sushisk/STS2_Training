@@ -119,7 +119,7 @@ def load_pruner_frontiers(
                     )
                 target_beam_width = next(iter(target_widths))
 
-                # Oracle v3 records the wide teacher depth/time budget. Only target K is a
+                # Oracle v4 records the wide teacher depth/time budget. Only target K is a
                 # reconstructible student-budget field, so feature schema v2 uses this
                 # context for beam_width while excluding depth/time budget-derived features.
                 views = trace.node_views()
@@ -416,12 +416,14 @@ def _stable_target_index(record: Mapping[str, Any]) -> dict[tuple[str, str], Map
 
 
 def _stable_prune_trace(raw: Mapping[str, Any]) -> StablePruneTrace:
+    if "selected_indices" not in raw:
+        raise ValueError("search_trace.selected_indices is required for Oracle v4")
     nodes = tuple(
         _stable_prune_node_trace(node)
         for node in _sequence(raw.get("nodes"))
         if isinstance(node, Mapping)
     )
-    return StablePruneTrace(
+    trace = StablePruneTrace(
         search_id=_string(raw.get("search_id"), "search_trace.search_id"),
         prune_step_id=_string(raw.get("prune_step_id"), "search_trace.prune_step_id"),
         phase=_string(raw.get("phase"), "search_trace.phase"),
@@ -435,7 +437,16 @@ def _stable_prune_trace(raw: Mapping[str, Any]) -> StablePruneTrace:
         ),
         remaining_time_ms=_optional_float(raw.get("remaining_time_ms")),
         nodes=nodes,
+        selected_indices=_index_tuple(
+            raw.get("selected_indices"),
+            "search_trace.selected_indices",
+        ),
     )
+    # Oracle v4 persists the exact ordered survivor action. Validate the order, range,
+    # uniqueness, K bound, frontier order, and kept-membership contract while loading so
+    # malformed persisted traces cannot silently become training/evaluation examples.
+    trace.node_views()
+    return trace
 
 
 def _stable_prune_node_trace(raw: Mapping[str, Any]) -> StablePruneNodeTrace:
@@ -494,6 +505,17 @@ def _sequence(value: Any) -> Sequence[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return value
     return ()
+
+
+def _index_tuple(value: Any, field: str) -> tuple[int, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ValueError(f"{field} must be a sequence of integers")
+    result: list[int] = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError(f"{field}[{index}] must be an integer")
+        result.append(item)
+    return tuple(result)
 
 
 def _string(value: Any, field: str) -> str:
