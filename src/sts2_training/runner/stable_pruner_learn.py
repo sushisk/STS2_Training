@@ -311,6 +311,11 @@ def run_learning(args: argparse.Namespace) -> LearningRunSummary:
             oracle_records=prepared.oracle_records,
         )
         output = Path(args.output or _default_output(plan, data_mode=data_mode))
+        if args.weights is not None and output.resolve() == args.weights.resolve():
+            raise ValueError(
+                "--output must differ from --weights so the parent artifact remains immutable "
+                "and its pre-update SHA-256 provenance stays valid"
+            )
         output.parent.mkdir(parents=True, exist_ok=True)
 
         if data_mode == "validate":
