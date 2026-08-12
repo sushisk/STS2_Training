@@ -9,6 +9,8 @@ from sts2_training.decision.policy import ActionCandidate, PolicyModel
 from sts2_training.decision.search_trace import (
     InMemorySearchTraceCollector,
     PolicyProposalTrace,
+    SearchTraceEnd,
+    SearchTraceStart,
     StablePruneTrace,
 )
 from sts2_training.decision.stable_pruner import (
@@ -42,6 +44,39 @@ class _ReversePruner(StableFrontierPruner):
     def select(self, frontier, *, k, context):
         self.seen = [node.branch_id for node in frontier]
         return list(reversed(frontier))[:k]
+
+
+class _TerminalClient:
+    instance_type = "combat"
+
+    async def emulate_actions(
+        self,
+        instance_id,
+        items,
+        *,
+        timeout_s,
+        simulation_options,
+    ):
+        return {
+            "branch_results": {
+                item["branch_id"]: {
+                    "status": "completed",
+                    "decision_point_id": "d-terminal",
+                    "masked_emulator_dto": {
+                        "terminal": True,
+                        "outcome": "victory",
+                        "legal_actions": [],
+                    },
+                }
+                for item in items
+            }
+        }
+
+    async def cancel_branches(self, instance_id, branch_ids, *, timeout_s):
+        return None
+
+    async def release_branches(self, instance_id, branch_ids, *, timeout_s):
+        return None
 
 
 def _node(branch_id: str, value: float, *, parent: str = "root") -> BeamNode:
@@ -211,6 +246,37 @@ class BeamSearchInstrumentationTest(unittest.TestCase):
             [candidate.candidate_source for candidate in event.candidates],
             ["structural_coverage", "structural_coverage"],
         )
+
+
+class BeamSearchCompletionTraceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_beam_search_emits_exactly_one_completion_event(self) -> None:
+        collector = InMemorySearchTraceCollector()
+        engine = BeamSearchEngine(
+            _TerminalClient(),
+            policy=_RankedPolicy(["card"]),
+            value_fn=_DummyValue(),
+            config=BeamSearchConfig(beam_width=1, top_k_actions=1, max_depth=2),
+            trace_collector=collector,
+        )
+        decision = {
+            "decision_point_id": "d-root",
+            "masked_emulator_dto": {
+                "legal_actions": [
+                    {"action_id": "card", "action_type": "card", "is_available": True}
+                ]
+            },
+        }
+
+        result = await engine.search("inst", decision, timeout_s=5.0)
+
+        starts = [event for event in collector.events if isinstance(event, SearchTraceStart)]
+        ends = [event for event in collector.events if isinstance(event, SearchTraceEnd)]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(ends), 1)
+        self.assertIs(collector.events[-1], ends[0])
+        self.assertEqual(ends[0].search_id, starts[0].search_id)
+        self.assertEqual(ends[0].reason, result.reason)
+        self.assertEqual(ends[0].best_root_action_id, "card")
 
 
 if __name__ == "__main__":
