@@ -106,14 +106,18 @@ class AsyncTrainingApiClient(ApiContract):
         instance_id: str,
         branch_ids: Sequence[str],
     ) -> None:
-        """Attach owned Branch cleanup to an unresolved exact-replay request.
+        """Attach Branch ownership cleanup to an unresolved exact-replay request.
 
-        A caller that created speculative Branches must not send ``release_branches``
-        while an earlier request is completion-uncertain. Registering the ownership here
-        keeps cleanup in the same serialized lifecycle: once the exact replay resolves,
-        the client sends the release as the immediately following sequence before the
-        recovered outcome is returned or re-raised. If that release itself becomes
-        uncertain, its exact request becomes ``pending_retry`` and remains recoverable.
+        ``branch_ids`` may contain both Branches that were definitely created before the
+        uncertain request and Branches that the uncertain request itself may have
+        created. The latter set is inferred from the exact serialized retry request, so a
+        definitive replay ``rejected`` outcome can release only the already-owned IDs;
+        replay ``completed``/``faulted`` outcomes release both sets.
+
+        A caller must not send ``release_branches`` while the source request is
+        completion-uncertain. Once exact replay resolves, cleanup is sent as the
+        immediately following sequence. If cleanup itself becomes uncertain, its exact
+        request becomes ``pending_retry`` and remains recoverable.
         """
 
         if self._session_invalid:
@@ -138,19 +142,7 @@ class AsyncTrainingApiClient(ApiContract):
         if not normalized:
             raise ValueError("deferred cleanup branch_ids must not be empty")
 
-        expected: set[str] = set()
-        if retry_request.operation == "emulate_action":
-            branch_id = request.get("branch_id")
-            if isinstance(branch_id, str) and branch_id:
-                expected.add(branch_id)
-        else:
-            items = request.get("items")
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, Mapping):
-                        branch_id = item.get("branch_id")
-                        if isinstance(branch_id, str) and branch_id:
-                            expected.add(branch_id)
+        expected = self._branch_ids_created_by_retry(retry_request)
         if not expected or not expected <= seen:
             raise ValueError(
                 "deferred cleanup must include every Branch that the pending emulate "
@@ -248,16 +240,20 @@ class AsyncTrainingApiClient(ApiContract):
                         request, source_branch_id=parent, deadline=deadline
                     )
                 except BaseException as primary_error:
-                    # ApiOperationError is definitive and consumes the source sequence;
-                    # protocol/transport uncertainty keeps pending_retry on the source.
-                    # Only the former is safe to follow with the owned Branch release.
                     if self._pending_retry is None and not self._session_invalid:
+                        replay_rejected = (
+                            isinstance(primary_error, ApiOperationError)
+                            and primary_error.response.get("status") == "rejected"
+                        )
                         try:
                             await self._complete_deferred_branch_cleanup(
                                 retry_request,
                                 deadline=deadline,
+                                include_retry_created=not replay_rejected,
                             )
-                        except BaseException as cleanup_error:
+                        except Exception as cleanup_error:
+                            if replay_rejected:
+                                raise primary_error from cleanup_error
                             raise cleanup_error from primary_error
                     raise
                 await self._complete_deferred_branch_cleanup(
@@ -276,12 +272,19 @@ class AsyncTrainingApiClient(ApiContract):
                     )
                 except BaseException as primary_error:
                     if self._pending_retry is None and not self._session_invalid:
+                        replay_rejected = (
+                            isinstance(primary_error, ApiOperationError)
+                            and primary_error.response.get("status") == "rejected"
+                        )
                         try:
                             await self._complete_deferred_branch_cleanup(
                                 retry_request,
                                 deadline=deadline,
+                                include_retry_created=not replay_rejected,
                             )
-                        except BaseException as cleanup_error:
+                        except Exception as cleanup_error:
+                            if replay_rejected:
+                                raise primary_error from cleanup_error
                             raise cleanup_error from primary_error
                     raise
                 await self._complete_deferred_branch_cleanup(
@@ -581,12 +584,27 @@ class AsyncTrainingApiClient(ApiContract):
         source_retry: RetryRequest,
         *,
         deadline: float,
+        include_retry_created: bool = True,
     ) -> None:
         record = self._pending_retry_cleanup
         if record is None or record[0] != source_retry:
             return
 
-        _, instance_id, branch_ids = record
+        _, instance_id, recorded_branch_ids = record
+        if include_retry_created:
+            branch_ids = recorded_branch_ids
+        else:
+            retry_created = self._branch_ids_created_by_retry(source_retry)
+            branch_ids = tuple(
+                branch_id
+                for branch_id in recorded_branch_ids
+                if branch_id not in retry_created
+            )
+
+        if not branch_ids:
+            self._pending_retry_cleanup = None
+            return
+
         cleanup_request = self._build_branch_batch_operation(
             self._next_request_seq,
             "release_branches",
@@ -609,6 +627,29 @@ class AsyncTrainingApiClient(ApiContract):
                 self._pending_retry_cleanup = None
             raise
         self._pending_retry_cleanup = None
+
+    @staticmethod
+    def _branch_ids_created_by_retry(retry_request: RetryRequest) -> frozenset[str]:
+        request = retry_request.to_message()
+        if retry_request.operation == "emulate_action":
+            branch_id = request.get("branch_id")
+            return (
+                frozenset({branch_id})
+                if isinstance(branch_id, str) and branch_id
+                else frozenset()
+            )
+        if retry_request.operation == "emulate_actions":
+            items = request.get("items")
+            if not isinstance(items, list):
+                return frozenset()
+            return frozenset(
+                branch_id
+                for item in items
+                if isinstance(item, Mapping)
+                for branch_id in [item.get("branch_id")]
+                if isinstance(branch_id, str) and branch_id
+            )
+        return frozenset()
 
     async def _execute(self, request: JsonObject, *, deadline: float) -> JsonObject:
         token = RetryRequest.from_message(request)
