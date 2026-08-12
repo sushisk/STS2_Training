@@ -1,48 +1,58 @@
-"""Branch-evaluate ``choice_event_option`` decisions via Whole Run's ``emulate_action``
-(the "Active Event RNG Hypothesis" machinery - see
-``Outputs/reports/rl_active_event_rng_hypothesis_20260804.md``). That machinery was
-built to compare different RNG resolutions of the *same* chosen option, but the
-Emulator/RL side never distinguishes that use from comparing *different* candidate
-options against each other - ``emulate_action``'s ``action_id`` names whichever legal
-action a caller picks. This module repurposes it for the latter.
+"""Evaluate ``choice_event_option`` candidates by simulating each option on a Branch.
 
-Uses the single-item ``emulate_action`` call, not the batch ``emulate_actions`` -
-confirmed live that Whole Run's batch endpoint rejects Branch simulation at the
-``event_choice`` boundary ("Branch simulation is unavailable at this Whole Run
-boundary.") even though the single-item call is explicitly supported there (see
-``instance_whole_run.py::emulate_action``'s own boundary check). Candidates are
-evaluated concurrently via ``asyncio.gather``, mirroring ``test_e2e.py``'s own sibling
-Branch pattern (multiple ``emulate_action`` calls from the same root decision point).
+Each candidate is assigned a distinct positive ``rng_id``. Root uses ``rng_id=0``;
+event-evaluation Branches deliberately use non-root RNG hypotheses rather than treating
+the game as deterministic. This is provisional: ideally each option would be sampled
+across multiple RNG hypotheses, but that larger multi-sample change belongs in a
+separate PR.
 
-Why this exists: ``choice_event_option`` previously had only a static, predictive hard
-safety filter (``event_choice_heuristic.safe_event_option_candidates``, based on the
-Emulator's own pre-computed ``willKillPlayer`` flag) - it never weighed HP cost/benefit
-beyond that binary "definitely lethal" cutoff, so e.g. an event offering one free option
-and one option that costs meaningful-but-survivable HP was chosen from uniformly at
-random. This module instead actually resolves every candidate on a disposable Branch and
-compares the real resulting HP.
+Whole Run implementation note: RL does not clone or retain a ``GameInstance`` per
+public Branch. ``WholeRunInstance`` owns the public ``branch_id`` and Branch bookkeeping.
+For a speculative action it sends ``WholeRunWorkerPool`` a replay recipe consisting of
+the latest Map-boundary snapshot, room id, action prefix, target boundary, action id, and
+(for Events) an ``EventRngReplayPlan``. A worker process owns one persistent
+``WholeRunSession``/``GameInstance`` and reconstructs the requested frontier by loading
+the Map snapshot, entering the room, replaying the prefix, applying the Event RNG
+override at the original hypothesis point, and only then stepping the candidate action.
+The returned result is converted back into the Branch view; descendant Branches are
+reconstructed again from the same Map snapshot with an extended prefix. See
+``STS2_RL/API/instance_whole_run.py`` and ``STS2_RL/Run/worker_pool.py``. This replay
+architecture is also why a Whole Run Event before the first Map snapshot cannot be
+branched.
 
-Scope: HP preservation only, not a general Whole Run value function. ``ValueModel``
-(``decision/value.py``) is explicitly Combat-domain-scoped (``CombatObservation.from_dto``
-requires combat-shaped fields an event's resulting ``map_select`` DTO doesn't have), so it
-cannot be reused here without a new, much larger Whole-Run value model - out of scope for
-the concrete problem this fixes (event choices spending HP for no evaluated reason).
+``AsyncTrainingApiClient`` intentionally permits only one wire request in flight, so the
+candidate simulations run sequentially here. Candidate-level faulted responses are
+treated as unusable samples; rejected requests and transport/protocol failures propagate
+because they can indicate a caller bug or an unsafe client session.
+
+This is an HP-preservation heuristic, not a general Whole Run value function. Candidates
+that fail to resolve, produce a non-finite HP value, or resolve to ``hp <= 0`` are ignored.
 """
 
 from __future__ import annotations
 
-import asyncio
+import logging
+import math
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sts2_training.api.contract import ROOT_BRANCH_ID
+from sts2_training.api.contract import (
+    ROOT_BRANCH_ID,
+    RequestFaultedError,
+    RequestRejectedError,
+)
+from sts2_training.api.transport import TransportError
 from sts2_training.selection.action_classification import (
-    CHOICE_EVENT_OPTION_ACTION_TYPE,
     JsonObject,
+    choice_event_option_actions,
 )
 
 __all__ = ["best_event_option"]
+
+_LOG = logging.getLogger(__name__)
+_MAX_CLEANUP_RESERVE_S = 1.0
 
 
 async def best_event_option(
@@ -52,60 +62,79 @@ async def best_event_option(
     decision_point_id: str,
     legal_actions: Sequence[JsonObject],
     timeout_s: float,
-) -> "str | None":
-    """Branch-evaluate every available ``choice_event_option`` candidate and return the
-    ``action_id`` of whichever leaves the player with the most HP, excluding any
-    candidate that resolves to the player being dead (``hp <= 0``) or to an unusable
-    branch result.
+) -> str | None:
+    """Return the event option that leaves the player with the most HP.
 
-    Returns ``None`` - meaning "no opinion, caller should fall back to its own logic
-    (beam search / ``event_choice_heuristic``'s static lethality filter)" - when there
-    are 0-1 candidates (nothing to compare) or every branch failed/errored.
+    Each candidate is evaluated once under its own positive RNG hypothesis. Returns
+    ``None`` when there are fewer than two usable candidates, every candidate faults or
+    resolves to death, or the evaluation budget expires before all candidates are tried.
     """
 
-    event_actions = [
-        action
-        for action in legal_actions
-        if action.get("action_type") == CHOICE_EVENT_OPTION_ACTION_TYPE
-    ]
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or timeout_s <= 0
+    ):
+        raise ValueError("timeout_s must be a finite positive number")
+
+    event_actions = choice_event_option_actions(legal_actions)
     if len(event_actions) <= 1:
         return None
 
-    branch_by_action: dict[str, str] = {}
+    candidates: list[tuple[str, str]] = []
     for index, action in enumerate(event_actions):
         action_id = action.get("action_id")
         if not isinstance(action_id, str) or not action_id:
             continue
         branch_id = f"event-eval-{decision_point_id}-{index}-{uuid.uuid4().hex[:8]}"
-        branch_by_action[branch_id] = action_id
+        candidates.append((branch_id, action_id))
 
-    if len(branch_by_action) <= 1:
+    if len(candidates) <= 1:
         return None
 
-    branch_ids = list(branch_by_action)
-    try:
-        results = await asyncio.gather(
-            *(
-                _emulate_one(
-                    client,
-                    instance_id=instance_id,
-                    branch_id=branch_id,
-                    rng_id=index + 1,
-                    decision_point_id=decision_point_id,
-                    action_id=branch_by_action[branch_id],
-                    timeout_s=timeout_s,
-                )
-                for index, branch_id in enumerate(branch_ids)
-            ),
-            return_exceptions=True,
-        )
+    timeout_s = float(timeout_s)
+    overall_deadline = time.monotonic() + timeout_s
+    cleanup_reserve_s = min(_MAX_CLEANUP_RESERVE_S, timeout_s / (len(candidates) + 1))
+    evaluation_deadline = overall_deadline - cleanup_reserve_s
 
-        best_action_id: "str | None" = None
-        best_hp: "float | None" = None
-        for branch_id, result in zip(branch_ids, results):
-            if isinstance(result, BaseException) or not isinstance(result, Mapping):
+    created_branch_ids: list[str] = []
+    primary_error: BaseException | None = None
+    try:
+        best_action_id: str | None = None
+        best_hp: float | None = None
+
+        for index, (branch_id, action_id) in enumerate(candidates):
+            remaining = evaluation_deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+
+            try:
+                # ``branch_id`` is logical RL-coordinator state, not a cloned WorkerPool
+                # GameInstance. The RL Whole Run path reconstructs this candidate on a
+                # worker from Map snapshot + room + action prefix. ``rng_id`` selects the
+                # Event RNG hypothesis whose replay plan is applied at the original Event
+                # point before this action is stepped. See the module note above.
+                result = await client.emulate_action(
+                    instance_id,
+                    ROOT_BRANCH_ID,
+                    branch_id,
+                    index + 1,
+                    decision_point_id,
+                    action_id,
+                    timeout_s=remaining,
+                )
+            except RequestFaultedError:
+                # Faulted requests consume the session sequence and may leave a faulted
+                # Branch to release. A fault that invalidates the client is not a
+                # candidate-level failure and must propagate.
+                if _client_unusable(client):
+                    raise
+                created_branch_ids.append(branch_id)
                 continue
-            if result.get("status") != "completed":
+
+            created_branch_ids.append(branch_id)
+            if not isinstance(result, Mapping) or result.get("status") != "completed":
                 continue
             result_dto = result.get("masked_emulator_dto")
             if not isinstance(result_dto, Mapping):
@@ -115,45 +144,62 @@ async def best_event_option(
                 continue
             if best_hp is None or hp > best_hp:
                 best_hp = hp
-                best_action_id = branch_by_action[branch_id]
+                best_action_id = action_id
+
         return best_action_id
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        try:
-            await client.cancel_branches(instance_id, branch_ids, timeout_s=timeout_s)
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass
-        try:
-            await client.release_branches(instance_id, branch_ids, timeout_s=timeout_s)
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass
+        # release_branches cancels active Branches before releasing them. Reserve a small
+        # part of the caller's deadline so a completed/faulted evaluation does not consume
+        # the entire budget and make cleanup impossible.
+        remaining = overall_deadline - time.monotonic()
+        if created_branch_ids and remaining > 0 and not _client_unusable(client):
+            try:
+                await client.release_branches(
+                    instance_id,
+                    created_branch_ids,
+                    timeout_s=remaining,
+                )
+            except RequestRejectedError:
+                if primary_error is None and _client_unusable(client):
+                    raise
+                if primary_error is None:
+                    _LOG.warning(
+                        "event branch cleanup was rejected for instance_id=%s",
+                        instance_id,
+                        exc_info=True,
+                    )
+            except TransportError as exc:
+                if primary_error is None and (
+                    exc.completion_uncertain or _client_unusable(client)
+                ):
+                    raise
+                if primary_error is None:
+                    _LOG.warning(
+                        "event branch cleanup transport failure for instance_id=%s",
+                        instance_id,
+                        exc_info=True,
+                    )
+            except Exception:
+                if primary_error is None:
+                    raise
+                _LOG.exception(
+                    "event branch cleanup also failed while propagating an evaluation "
+                    "error for instance_id=%s",
+                    instance_id,
+                )
 
 
-async def _emulate_one(
-    client: Any,
-    *,
-    instance_id: str,
-    branch_id: str,
-    rng_id: int,
-    decision_point_id: str,
-    action_id: str,
-    timeout_s: float,
-) -> "JsonObject | None":
-    try:
-        return await client.emulate_action(
-            instance_id,
-            ROOT_BRANCH_ID,
-            branch_id,
-            rng_id,
-            decision_point_id,
-            action_id,
-            timeout_s=timeout_s,
-        )
-    except Exception:  # noqa: BLE001 - one candidate's failure must not sink the rest
-        return None
+def _client_unusable(client: Any) -> bool:
+    return getattr(client, "pending_retry", None) is not None or getattr(
+        client, "session_invalid", False
+    )
 
 
-def _finite_number(value: Any) -> "float | None":
+def _finite_number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
-    return number if number == number and abs(number) != float("inf") else None
+    return number if math.isfinite(number) else None
