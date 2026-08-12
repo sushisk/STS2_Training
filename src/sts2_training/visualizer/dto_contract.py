@@ -76,6 +76,14 @@ def _apply_formal_emulator_fields(event: dict[str, Any], dto: Mapping[str, Any])
             player["current_hp"] = dto["hp"]
         if dto.get("maxHp") is not None:
             player["max_hp"] = dto["maxHp"]
+        if dto.get("block") is not None:
+            player["block"] = dto["block"]
+
+    resources = frame.get("resources")
+    if isinstance(resources, dict) and dto.get("totalFloor") is not None:
+        # Emulator exposes both actFloor and totalFloor. The visualizer's single
+        # FLOOR value is the run-wide floor number, matching GetRunSummary.FloorReached.
+        resources["floor"] = dto["totalFloor"]
 
     raw_enemies = _sequence(dto.get("enemies"))
     shown_enemies = frame.get("enemies")
