@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sts2_training.decision.oracle_teacher_provenance import (
+    inspect_oracle_teacher_provenance,
+)
 from sts2_training.decision.pruner_features import stable_pruner_feature_matrix
 from sts2_training.decision.stable_pruner import StablePruneContext
 
@@ -70,13 +73,19 @@ def load_pruner_frontiers(
     *,
     terminal_weight: float = 1.0,
     bootstrap_weight: float = 0.5,
+    allow_mixed_teachers: bool = False,
 ) -> list[PrunerFrontierTrainingExample]:
     if terminal_weight <= 0.0 or bootstrap_weight <= 0.0:
         raise ValueError("target source weights must be positive")
 
+    normalized_paths = tuple(Path(path) for path in paths)
+    inspect_oracle_teacher_provenance(
+        normalized_paths,
+        allow_mixed_teachers=allow_mixed_teachers,
+    )
+
     frontiers: list[PrunerFrontierTrainingExample] = []
-    for path_value in paths:
-        path = Path(path_value)
+    for path in normalized_paths:
         for record in _iter_records(path):
             targets = _stable_target_index(record)
             decision_point_id = _string(record.get("decision_point_id"), "decision_point_id")
