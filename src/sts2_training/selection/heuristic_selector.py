@@ -10,6 +10,7 @@ from sts2_training.selection.action_classification import (
     CARD_ACTION_TYPE,
     CHOICE_CARD_ACTION_TYPE,
     CHOICE_CONFIRM_ACTION_TYPE,
+    CHOICE_EVENT_OPTION_ACTION_TYPE,
     CHOICE_REWARD_POTION_REPLACE_ACTION_TYPE,
     CHOICE_REWARD_POTION_TAKE_ACTION_TYPE,
     CHOICE_REWARD_SKIP_ACTION_TYPE,
@@ -20,6 +21,7 @@ from sts2_training.selection.action_classification import (
     group_by_action_type,
 )
 from sts2_training.selection.choice_card_heuristic import choice_card_preference_scores
+from sts2_training.selection.event_choice_heuristic import safe_event_option_candidates
 from sts2_training.selection.room_heuristic import room_preference_scores
 
 if TYPE_CHECKING:
@@ -95,6 +97,10 @@ class HeuristicCombatSelector:
         if map_rooms:
             return self._choose_room(map_rooms, dto)
 
+        event_options = by_type.get(CHOICE_EVENT_OPTION_ACTION_TYPE)
+        if event_options:
+            return self._choose_event_option(event_options)
+
         for action_type in _CATEGORY_PRIORITY:
             candidates = by_type.get(action_type)
             if not candidates:
@@ -145,6 +151,14 @@ class HeuristicCombatSelector:
 
         scores = room_preference_scores(candidates, masked_emulator_dto)
         return self._choose_best_scored(candidates, scores)
+
+    def _choose_event_option(self, candidates: Sequence[JsonObject]) -> JsonObject:
+        """Never voluntarily choose a confirmed-lethal option while a safer one exists -
+        a hard safety constraint, not subject to `epsilon` exploration (unlike card/room
+        selection's soft quality preferences). See `event_choice_heuristic`'s docstring:
+        beyond lethality there is no generic quality signal for event options, so the
+        (already lethality-filtered) candidates are chosen from uniformly at random."""
+        return self._choose(safe_event_option_candidates(candidates))
 
     def _choose_best_scored(
         self,
