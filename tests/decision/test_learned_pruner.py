@@ -10,6 +10,7 @@ from sts2_training.decision.learned_pruner import (
     LEARNED_PRUNER_ARTIFACT_SCHEMA_VERSION,
     LinearStableFrontierPruner,
 )
+from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION
 from sts2_training.decision.pruner_features import (
     PRUNER_FEATURE_NAMES,
     PRUNER_FEATURE_SCHEMA_VERSION,
@@ -215,7 +216,7 @@ def test_oracle_jsonl_keeps_no_target_nodes_but_pairwise_training_excludes_them(
     ]
     record = {
         "record_type": "combat_oracle_decision",
-        "record_schema_version": 3,
+        "record_schema_version": ORACLE_RECORD_SCHEMA_VERSION,
         "decision_point_id": "d0",
         "provenance": {
             "training_commit": "test",
@@ -244,6 +245,7 @@ def test_oracle_jsonl_keeps_no_target_nodes_but_pairwise_training_excludes_them(
                 "depths_completed": 1,
                 "remaining_time_ms": 100.0,
                 "nodes": nodes,
+                "selected_indices": [0, 1],
             }
         ],
         "oracle_targets": {
