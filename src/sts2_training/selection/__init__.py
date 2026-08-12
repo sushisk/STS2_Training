@@ -27,6 +27,7 @@ from sts2_training.selection.heuristic_selector import (
     NoAvailableActionError,
 )
 from sts2_training.selection.reward_card_selection import (
+    CardDataRewardCardSelectionPolicy,
     RandomRewardCardSelectionPolicy,
     RewardCardSelectionPolicy,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "CHOICE_REWARD_CARD_ACTION_TYPE",
     "CHOICE_SEMANTICS_VERSION",
     "CHOICE_SKIP_ACTION_TYPE",
+    "CardDataRewardCardSelectionPolicy",
     "ChoiceCardSemantics",
     "HeuristicCombatSelector",
     "NoAvailableActionError",
