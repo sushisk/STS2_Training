@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sts2_training.selection.action_classification import MAP_ROOM_ACTION_TYPE, JsonObject
+from sts2_training.selection.action_classification import JsonObject, map_room_actions
 
 _POINT_TYPE_SCORE: dict[str, float] = {
     "Treasure": 6.0,
@@ -26,9 +26,7 @@ def room_preference_scores(
     masked_emulator_dto: Mapping[str, Any],
 ) -> dict[str, float]:
     """Return per-action preference scores for available ``map_room`` candidates."""
-    room_actions = [
-        action for action in legal_actions if action.get("action_type") == MAP_ROOM_ACTION_TYPE
-    ]
+    room_actions = map_room_actions(legal_actions)
     if not room_actions:
         return {}
 
