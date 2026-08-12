@@ -20,12 +20,13 @@ import json
 import math
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
-from sts2_training.decision.beam_search import BeamSearchConfig
+from sts2_training.api.contract import ROOT_BRANCH_ID
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.oracle_log import OracleJsonlWriter, qualified_class_name
 from sts2_training.decision.oracle_search import BudgetedOracleCollector, OracleCollectionConfig
@@ -73,6 +74,8 @@ class OracleEpisodeRunner:
         max_decisions: int | None = None,
         close_timeout_s: float = 10.0,
     ) -> OracleEpisodeResult:
+        """Collect before each commit; ``max_decisions`` is a deliberate collection cap."""
+
         _positive_timeout("oracle_timeout_s", oracle_timeout_s)
         _positive_timeout("decision_timeout_s", decision_timeout_s)
         _positive_timeout("close_timeout_s", close_timeout_s)
@@ -96,7 +99,7 @@ class OracleEpisodeRunner:
                 if next_decision is None:
                     raw_decision = await self._client.get_decision(
                         instance_id,
-                        "root",
+                        ROOT_BRANCH_ID,
                         timeout_s=decision_timeout_s,
                     )
                 else:
@@ -176,29 +179,31 @@ class OracleEpisodeRunner:
 
 
 def _validated_decision(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise RuntimeError("decision/commit response must be a dict")
+    if not isinstance(value, Mapping):
+        raise RuntimeError("decision/commit response must be a mapping")
     decision_point_id = value.get("decision_point_id")
     dto = value.get("masked_emulator_dto")
     if not isinstance(decision_point_id, str) or not decision_point_id:
         raise RuntimeError("decision is missing decision_point_id")
-    if not isinstance(dto, dict):
+    if not isinstance(dto, Mapping):
         raise RuntimeError("decision is missing masked_emulator_dto")
-    return dict(value)
+    copied = dict(value)
+    copied["masked_emulator_dto"] = dict(dto)
+    return copied
 
 
-def _is_terminal(dto: dict[str, Any]) -> bool:
+def _is_terminal(dto: Mapping[str, Any]) -> bool:
     return dto.get("terminal") is True or dto.get("run_terminal") is True
 
 
-def _available_action_ids(dto: dict[str, Any]) -> set[str]:
+def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
     actions = dto.get("legal_actions")
-    if not isinstance(actions, list):
+    if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes)):
         return set()
     return {
         action_id
         for action in actions
-        if isinstance(action, dict) and action.get("is_available") is not False
+        if isinstance(action, Mapping) and action.get("is_available") is not False
         for action_id in [action.get("action_id")]
         if isinstance(action_id, str) and action_id
     }
@@ -215,14 +220,20 @@ def _positive_timeout(name: str, value: float) -> None:
 
 
 def _positive_int(text: str) -> int:
-    value = int(text)
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
     if value <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return value
 
 
 def _positive_float(text: str) -> float:
-    value = float(text)
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a finite positive number") from exc
     if not math.isfinite(value) or value <= 0:
         raise argparse.ArgumentTypeError("must be a finite positive number")
     return value
