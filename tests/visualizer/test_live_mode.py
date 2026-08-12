@@ -31,7 +31,7 @@ def _request(server, method: str, path: str) -> tuple[int, dict]:
     return response.status, body
 
 
-def test_live_mode_starts_runner_cli_and_tails_only_complete_jsonl_records(tmp_path: Path) -> None:
+def test_live_mode_starts_runner_cli_tails_complete_records_and_can_restart(tmp_path: Path) -> None:
     log_path = tmp_path / "live.jsonl"
     commands: list[list[str]] = []
     partial_written = threading.Event()
@@ -137,9 +137,30 @@ def test_live_mode_starts_runner_cli_and_tails_only_complete_jsonl_records(tmp_p
         assert [event["decision_point_id"] for event in payload["events"]] == ["live-1", "live-2"]
         assert payload["events"][0]["selected_action_id"] == "strike"
 
+        # A completed run can be started again on the same visualizer instance. The
+        # controller must reset both the JSONL reader offset and the in-memory store.
+        done.clear()
+        partial_written.clear()
         status_code, second = _request(server, "POST", "/api/live/start")
-        assert status_code == 409
-        assert "already" in second["error"]
+        assert status_code == 202
+        assert second["state"] in {"running", "completed"}
+        assert len(commands) == 2
+        assert partial_written.wait(timeout=2)
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            _, status = _request(server, "GET", "/api/status")
+            if status["state"] == "completed":
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("restarted live runner did not complete")
+
+        _, restarted_payload = _request(server, "GET", "/api/events?after=-1")
+        assert [event["decision_point_id"] for event in restarted_payload["events"]] == [
+            "live-1",
+            "live-2",
+        ]
     finally:
         allow_finish.set()
         server.shutdown()

@@ -6,8 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from sts2_training.visualizer.assets import INDEX_HTML
 from sts2_training.visualizer.live import LiveRunController
+from sts2_training.visualizer.page import INDEX_HTML
 from sts2_training.visualizer.presentation import present_event
 from sts2_training.visualizer.store import EventStore
 
@@ -55,7 +55,7 @@ class VisualizerApp:
         if self.mode != "live" or self.live is None:
             return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "not available in replay mode"}
         if not self.live.start():
-            return HTTPStatus.CONFLICT, {**self.live.status(), "error": "run has already been started"}
+            return HTTPStatus.CONFLICT, {**self.live.status(), "error": "run is already running"}
         return HTTPStatus.ACCEPTED, {"ok": True, **self.live.status()}
 
 

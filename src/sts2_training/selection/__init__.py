@@ -4,12 +4,14 @@ from sts2_training.selection.action_classification import (
     CARD_ACTION_TYPE,
     CHOICE_CARD_ACTION_TYPE,
     CHOICE_CONFIRM_ACTION_TYPE,
+    CHOICE_REWARD_CARD_ACTION_TYPE,
     CHOICE_SKIP_ACTION_TYPE,
     available_actions,
     card_actions,
     choice_card_actions,
     choice_confirm_actions,
     choice_skip_actions,
+    reward_card_actions,
 )
 from sts2_training.selection.choice_semantics import (
     CHOICE_OPERATIONS,
@@ -24,18 +26,27 @@ from sts2_training.selection.heuristic_selector import (
     HeuristicCombatSelector,
     NoAvailableActionError,
 )
+from sts2_training.selection.reward_card_selection import (
+    CardDataRewardCardSelectionPolicy,
+    RandomRewardCardSelectionPolicy,
+    RewardCardSelectionPolicy,
+)
 
 __all__ = [
     "CARD_ACTION_TYPE",
     "CHOICE_CARD_ACTION_TYPE",
     "CHOICE_CONFIRM_ACTION_TYPE",
     "CHOICE_OPERATIONS",
+    "CHOICE_REWARD_CARD_ACTION_TYPE",
     "CHOICE_SEMANTICS_VERSION",
     "CHOICE_SKIP_ACTION_TYPE",
+    "CardDataRewardCardSelectionPolicy",
     "ChoiceCardSemantics",
     "HeuristicCombatSelector",
     "NoAvailableActionError",
     "PendingChoiceContext",
+    "RandomRewardCardSelectionPolicy",
+    "RewardCardSelectionPolicy",
     "available_actions",
     "card_actions",
     "choice_card_actions",
@@ -44,4 +55,5 @@ __all__ = [
     "choice_skip_actions",
     "parse_choice_semantics",
     "pending_choice_context",
+    "reward_card_actions",
 ]
