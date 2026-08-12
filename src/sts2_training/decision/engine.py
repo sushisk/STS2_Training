@@ -5,17 +5,17 @@ heuristic fallback) -> commit_action, over one `AsyncTrainingApiClient`.
 (disabled with `event_branch_search=False`) - they are never Beam-searchable (see
 `combat_decision.COMBAT_BEAM_ACTION_TYPES`), and a static predictive filter alone leaves
 HP cost/benefit unweighed beyond a binary lethal/non-lethal cutoff (see that module's
-docstring). Falls through to Beam search, then `HeuristicCombatSelector` (whose own
-`event_choice_heuristic` hard-avoids confirmed-lethal options) if branch search finds
-nothing worth preferring.
+docstring). Falls through to Beam search when enabled, then `HeuristicCombatSelector`
+(whose own `event_choice_heuristic` hard-avoids confirmed-lethal options) if branch search
+finds nothing worth preferring.
 
-Search-budget configuration and Combat decision scope are intentionally separate:
-`BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
-engine owns the default Combat action types eligible for Beam Search. Explicit
-`BeamSearchConfig.beam_searchable_action_types` values remain authoritative when a
-caller supplies a config, so wrapper construction never silently widens semantic scope.
-Structural branch coverage is likewise separate from policy ranking so learned policies
-cannot silently change Beam topology.
+Search-budget configuration, Combat decision scope, and whether Beam executes are
+intentionally separate. `BeamSearchConfig`/named search modes describe latency-quality
+tradeoffs, while this engine owns the default Combat action types eligible for Beam
+Search. Explicit `BeamSearchConfig.beam_searchable_action_types` values remain
+authoritative when a caller supplies a config, so wrapper construction never silently
+widens semantic scope. Structural branch coverage is likewise separate from policy
+ranking so learned policies cannot silently change Beam topology.
 """
 
 from __future__ import annotations
@@ -61,6 +61,9 @@ class CombatDecisionEngine:
     `beam_searchable_action_types` is preserved. `beam_action_types` can make the semantic
     scope explicit, but if it is supplied together with a config it must match that
     config; conflicting sources fail fast instead of silently overriding one another.
+    `beam_search_enabled=False` skips Beam execution entirely while preserving the
+    resolved config for inspection and for callers that later construct an enabled
+    engine from the same settings.
 
     Whatever `PolicyModel` is supplied is wrapped in `CoverageConstrainedPolicy`, so
     structural branch-recall invariants survive replacing the heuristic prior with a
@@ -78,9 +81,13 @@ class CombatDecisionEngine:
         beam_action_types: frozenset[str] | None = None,
         fallback_selector: HeuristicCombatSelector | None = None,
         event_branch_search: bool = True,
+        beam_search_enabled: bool = True,
     ) -> None:
+        if not isinstance(beam_search_enabled, bool):
+            raise TypeError("beam_search_enabled must be a bool")
         self._client = client
         self._event_branch_search = event_branch_search
+        self._beam_search_enabled = beam_search_enabled
         ranked_policy = policy if policy is not None else PriorHeuristicPolicy()
         policy_model = CoverageConstrainedPolicy(ranked_policy)
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
@@ -132,6 +139,10 @@ class CombatDecisionEngine:
     @property
     def beam_search(self) -> BeamSearchEngine:
         return self._beam
+
+    @property
+    def beam_search_enabled(self) -> bool:
+        return self._beam_search_enabled
 
     async def decide(
         self,
@@ -217,7 +228,7 @@ class CombatDecisionEngine:
 
         result: BeamSearchResult | None = None
         remaining = deadline - time.monotonic()
-        if remaining > 0:
+        if self._beam_search_enabled and remaining > 0:
             result = await self._beam.search(instance_id, current_decision, timeout_s=remaining)
         if result is not None and _beam_result_is_actionable(result):
             return DecisionOutcome(current_decision, result.best_root_action_id, "beam_search", result)
