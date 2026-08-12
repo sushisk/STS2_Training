@@ -10,15 +10,13 @@ from typing import Any
 
 from sts2_training.decision.oracle_search import OracleCollectionResult
 
-ORACLE_RECORD_SCHEMA_VERSION = 1
+ORACLE_RECORD_SCHEMA_VERSION = 2
 
 
 def oracle_collection_record(
     root_decision: Mapping[str, Any],
     result: OracleCollectionResult,
     *,
-    policy_class: str,
-    value_class: str,
     training_commit: str | None = None,
 ) -> dict[str, Any]:
     """Build one self-contained, re-featurizable record for one root Decision."""
@@ -42,8 +40,12 @@ def oracle_collection_record(
         "search_trace": [_jsonable(event) for event in result.trace],
         "provenance": {
             "training_commit": training_commit,
-            "policy_class": policy_class,
-            "value_class": value_class,
+            "teacher_policy_class": result.provenance.teacher_policy_class,
+            "teacher_inner_policy_class": result.provenance.teacher_inner_policy_class,
+            "teacher_coverage_policy_class": (
+                result.provenance.teacher_coverage_policy_class
+            ),
+            "teacher_value_class": result.provenance.teacher_value_class,
             "pruner_name": result.targets.metadata.pruner_name,
             "pruner_version": result.targets.metadata.pruner_version,
             "rng_sampling": result.targets.metadata.rng_sampling,
@@ -62,15 +64,11 @@ class OracleJsonlWriter:
         root_decision: Mapping[str, Any],
         result: OracleCollectionResult,
         *,
-        policy_class: str,
-        value_class: str,
         training_commit: str | None = None,
     ) -> dict[str, Any]:
         record = oracle_collection_record(
             root_decision,
             result,
-            policy_class=policy_class,
-            value_class=value_class,
             training_commit=training_commit,
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
