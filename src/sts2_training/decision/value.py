@@ -50,6 +50,10 @@ class ValueModel:
     DTO must not be treated as an uncensored terminal outcome merely because the state is
     terminal. Implementations may override it only when they can provide an exact utility
     in the same numeric scale as their value targets.
+
+    ``oracle_provenance`` should return JSON-serializable metadata that distinguishes
+    materially different model/checkpoint/configuration states when the model is used as
+    an Oracle teacher. The default is empty for implementations without extra metadata.
     """
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
@@ -62,6 +66,9 @@ class ValueModel:
         self, masked_emulator_dto: Mapping[str, Any]
     ) -> float | None:
         return None
+
+    def oracle_provenance(self) -> Mapping[str, Any]:
+        return {}
 
 
 class HeuristicValueFunction(ValueModel):
@@ -92,6 +99,12 @@ class HeuristicValueFunction(ValueModel):
                 self._power_values[power_id] = _validated_finite_number(
                     raw_value, f"power value {power_id!r}"
                 )
+
+    def oracle_provenance(self) -> Mapping[str, Any]:
+        return {
+            "weights": dict(sorted(self._weights.items())),
+            "power_values": dict(sorted(self._power_values.items())),
+        }
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
         terminal_utility = self.exact_terminal_utility(masked_emulator_dto)
