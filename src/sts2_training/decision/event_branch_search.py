@@ -6,10 +6,10 @@ the game as deterministic. This is provisional: ideally each option would be sam
 across multiple RNG hypotheses, but that larger multi-sample change belongs in a
 separate PR.
 
-``AsyncTrainingApiClient`` intentionally permits only one wire request in flight, so the
-candidate simulations run sequentially here. Candidate-level API faults are treated as
-unusable samples; transport/protocol failures propagate because they can make the client
-session unsafe to continue.
+Candidates are submitted together through ``emulate_actions``, the same batch transport
+used by Combat frontier evaluation. The RL Whole Run implementation routes an Active
+Event frontier through one WorkerPool dispatch while preserving each candidate's
+``EventRngReplayPlan``.
 
 This is an HP-preservation heuristic, not a general Whole Run value function. Candidates
 that fail to resolve, produce a non-finite HP value, or resolve to ``hp <= 0`` are ignored.
@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sts2_training.api.contract import ApiOperationError, ROOT_BRANCH_ID
+from sts2_training.api.contract import ROOT_BRANCH_ID
 from sts2_training.selection.action_classification import (
     JsonObject,
     choice_event_option_actions,
@@ -52,52 +52,47 @@ async def best_event_option(
         return None
 
     branch_by_action: dict[str, str] = {}
+    items: list[JsonObject] = []
     for index, action in enumerate(event_actions):
         action_id = action.get("action_id")
         if not isinstance(action_id, str) or not action_id:
             continue
         branch_id = f"event-eval-{decision_point_id}-{index}-{uuid.uuid4().hex[:8]}"
         branch_by_action[branch_id] = action_id
+        items.append(
+            {
+                "parent_branch_id": ROOT_BRANCH_ID,
+                "branch_id": branch_id,
+                "rng_id": index + 1,
+                "decision_point_id": decision_point_id,
+                "action_id": action_id,
+            }
+        )
 
-    if len(branch_by_action) <= 1:
+    if len(items) <= 1:
         return None
 
     deadline = time.monotonic() + timeout_s
     created_branch_ids: list[str] = []
-    results: list[tuple[str, JsonObject | None]] = []
     try:
-        for index, (branch_id, action_id) in enumerate(branch_by_action.items()):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        response = await client.emulate_actions(
+            instance_id,
+            items,
+            timeout_s=remaining,
+        )
+        created_branch_ids.extend(branch_by_action)
 
-            try:
-                result = await client.emulate_action(
-                    instance_id,
-                    ROOT_BRANCH_ID,
-                    branch_id,
-                    index + 1,
-                    decision_point_id,
-                    action_id,
-                    timeout_s=remaining,
-                )
-            except ApiOperationError as exc:
-                # A faulted request was admitted and may have created a Branch; a
-                # rejected request did not mutate state. Session-fatal rejections must
-                # propagate rather than being disguised as a bad candidate sample.
-                if getattr(client, "session_invalid", False):
-                    raise
-                if exc.response.get("status") == "faulted":
-                    created_branch_ids.append(branch_id)
-                results.append((action_id, None))
-                continue
-
-            created_branch_ids.append(branch_id)
-            results.append((action_id, result))
+        branch_results = response.get("branch_results")
+        if not isinstance(branch_results, Mapping):
+            return None
 
         best_action_id: str | None = None
         best_hp: float | None = None
-        for action_id, result in results:
+        for branch_id, action_id in branch_by_action.items():
+            result = branch_results.get(branch_id)
             if not isinstance(result, Mapping) or result.get("status") != "completed":
                 continue
             result_dto = result.get("masked_emulator_dto")
