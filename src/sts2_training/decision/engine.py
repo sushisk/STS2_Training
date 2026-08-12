@@ -1,5 +1,13 @@
-"""`CombatDecisionEngine`: get_decision -> (beam search | heuristic fallback)
--> commit_action, over one `AsyncTrainingApiClient`.
+"""`CombatDecisionEngine`: get_decision -> (event branch search | beam search |
+heuristic fallback) -> commit_action, over one `AsyncTrainingApiClient`.
+
+`choice_event_option` decisions are tried first via `event_branch_search.best_event_option`
+(disabled with `event_branch_search=False`) - they are never Beam-searchable (see
+`combat_decision.COMBAT_BEAM_ACTION_TYPES`), and a static predictive filter alone leaves
+HP cost/benefit unweighed beyond a binary lethal/non-lethal cutoff (see that module's
+docstring). Falls through to Beam search, then `HeuristicCombatSelector` (whose own
+`event_choice_heuristic` hard-avoids confirmed-lethal options) if branch search finds
+nothing worth preferring.
 
 Search-budget configuration and Combat decision scope are intentionally separate:
 `BeamSearchConfig`/named search modes describe latency-quality tradeoffs, while this
@@ -24,10 +32,14 @@ from sts2_training.api.transport import TransportError
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine, BeamSearchResult
 from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
+from sts2_training.decision.event_branch_search import best_event_option
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.search_modes import resolve_search_mode
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
-from sts2_training.selection.action_classification import available_actions
+from sts2_training.selection.action_classification import (
+    CHOICE_EVENT_OPTION_ACTION_TYPE,
+    available_actions,
+)
 from sts2_training.selection.heuristic_selector import HeuristicCombatSelector, NoAvailableActionError
 
 __all__ = ["CombatDecisionEngine", "DecisionOutcome", "NoAvailableActionError"]
@@ -65,8 +77,10 @@ class CombatDecisionEngine:
         beam_config: BeamSearchConfig | None = None,
         beam_action_types: frozenset[str] | None = None,
         fallback_selector: HeuristicCombatSelector | None = None,
+        event_branch_search: bool = True,
     ) -> None:
         self._client = client
+        self._event_branch_search = event_branch_search
         ranked_policy = policy if policy is not None else PriorHeuristicPolicy()
         policy_model = CoverageConstrainedPolicy(ranked_policy)
         value_model = value_fn if value_fn is not None else HeuristicValueFunction()
@@ -184,6 +198,22 @@ class CombatDecisionEngine:
             if not isinstance(only_action_id, str) or not only_action_id:
                 raise RuntimeError("available legal action is missing action_id")
             return DecisionOutcome(current_decision, only_action_id, "forced_single_action", None)
+
+        if self._event_branch_search and any(
+            action.get("action_type") == CHOICE_EVENT_OPTION_ACTION_TYPE
+            for action in legal_actions
+        ):
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                best_action_id = await best_event_option(
+                    self._client,
+                    instance_id=instance_id,
+                    decision_point_id=decision_point_id,
+                    legal_actions=legal_actions,
+                    timeout_s=remaining,
+                )
+                if best_action_id is not None:
+                    return DecisionOutcome(current_decision, best_action_id, "event_branch_search", None)
 
         result: BeamSearchResult | None = None
         remaining = deadline - time.monotonic()
