@@ -11,6 +11,7 @@ from sts2_training.selection.action_classification import (
     CHOICE_CARD_ACTION_TYPE,
     CHOICE_CONFIRM_ACTION_TYPE,
     CHOICE_EVENT_OPTION_ACTION_TYPE,
+    CHOICE_REWARD_CARD_ACTION_TYPE,
     CHOICE_REWARD_POTION_REPLACE_ACTION_TYPE,
     CHOICE_REWARD_POTION_TAKE_ACTION_TYPE,
     CHOICE_REWARD_SKIP_ACTION_TYPE,
@@ -22,6 +23,10 @@ from sts2_training.selection.action_classification import (
 )
 from sts2_training.selection.choice_card_heuristic import choice_card_preference_scores
 from sts2_training.selection.event_choice_heuristic import safe_event_option_candidates
+from sts2_training.selection.reward_card_selection import (
+    RandomRewardCardSelectionPolicy,
+    RewardCardSelectionPolicy,
+)
 from sts2_training.selection.room_heuristic import room_preference_scores
 
 if TYPE_CHECKING:
@@ -58,6 +63,7 @@ class HeuristicCombatSelector:
         *,
         epsilon: float = 0.1,
         policy: PolicyModel | None = None,
+        reward_card_policy: RewardCardSelectionPolicy | None = None,
     ) -> None:
         if not 0.0 <= epsilon <= 1.0:
             raise ValueError("epsilon must be between 0.0 and 1.0")
@@ -69,6 +75,11 @@ class HeuristicCombatSelector:
             from sts2_training.decision.policy import PriorHeuristicPolicy
 
             self._policy = PriorHeuristicPolicy()
+        self._reward_card_policy = (
+            reward_card_policy
+            if reward_card_policy is not None
+            else RandomRewardCardSelectionPolicy()
+        )
 
     def select(
         self,
@@ -110,6 +121,9 @@ class HeuristicCombatSelector:
             if action_type == CARD_ACTION_TYPE:
                 return self._choose_card(candidates, dto)
             return self._choose(candidates)
+
+        if by_type.get(CHOICE_REWARD_CARD_ACTION_TYPE):
+            return self._reward_card_policy.select(actions, dto, rng=self._rng)
 
         return self._choose(actions)
 
