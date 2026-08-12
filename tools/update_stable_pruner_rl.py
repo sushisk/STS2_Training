@@ -215,7 +215,12 @@ def updated_artifact_payload(
     history_raw = payload.get("rl_finetuning_history")
     history = list(history_raw) if isinstance(history_raw, list) else []
     trajectory_inputs = [
-        {"path": str(path), "sha256": _file_sha256(path)} for path in trajectory_files
+        {
+            "path": str(path),
+            "sha256": _file_sha256(path),
+            "hash_scope": "updater_input_bytes",
+        }
+        for path in trajectory_files
     ]
     update = {
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -240,6 +245,12 @@ def updated_artifact_payload(
     payload["coefficients"] = [float(value) for value in coefficients]
     payload["rl_finetuning_history"] = history
     payload["last_rl_update"] = update
+    _invalidate_stale_metrics(
+        payload,
+        base_payload=base_payload,
+        base_artifact_sha256=base_artifact_sha256,
+        update_stage="rl_resume",
+    )
     return payload
 
 
@@ -574,6 +585,34 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _invalidate_stale_metrics(
+    payload: dict[str, Any],
+    *,
+    base_payload: Mapping[str, Any],
+    base_artifact_sha256: str,
+    update_stage: str,
+) -> None:
+    old_metrics = base_payload.get("metrics")
+    history_raw = payload.get("metrics_history")
+    history = list(history_raw) if isinstance(history_raw, list) else []
+    if old_metrics is not None:
+        history.append(
+            {
+                "artifact_sha256": base_artifact_sha256,
+                "metrics": old_metrics,
+                "status": "historical_pre_update",
+            }
+        )
+    if history:
+        payload["metrics_history"] = history
+    payload["metrics"] = None
+    payload["metrics_status"] = {
+        "status": "requires_revalidation",
+        "update_stage": update_stage,
+        "parent_artifact_sha256": base_artifact_sha256,
+    }
 
 
 def _training_commit() -> str | None:
