@@ -90,3 +90,71 @@ def test_validation_rejects_report_output_equal_to_model_artifact(
         stable_pruner_learn.run_learning(args)
 
     assert not called
+
+
+def test_one_line_fresh_rejects_output_equal_to_source_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _oracle_log(tmp_path / "training.jsonl")
+    original = source.read_bytes()
+    called = False
+
+    def fail_if_run(command) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(stable_pruner_learn, "_run_command", fail_if_run)
+    args = stable_pruner_learn._parse_args(
+        [
+            str(source),
+            "--learn",
+            "supervised",
+            "--start",
+            "fresh",
+            "--data-mode",
+            "train",
+            "--output",
+            str(source),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--output must differ from every resolved input log"):
+        stable_pruner_learn.run_learning(args)
+
+    assert not called
+    assert source.read_bytes() == original
+
+
+def test_directory_input_rejects_output_aliasing_discovered_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    source = _oracle_log(log_dir / "oracle.jsonl")
+    original = source.read_bytes()
+    called = False
+
+    def fail_if_run(command) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(stable_pruner_learn, "_run_command", fail_if_run)
+    args = stable_pruner_learn._parse_args(
+        [
+            str(log_dir),
+            "--learn",
+            "supervised",
+            "--start",
+            "fresh",
+            "--data-mode",
+            "train",
+            "--output",
+            str(source),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--output must differ from every resolved input log"):
+        stable_pruner_learn.run_learning(args)
+
+    assert not called
+    assert source.read_bytes() == original
