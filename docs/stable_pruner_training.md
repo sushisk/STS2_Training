@@ -157,7 +157,12 @@ The report records, per arm:
 - Beam reason / best value per decision
 - nodes expanded and branches created
 - measured Beam search milliseconds and episode elapsed time
-- pruner name/version (the learned artifact version contains its hash prefix)
+- pruner name/version
+
+The report also records the explicit seed list, a SHA-256 of the seed-independent scenario
+template, learned pruner identity/version, and the full learned artifact SHA-256 when the
+runtime pruner was loaded from an artifact. This is the provenance needed to distinguish
+results produced by different board templates or model weights.
 
 `action_id` is valid only inside one decision and is never compared across the two A/B
 instances. For common-prefix/divergence detection the runner canonicalizes the chosen legal
@@ -171,6 +176,46 @@ The summary reports learned/baseline wins, ties/unknown outcomes, divergence rat
 search cost for each arm, and learned-minus-baseline cost deltas. A gameplay promotion
 decision should combine these real-emulator results with held-out Oracle regret/Recall@K;
 neither one replaces the other.
+
+## Multi-scenario A/B suite
+
+A single Combat state is too narrow for promotion decisions. Use a manifest to run the same
+artifact and Beam configuration across multiple scenario templates and seed sets:
+
+```json
+{
+  "cases": [
+    {
+      "name": "slime",
+      "scenario": "scenarios/slime.json",
+      "seeds": [101, 102, 103, 104]
+    },
+    {
+      "name": "cultist",
+      "scenario": "scenarios/cultist.json",
+      "seeds": [201, 202, 203, 204]
+    }
+  ]
+}
+```
+
+Scenario paths are resolved relative to the manifest. Case names must be unique and seeds
+inside one case must be unique; invalid manifests fail before starting emulator work.
+Run the suite with:
+
+```bash
+python -m sts2_training.runner.stable_pruner_ab_suite \
+  --manifest data/stable_pruner_ab_suite.json \
+  --weights tools/output/stable_pruner_weights.json \
+  --search-mode standard \
+  --output tools/output/stable_pruner_ab_suite.json
+```
+
+Each case retains its complete single-scenario A/B report and provenance. The suite also
+flattens all seed pairs into one aggregate summary using the same outcome/search-cost
+metrics. `manifest_sha256` fingerprints the canonical case/name/path/seed definition while
+each case's `scenario_template_sha256` fingerprints the actual seed-independent board
+configuration.
 
 Real-emulator A/B is intentionally separate from the repo-local hosted unit/contract gate.
 The current CI proves deterministic code/contract behavior but does not attest an exact
