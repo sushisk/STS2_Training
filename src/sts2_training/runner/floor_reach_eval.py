@@ -1,26 +1,13 @@
-"""Aggregate floor-reach evaluation harness for `HeuristicCombatSelector`/
-`CombatDecisionEngine` policy changes, across many independently-random-seed Whole Runs.
+"""Evaluate floor reach across independently seeded Whole Runs.
 
-Why this exists (see the investigation this replaced): comparing the SAME seed's floor
-reach before/after a decision-policy change is not valid. A differently-scored decision
-diverges the whole playthrough - different rooms visited, different fights, different RNG
-draws consumed in a different order - so "seed X used to reach floor 22, now reaches
-floor 8" is not "this seed got worse", it is a different game. Only aggregate statistics
-(mean/median/stdev) across many independently random seeds are informative for evaluating
-a policy change; single-seed or matched-seed comparisons should not be used.
+Matched-seed before/after comparisons are not meaningful for policy changes because a
+single changed decision alters the rest of the trajectory. Compare aggregate statistics
+across independent runs instead.
 
 CLI use::
 
-    # Default policy (beam search, "standard" preset)
     python -m sts2_training.runner.floor_reach_eval --character-id IRONCLAD --num-runs 30
-
-    # Heuristic-only (no beam search) - what data collection currently runs
     python -m sts2_training.runner.floor_reach_eval --character-id IRONCLAD --num-runs 30 --no-beam
-
-Programmatic use::
-
-    results = await run_floor_reach_eval(character_id="IRONCLAD", num_runs=30, use_beam=False)
-    summary = summarize_floor_reach(results)
 """
 
 from __future__ import annotations
@@ -35,9 +22,10 @@ import statistics
 import time
 import uuid
 from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
@@ -60,7 +48,7 @@ _MAX_GAME_SEED = 2**31 - 1
 
 @dataclass(frozen=True)
 class FloorReachResult:
-    """One `start_new_run` attempt, tracked for the deepest `totalFloor` it reached."""
+    """Result of one run, including the deepest observed ``totalFloor``."""
 
     run_id: str
     seed: int
@@ -76,41 +64,46 @@ class FloorReachResult:
 @dataclass
 class _RunState:
     max_total_floor: int = 0
-    act_index_at_max: "int | None" = None
+    act_index_at_max: int | None = None
     decisions_made: int = 0
-    source_counts: dict[str, int] = field(default_factory=dict)
+    source_counts: Counter[str] = field(default_factory=Counter)
 
 
-_current_state: "contextvars.ContextVar[_RunState | None]" = contextvars.ContextVar(
+_current_state: contextvars.ContextVar[_RunState | None] = contextvars.ContextVar(
     "_floor_reach_eval_current_state", default=None
 )
 _orig_decide = engine_module.CombatDecisionEngine.decide
 _patched = False
 
 
+def _record_floor(state: _RunState, dto: Mapping[str, Any]) -> None:
+    total_floor = dto.get("totalFloor")
+    if not isinstance(total_floor, int) or total_floor <= state.max_total_floor:
+        return
+
+    state.max_total_floor = total_floor
+    act_index = dto.get("currentActIndex")
+    state.act_index_at_max = act_index if isinstance(act_index, int) else None
+
+
 async def _tracking_decide(self: CombatDecisionEngine, *args: Any, **kwargs: Any) -> Any:
     outcome = await _orig_decide(self, *args, **kwargs)
     state = _current_state.get()
-    if state is not None:
-        state.decisions_made += 1
-        state.source_counts[outcome.source] = state.source_counts.get(outcome.source, 0) + 1
-        decision = outcome.decision
-        if isinstance(decision, dict):
-            dto = decision.get("masked_emulator_dto")
-            if isinstance(dto, dict):
-                total_floor = dto.get("totalFloor")
-                if isinstance(total_floor, int) and total_floor > state.max_total_floor:
-                    state.max_total_floor = total_floor
-                    act_index = dto.get("currentActIndex")
-                    state.act_index_at_max = act_index if isinstance(act_index, int) else None
+    if state is None:
+        return outcome
+
+    state.decisions_made += 1
+    state.source_counts[outcome.source] += 1
+    decision = outcome.decision
+    if isinstance(decision, Mapping):
+        dto = decision.get("masked_emulator_dto")
+        if isinstance(dto, Mapping):
+            _record_floor(state, dto)
     return outcome
 
 
 def _ensure_patched() -> None:
-    """Installs the tracking wrapper once, process-wide. Safe under `asyncio` concurrency:
-    each `run_one` Task sets its own `_current_state` before awaiting `start_new_run`, and
-    `ContextVar` writes are Task-local (a Task's context is copied at creation and never
-    shared with siblings), so concurrent runs never see each other's counters."""
+    """Install the tracking wrapper once; ``ContextVar`` keeps task state isolated."""
     global _patched
     if not _patched:
         engine_module.CombatDecisionEngine.decide = _tracking_decide
@@ -122,8 +115,8 @@ def _build_engine(
     *,
     seed: int,
     use_beam: bool,
-    search_mode: "str | BeamSearchConfig | None",
-    beam_max_depth: "int | None",
+    search_mode: str | BeamSearchConfig | None,
+    beam_max_depth: int | None,
 ) -> CombatDecisionEngine:
     fallback_selector = HeuristicCombatSelector(random.Random(seed))
     if use_beam:
@@ -144,18 +137,18 @@ async def _run_one(
     character_id: str,
     ascension: int,
     decision_timeout_s: float,
-    max_decisions: "int | None",
+    max_decisions: int | None,
     use_beam: bool,
-    search_mode: "str | BeamSearchConfig | None",
-    beam_max_depth: "int | None",
+    search_mode: str | BeamSearchConfig | None,
+    beam_max_depth: int | None,
 ) -> FloorReachResult:
     _ensure_patched()
     state = _RunState()
     token = _current_state.set(state)
     t0 = time.monotonic()
-    outcome_label: "str | None" = None
-    error: "str | None" = None
-    client: "AsyncTrainingApiClient | None" = None
+    outcome_label: str | None = None
+    error: str | None = None
+    client: AsyncTrainingApiClient | None = None
     try:
         connection = connection_factory()
         client = AsyncTrainingApiClient(connection)
@@ -177,10 +170,8 @@ async def _run_one(
             engine=engine,
         )
         outcome_label = result.final_dto.get("outcome")
-        final_total_floor = result.final_dto.get("totalFloor")
-        if isinstance(final_total_floor, int) and final_total_floor > state.max_total_floor:
-            state.max_total_floor = final_total_floor
-    except Exception as exc:  # noqa: BLE001 - one run's failure must not sink the batch
+        _record_floor(state, result.final_dto)
+    except Exception as exc:  # noqa: BLE001 - preserve the rest of the batch
         _LOG.exception("floor-reach-eval run %s failed", run_id)
         error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -188,7 +179,7 @@ async def _run_one(
         if client is not None:
             try:
                 await client.close()
-            except Exception:  # noqa: BLE001 - transport cleanup must not overwrite the result
+            except Exception:  # noqa: BLE001 - cleanup must not replace the run result
                 _LOG.exception("floor-reach-eval run %s: client close failed", run_id)
 
     return FloorReachResult(
@@ -211,27 +202,19 @@ async def run_floor_reach_eval(
     concurrency: int = 1,
     ascension: int = 0,
     use_beam: bool = True,
-    connection_factory: "Callable[[], Any] | None" = None,
+    connection_factory: Callable[[], Any] | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     connect_timeout_s: float = 5.0,
     decision_timeout_s: float = 90.0,
-    max_decisions: "int | None" = 600,
-    search_mode: "str | BeamSearchConfig | None" = None,
-    beam_max_depth: "int | None" = None,
+    max_decisions: int | None = 600,
+    search_mode: str | BeamSearchConfig | None = None,
+    beam_max_depth: int | None = None,
 ) -> list[FloorReachResult]:
-    """Run `num_runs` independent, independently-random-seed `start_new_run` episodes
-    with bounded concurrency, tracking the deepest `totalFloor` each one reaches (even
-    if it never terminates within `max_decisions` - the point of this harness is
-    depth reached, not completion). See the module docstring for why matched/fixed
-    seeds must not be used to compare two policies here.
+    """Run independent episodes and track the deepest floor reached by each.
 
-    `concurrency` defaults to 1: confirmed live that `API.tcp_server`'s plain TCP server
-    backs every `instance_id` with the same one-`GameInstance`-per-process Emulator, so
-    concurrent runs against it supersede each other mid-flight (Emulator raises
-    `InvalidOperationException: ...has been superseded by a later GameInstance...`) -
-    only raise `concurrency` above 1 against a server that actually hosts multiple
-    simultaneous instances (e.g. a `WholeRunWorkerPool`-backed one), never the plain one.
+    ``concurrency`` defaults to 1 because the plain TCP server uses one shared Emulator
+    ``GameInstance``. Raise it only when the server supports independent instances.
     """
     if not isinstance(num_runs, int) or isinstance(num_runs, bool) or num_runs <= 0:
         raise ValueError("num_runs must be a positive integer")
@@ -239,7 +222,7 @@ async def run_floor_reach_eval(
         raise ValueError("concurrency must be a positive integer")
     if not isinstance(character_id, str) or not character_id.strip():
         raise ValueError("character_id must be a non-empty string")
-    resolve_search_mode(search_mode, max_depth=beam_max_depth)  # validate early
+    resolve_search_mode(search_mode, max_depth=beam_max_depth)
 
     if connection_factory is None:
         factory: Callable[[], Any] = lambda: TcpConnection(
@@ -249,7 +232,7 @@ async def run_floor_reach_eval(
         factory = connection_factory
 
     batch_tag = f"{character_id.lower()}-{int(time.time())}"
-    results: "list[FloorReachResult | None]" = [None] * num_runs
+    results: list[FloorReachResult | None] = [None] * num_runs
     next_index = 0
     index_lock = asyncio.Lock()
 
@@ -279,15 +262,14 @@ async def run_floor_reach_eval(
 
     workers = [asyncio.create_task(_worker()) for _ in range(min(concurrency, num_runs))]
     await asyncio.gather(*workers)
-    return [r for r in results if r is not None]
+    return [result for result in results if result is not None]
 
 
 def summarize_floor_reach(results: list[FloorReachResult]) -> dict[str, Any]:
-    """Aggregate stats over one batch. `floor_stats` is `None` when every run errored
-    before reaching any tracked decision (nothing to summarize)."""
-    floors = [r.max_total_floor for r in results]
-    errored = [r for r in results if r.error is not None]
-    outcome_counts = Counter(r.outcome for r in results if r.error is None)
+    """Return aggregate floor and outcome statistics for one batch."""
+    floors = [result.max_total_floor for result in results]
+    errored = [result for result in results if result.error is not None]
+    outcome_counts = Counter(result.outcome for result in results if result.error is None)
     floor_stats = None
     if floors:
         floor_stats = {
@@ -303,11 +285,11 @@ def summarize_floor_reach(results: list[FloorReachResult]) -> dict[str, Any]:
         "outcome_counts": dict(outcome_counts),
         "floor_stats": floor_stats,
         "floors": floors,
-        "errors": [{"run_id": r.run_id, "error": r.error} for r in errored],
+        "errors": [{"run_id": result.run_id, "error": result.error} for result in errored],
     }
 
 
-def _parse_args(argv: "list[str] | None" = None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -319,15 +301,12 @@ def _parse_args(argv: "list[str] | None" = None) -> argparse.Namespace:
         "--concurrency",
         type=_positive_int,
         default=1,
-        help="only raise above 1 against a server that hosts multiple simultaneous "
-        "instances - the plain API.tcp_server backs every instance_id with the same "
-        "single Emulator GameInstance, so concurrent runs supersede each other",
+        help="parallel runs; use >1 only with a server that hosts independent instances",
     )
     parser.add_argument(
         "--no-beam",
         action="store_true",
-        help="disable beam search entirely (HeuristicCombatSelector only) - "
-        "what data collection currently runs; --search-mode/--beam-depth are ignored",
+        help="disable beam search and use HeuristicCombatSelector only",
     )
     parser.add_argument("--output", type=Path, default=None, help="write full JSON results here")
     return parser.parse_args(argv)
@@ -353,13 +332,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "summary": summary,
-            "results": [vars(r) for r in results],
+            "results": [vars(result) for result in results],
         }
         args.output.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return summary
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     configure_logging(args.log_level)
     summary = asyncio.run(_run(args))
