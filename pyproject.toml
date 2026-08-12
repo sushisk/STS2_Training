@@ -9,6 +9,9 @@ description = "Training-side client for the STS2_RL API v0.5"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+stable-pruner-learn = "sts2_training.runner.stable_pruner_learn:main"
+
 [project.optional-dependencies]
 # The hosted required check installs the test extra. Include the training-only
 # numerical dependencies here as test dependencies too so board_eval's model-fit

@@ -35,6 +35,7 @@ from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.event_branch_search import best_event_option
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.search_modes import resolve_search_mode
+from sts2_training.decision.stable_pruner import StableFrontierPruner
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
 from sts2_training.selection.action_classification import (
     CHOICE_EVENT_OPTION_ACTION_TYPE,
@@ -64,8 +65,9 @@ class CombatDecisionEngine:
 
     Whatever `PolicyModel` is supplied is wrapped in `CoverageConstrainedPolicy`, so
     structural branch-recall invariants survive replacing the heuristic prior with a
-    learned or batch-only model. `BeamSearchEngine` owns transport capability and
-    Whole Run boundary admission for every frontier depth.
+    learned or batch-only model. `stable_pruner` is passed through unchanged to
+    `BeamSearchEngine` and controls only the stable/resolved frontier seam. The beam
+    engine still owns transport capability and Whole Run boundary admission.
     """
 
     def __init__(
@@ -74,6 +76,7 @@ class CombatDecisionEngine:
         *,
         policy: PolicyModel | None = None,
         value_fn: ValueModel | None = None,
+        stable_pruner: StableFrontierPruner | None = None,
         beam_config: BeamSearchConfig | None = None,
         beam_action_types: frozenset[str] | None = None,
         fallback_selector: HeuristicCombatSelector | None = None,
@@ -120,6 +123,7 @@ class CombatDecisionEngine:
             policy=policy_model,
             value_fn=value_model,
             config=resolved_beam_config,
+            stable_pruner=stable_pruner,
         )
         self._fallback = (
             fallback_selector if fallback_selector is not None else HeuristicCombatSelector()
