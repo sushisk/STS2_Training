@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import RequestFaultedError
+from sts2_training.api.contract import RequestFaultedError, RequestRejectedError
 from sts2_training.api.transport import RetryRequest, TransportError
 
 
@@ -14,7 +14,9 @@ class _Connection:
         self.advertise_event_batch = advertise_event_batch
         self.messages: list[dict] = []
         self.fail_emulate_once = False
+        self.fail_emulate_action_once = False
         self.fault_emulate_after_retry = False
+        self.reject_emulate_after_retry = False
 
     @staticmethod
     def _common(request: dict) -> dict:
@@ -25,6 +27,15 @@ class _Connection:
             "request_seq": request["request_seq"],
             "request_id": request["request_id"],
             "operation": request["operation"],
+        }
+
+    def _rejected(self, request: dict) -> dict:
+        return {
+            **self._common(request),
+            "status": "rejected",
+            "instance_id": request["instance_id"],
+            "error": "synthetic definitive rejection",
+            "fault_kind": "synthetic_rejection",
         }
 
     async def exchange(self, message: dict, *, deadline: float) -> dict:
@@ -55,6 +66,8 @@ class _Connection:
                     completion_uncertain=True,
                     retry_request=RetryRequest.from_message(request),
                 )
+            if self.reject_emulate_after_retry:
+                return self._rejected(request)
             if self.fault_emulate_after_retry:
                 return {
                     **self._common(request),
@@ -81,6 +94,31 @@ class _Connection:
                         },
                     }
                     for item in request["items"]
+                },
+            }
+
+        if operation == "emulate_action":
+            if self.fail_emulate_action_once:
+                self.fail_emulate_action_once = False
+                raise TransportError(
+                    "lost singleton event response",
+                    completion_uncertain=True,
+                    retry_request=RetryRequest.from_message(request),
+                )
+            if self.reject_emulate_after_retry:
+                return self._rejected(request)
+            return {
+                **self._common(request),
+                "status": "completed",
+                "instance_id": request["instance_id"],
+                "branch_id": request["branch_id"],
+                "parent_branch_id": request["parent_branch_id"],
+                "rng_id": request["rng_id"],
+                "decision_point_id": f"d-{request['branch_id']}-001",
+                "branch_log": [],
+                "masked_emulator_dto": {
+                    "legal_actions": [{"action_id": "next"}],
+                    "hp": 50,
                 },
             }
 
@@ -219,6 +257,101 @@ class EventBatchCapabilityRetryCleanupTest(unittest.IsolatedAsyncioTestCase):
                     "release_branches",
                 ],
             )
+        finally:
+            await client.close()
+
+    async def test_rejected_batch_retry_does_not_release_uncreated_candidate_ids(self) -> None:
+        connection = _Connection()
+        client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+        try:
+            instance_id = await client.start_instance(
+                {"instance_type": "whole_run"}, timeout_s=1.0
+            )
+            connection.fail_emulate_once = True
+            connection.reject_emulate_after_retry = True
+            items = self._items()
+
+            with self.assertRaises(TransportError):
+                await client.emulate_actions(instance_id, items, timeout_s=1.0)
+            retry = client.pending_retry
+            assert retry is not None
+            client.defer_branch_cleanup_after_retry(
+                retry,
+                instance_id,
+                [item["branch_id"] for item in items],
+            )
+
+            with self.assertRaisesRegex(
+                RequestRejectedError, "synthetic definitive rejection"
+            ):
+                await client.retry_request(retry, timeout_s=1.0)
+
+            self.assertIsNone(client.pending_retry)
+            self.assertEqual(client.next_request_seq, 3)
+            self.assertEqual(
+                [message["operation"] for message in connection.messages],
+                ["start_instance", "emulate_actions", "emulate_actions"],
+            )
+        finally:
+            await client.close()
+
+    async def test_rejected_singleton_retry_releases_only_preexisting_owned_ids(self) -> None:
+        connection = _Connection(advertise_event_batch=False)
+        client = AsyncTrainingApiClient(connection)  # type: ignore[arg-type]
+        try:
+            instance_id = await client.start_instance(
+                {"instance_type": "whole_run"}, timeout_s=1.0
+            )
+            first = await client.emulate_action(
+                instance_id,
+                "root",
+                "event-b1",
+                1,
+                "d-root-001",
+                "a-1",
+                timeout_s=1.0,
+            )
+            self.assertEqual(first["status"], "completed")
+
+            connection.fail_emulate_action_once = True
+            connection.reject_emulate_after_retry = True
+            with self.assertRaisesRegex(TransportError, "lost singleton event response"):
+                await client.emulate_action(
+                    instance_id,
+                    "root",
+                    "event-b2",
+                    2,
+                    "d-root-001",
+                    "a-2",
+                    timeout_s=1.0,
+                )
+
+            retry = client.pending_retry
+            assert retry is not None
+            client.defer_branch_cleanup_after_retry(
+                retry,
+                instance_id,
+                ["event-b1", "event-b2"],
+            )
+
+            with self.assertRaisesRegex(
+                RequestRejectedError, "synthetic definitive rejection"
+            ):
+                await client.retry_request(retry, timeout_s=1.0)
+
+            self.assertIsNone(client.pending_retry)
+            self.assertEqual(client.next_request_seq, 5)
+            self.assertEqual(
+                [message["operation"] for message in connection.messages],
+                [
+                    "start_instance",
+                    "emulate_action",
+                    "emulate_action",
+                    "emulate_action",
+                    "release_branches",
+                ],
+            )
+            self.assertEqual(connection.messages[-1]["branch_ids"], ["event-b1"])
         finally:
             await client.close()
 
