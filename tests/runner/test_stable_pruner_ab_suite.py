@@ -211,6 +211,12 @@ class StablePrunerABSuiteRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.aggregate.learned_wins, 2)
         self.assertEqual(report.aggregate.baseline_wins, 1)
         self.assertEqual(report.aggregate.diverged_pairs, 3)
+        self.assertEqual(report.outcome_statistics.discordant_pairs, 3)
+        self.assertAlmostEqual(report.outcome_statistics.learned_share_of_discordant, 2 / 3)
+        self.assertEqual(
+            report.outcome_statistics.two_sided_exact_sign_test_p_value,
+            1.0,
+        )
 
 
 if __name__ == "__main__":
