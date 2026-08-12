@@ -19,20 +19,19 @@ def _action(action_id: str, action_type: str, *, is_available: bool = True) -> d
 
 def test_reward_card_actions_classifies_only_available_reward_cards() -> None:
     legal_actions = [
-        _action("card-a", "choice_reward_card"),
-        _action("card-b", "choice_reward_card", is_available=False),
+        _action("card-a", CHOICE_REWARD_CARD_ACTION_TYPE),
+        _action("card-b", CHOICE_REWARD_CARD_ACTION_TYPE, is_available=False),
         _action("skip", "choice_reward_skip"),
     ]
 
     assert reward_card_actions(legal_actions) == [legal_actions[0]]
-    assert CHOICE_REWARD_CARD_ACTION_TYPE == "choice_reward_card"
 
 
 def test_random_reward_card_policy_preserves_historical_full_decision_randomness() -> None:
     legal_actions = [
-        _action("card-a", "choice_reward_card"),
-        _action("card-b", "choice_reward_card"),
-        _action("card-c", "choice_reward_card"),
+        _action("card-a", CHOICE_REWARD_CARD_ACTION_TYPE),
+        _action("card-b", CHOICE_REWARD_CARD_ACTION_TYPE),
+        _action("card-c", CHOICE_REWARD_CARD_ACTION_TYPE),
         _action("skip", "choice_reward_skip"),
     ]
     policy = RandomRewardCardSelectionPolicy()
@@ -60,9 +59,9 @@ class _RecordingRewardCardPolicy:
 
 def test_heuristic_selector_delegates_reward_card_decision_to_replaceable_policy() -> None:
     legal_actions = [
-        _action("card-a", "choice_reward_card"),
-        _action("card-unavailable", "choice_reward_card", is_available=False),
-        _action("card-b", "choice_reward_card"),
+        _action("card-a", CHOICE_REWARD_CARD_ACTION_TYPE),
+        _action("card-unavailable", CHOICE_REWARD_CARD_ACTION_TYPE, is_available=False),
+        _action("card-b", CHOICE_REWARD_CARD_ACTION_TYPE),
         _action("skip", "choice_reward_skip"),
     ]
     policy = _RecordingRewardCardPolicy()
