@@ -20,6 +20,7 @@ from sts2_training.runner.stable_pruner_ab import (
 class _LearnedTestPruner(StableFrontierPruner):
     name = "learned_test"
     version = "test-v1"
+    artifact_metadata = {"artifact_sha256": "artifact-test-sha"}
 
     def select(self, frontier, *, k, context):
         del context
@@ -144,6 +145,11 @@ class StablePrunerABRunnerTest(unittest.IsolatedAsyncioTestCase):
             ["baseline_action", "learned_action", "learned_action", "baseline_action"],
         )
         self.assertEqual(len(client.closed), 4)
+        self.assertEqual(report.seeds, (7, 8))
+        self.assertEqual(len(report.scenario_template_sha256), 64)
+        self.assertEqual(report.learned_pruner_name, "learned_test")
+        self.assertEqual(report.learned_pruner_version, "test-v1")
+        self.assertEqual(report.learned_artifact_sha256, "artifact-test-sha")
         self.assertEqual(report.summary.pairs, 2)
         self.assertEqual(report.summary.learned_wins, 2)
         self.assertEqual(report.summary.baseline_wins, 0)
