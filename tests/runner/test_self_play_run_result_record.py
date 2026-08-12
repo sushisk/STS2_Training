@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.runner.self_play import run_self_play_batch
 
 _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
@@ -13,7 +14,7 @@ _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
@@ -43,9 +44,14 @@ class _Connection:
             }
         if operation == "get_decision":
             dto = (
-                {"legal_actions": [], "run_terminal": True, "outcome": "victory"}
+                {
+                    "mask_version": MASK_VERSION,
+                    "legal_actions": [],
+                    "run_terminal": True,
+                    "outcome": "victory",
+                }
                 if self._committed
-                else {"legal_actions": [_ACTION]}
+                else {"mask_version": MASK_VERSION, "legal_actions": [_ACTION]}
             )
             return {
                 **_common(request),
@@ -64,6 +70,7 @@ class _Connection:
                 "branch_id": "root",
                 "decision_point_id": "d1",
                 "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
                     "legal_actions": [],
                     "run_terminal": True,
                     "outcome": "victory",
@@ -123,7 +130,12 @@ class SelfPlayRunResultRecordTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal["outcome"], "victory")
         self.assertEqual(
             terminal["final_dto"],
-            {"legal_actions": [], "run_terminal": True, "outcome": "victory"},
+            {
+                "mask_version": MASK_VERSION,
+                "legal_actions": [],
+                "run_terminal": True,
+                "outcome": "victory",
+            },
         )
 
 
