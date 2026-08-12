@@ -28,7 +28,7 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.api.contract import ROOT_BRANCH_ID
 from sts2_training.decision.engine import CombatDecisionEngine
-from sts2_training.decision.oracle_log import OracleJsonlWriter, qualified_class_name
+from sts2_training.decision.oracle_log import OracleJsonlWriter
 from sts2_training.decision.oracle_search import BudgetedOracleCollector, OracleCollectionConfig
 from sts2_training.runner._cli import add_common_arguments, configure_logging
 from sts2_training.runner.episode import build_engine
@@ -90,9 +90,6 @@ class OracleEpisodeRunner:
         decisions_collected = 0
         next_decision: dict[str, Any] | None = None
         final_dto: dict[str, Any] = {}
-        beam = self._commit_engine.beam_search
-        policy_class = qualified_class_name(beam._policy)  # noqa: SLF001
-        value_class = qualified_class_name(beam._value_fn)  # noqa: SLF001
 
         try:
             while True:
@@ -125,8 +122,6 @@ class OracleEpisodeRunner:
                 self._writer.write(
                     decision,
                     oracle_result,
-                    policy_class=policy_class,
-                    value_class=value_class,
                     training_commit=self._training_commit,
                 )
                 decisions_collected += 1
