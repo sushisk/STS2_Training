@@ -11,6 +11,8 @@ its semantics.
 
 from __future__ import annotations
 
+import copy
+import math
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -24,6 +26,7 @@ from sts2_training.decision.beam_search import (
     BeamSearchEngine,
     BeamSearchResult,
 )
+from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.combat_decision import is_continuation_decision
 from sts2_training.decision.policy import PolicyModel
 from sts2_training.decision.search_trace import (
@@ -140,10 +143,21 @@ class OracleTargets:
 
 
 @dataclass(frozen=True)
+class OracleProvenance:
+    """Identity of the actual teacher inference stack used for collection."""
+
+    teacher_policy_class: str
+    teacher_inner_policy_class: str
+    teacher_coverage_policy_class: str | None
+    teacher_value_class: str
+
+
+@dataclass(frozen=True)
 class OracleCollectionResult:
     search_result: BeamSearchResult
     trace: tuple[SearchTraceEvent, ...]
     targets: OracleTargets
+    provenance: OracleProvenance
 
 
 class _OracleTraceCollector(InMemorySearchTraceCollector):
@@ -222,10 +236,27 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
             for node in (*next_beam, *newly_finished):
                 continuation = is_continuation_decision(node.masked_emulator_dto)
                 value_is_fresh = not continuation
+                trace_value = node.value
                 if node.terminal:
                     state_kind = "terminal"
                     resolution = "terminal"
-                    value_source = "terminal"
+                    exact_terminal = self._value_fn.exact_terminal_utility(
+                        node.masked_emulator_dto
+                    )
+                    if exact_terminal is None:
+                        value_source = "value_bootstrap"
+                    else:
+                        if (
+                            isinstance(exact_terminal, bool)
+                            or not isinstance(exact_terminal, (int, float))
+                            or not math.isfinite(float(exact_terminal))
+                        ):
+                            raise RuntimeError(
+                                "ValueModel.exact_terminal_utility must return a finite "
+                                "number or None"
+                            )
+                        trace_value = float(exact_terminal)
+                        value_source = "terminal"
                 elif continuation:
                     state_kind = "continuation"
                     resolution = "continuation"
@@ -254,7 +285,7 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                         depth=node.depth,
                         combat_depth=node.combat_depth,
                         continuation_steps=node.continuation_steps,
-                        value=node.value,
+                        value=trace_value,
                         value_is_fresh=value_is_fresh,
                         value_source=value_source,
                         state_kind=state_kind,
@@ -269,27 +300,6 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                         candidate_source=node.candidate_source,
                     )
                 )
-        return result
-
-    async def search(self, instance_id, root_decision, *, timeout_s):  # type: ignore[override]
-        result = await super().search(
-            instance_id,
-            root_decision,
-            timeout_s=timeout_s,
-        )
-        search_id = self._current_search_id()
-        if search_id is not None and self.trace_collector is not None:
-            self.trace_collector.record(
-                SearchTraceEnd(
-                    search_id=search_id,
-                    reason=result.reason,
-                    best_root_action_id=result.best_root_action_id,
-                    best_value=result.best_value,
-                    depths_completed=result.stats.depths_completed,
-                    nodes_expanded=result.stats.nodes_expanded,
-                    branches_created=result.stats.branches_created,
-                )
-            )
         return result
 
     def _current_search_id(self) -> str | None:
@@ -318,6 +328,7 @@ class BudgetedOracleCollector:
         self._value_fn = value_fn
         self.config = config or OracleCollectionConfig()
         self._stable_pruner = stable_pruner or ValueTopKPruner()
+        self._provenance = _oracle_provenance(policy, value_fn)
 
     @classmethod
     def from_beam_engine(
@@ -327,9 +338,10 @@ class BudgetedOracleCollector:
         config: OracleCollectionConfig | None = None,
         stable_pruner: StableFrontierPruner | None = None,
     ) -> "BudgetedOracleCollector":
+        policy = _independent_policy_copy(engine._policy)  # noqa: SLF001
         return cls(
             engine._client,  # noqa: SLF001 - same-package training instrumentation
-            policy=engine._policy,  # noqa: SLF001
+            policy=policy,
             value_fn=engine._value_fn,  # noqa: SLF001
             config=config,
             stable_pruner=stable_pruner,
@@ -378,6 +390,7 @@ class BudgetedOracleCollector:
             search_result=result,
             trace=tuple(trace_collector.events),
             targets=targets,
+            provenance=self._provenance,
         )
 
 
@@ -679,3 +692,41 @@ def _available_dto_actions(dto: Mapping[str, Any]) -> list[JsonObject]:
         and isinstance(action.get("action_id"), str)
         and bool(action.get("action_id"))
     ]
+
+
+def _independent_policy_copy(policy: PolicyModel) -> PolicyModel:
+    try:
+        copied = copy.deepcopy(policy)
+    except Exception as exc:  # noqa: BLE001 - fail closed rather than sharing runtime state
+        raise TypeError(
+            "BudgetedOracleCollector.from_beam_engine requires a deepcopy-able policy so "
+            "teacher inference cannot mutate runtime policy state; construct the collector "
+            "explicitly with an independent policy instance instead"
+        ) from exc
+    if copied is policy:
+        raise TypeError(
+            "policy deepcopy returned the runtime policy object; construct the oracle "
+            "explicitly with an independent policy instance"
+        )
+    return copied
+
+
+def _oracle_provenance(policy: PolicyModel, value_fn: ValueModel) -> OracleProvenance:
+    policy_class = _qualified_class_name(policy)
+    if isinstance(policy, CoverageConstrainedPolicy):
+        inner_policy_class = _qualified_class_name(policy.inner)
+        coverage_policy_class = policy_class
+    else:
+        inner_policy_class = policy_class
+        coverage_policy_class = None
+    return OracleProvenance(
+        teacher_policy_class=policy_class,
+        teacher_inner_policy_class=inner_policy_class,
+        teacher_coverage_policy_class=coverage_policy_class,
+        teacher_value_class=_qualified_class_name(value_fn),
+    )
+
+
+def _qualified_class_name(value: Any) -> str:
+    cls = value if isinstance(value, type) else type(value)
+    return f"{cls.__module__}.{cls.__qualname__}"
