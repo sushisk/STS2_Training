@@ -23,6 +23,7 @@ class _FakeClient:
         reject_action_id: str | None = None,
         transport_fail_action_id: str | None = None,
         invalidate_on_fault: bool = False,
+        invalidate_on_reject: bool = False,
         release_error: Exception | None = None,
     ) -> None:
         self.hp_by_action = hp_by_action
@@ -30,6 +31,7 @@ class _FakeClient:
         self.reject_action_id = reject_action_id
         self.transport_fail_action_id = transport_fail_action_id
         self.invalidate_on_fault = invalidate_on_fault
+        self.invalidate_on_reject = invalidate_on_reject
         self.release_error = release_error
         self.session_invalid = False
         self.pending_retry = None
@@ -60,6 +62,7 @@ class _FakeClient:
             self.pending_retry = object()
             raise TransportError("candidate transport failed", completion_uncertain=True)
         if action_id == self.reject_action_id:
+            self.session_invalid = self.invalidate_on_reject
             raise RequestRejectedError(
                 {
                     "operation": "emulate_action",
@@ -209,10 +212,56 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "a-overcome")
         self.assertEqual(len(client.released[0]), 2)
 
-    async def test_rejected_candidate_request_propagates(self) -> None:
+    async def test_one_candidate_rejection_does_not_sink_the_others(self) -> None:
+        # Every run's very first decision (the pre-Map-snapshot NEOW-style event) is
+        # rejected by construction (see module docstring) - a rejection here must fall
+        # back to the heuristic selector, not abort the whole run.
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
             reject_action_id="a-hold-on",
+        )
+
+        result = await best_event_option(
+            client,
+            instance_id="inst-1",
+            decision_point_id="d1",
+            legal_actions=[_OVERCOME, _HOLD_ON],
+            timeout_s=5.0,
+        )
+
+        self.assertEqual(result, "a-overcome")
+        self.assertEqual(len(client.released[0]), 2)
+
+    async def test_all_candidates_rejected_returns_none(self) -> None:
+        client = _FakeClient({})
+
+        async def reject_both(*args, **kwargs):
+            raise RequestRejectedError(
+                {
+                    "operation": "emulate_action",
+                    "status": "rejected",
+                    "fault_kind": "invalid_action",
+                    "error": "parent_branch_id has not reached a map_select boundary yet",
+                }
+            )
+
+        client.emulate_action = reject_both  # type: ignore[method-assign]
+
+        result = await best_event_option(
+            client,
+            instance_id="inst-1",
+            decision_point_id="d1",
+            legal_actions=[_OVERCOME, _HOLD_ON],
+            timeout_s=5.0,
+        )
+
+        self.assertIsNone(result)
+
+    async def test_session_invalid_rejection_propagates(self) -> None:
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            reject_action_id="a-hold-on",
+            invalidate_on_reject=True,
         )
 
         with self.assertRaises(RequestRejectedError):
@@ -224,7 +273,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_s=5.0,
             )
 
-        self.assertEqual(len(client.released[0]), 1)
+        self.assertEqual(client.released, [])
 
     async def test_session_invalid_fault_propagates(self) -> None:
         client = _FakeClient(

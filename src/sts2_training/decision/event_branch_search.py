@@ -21,9 +21,13 @@ architecture is also why a Whole Run Event before the first Map snapshot cannot 
 branched.
 
 ``AsyncTrainingApiClient`` intentionally permits only one wire request in flight, so the
-candidate simulations run sequentially here. Candidate-level faulted responses are
-treated as unusable samples; rejected requests and transport/protocol failures propagate
-because they can indicate a caller bug or an unsafe client session.
+candidate simulations run sequentially here. Candidate-level faulted AND rejected
+responses are treated as unusable samples - a rejection at this decision point is
+expected whenever no Map snapshot exists yet (see the pre-Map Event note above; this is
+literally every run's first decision), not evidence of a caller bug, so it must not sink
+the whole run. Only a client left genuinely unusable (see ``_client_unusable``) still
+propagates; transport/protocol failures propagate unconditionally because they can leave
+the session's in-flight state ambiguous.
 
 This is an HP-preservation heuristic, not a general Whole Run value function. Candidates
 that fail to resolve, produce a non-finite HP value, or resolve to ``hp <= 0`` are ignored.
@@ -124,10 +128,12 @@ async def best_event_option(
                     action_id,
                     timeout_s=remaining,
                 )
-            except RequestFaultedError:
+            except (RequestFaultedError, RequestRejectedError):
                 # Faulted requests consume the session sequence and may leave a faulted
-                # Branch to release. A fault that invalidates the client is not a
-                # candidate-level failure and must propagate.
+                # Branch to release. A rejection here is most often the structural
+                # pre-Map-snapshot case documented above, not a caller bug. Either way,
+                # only a client left genuinely unusable is not a candidate-level failure
+                # and must propagate.
                 if _client_unusable(client):
                     raise
                 created_branch_ids.append(branch_id)

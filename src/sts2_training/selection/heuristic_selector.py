@@ -24,7 +24,7 @@ from sts2_training.selection.action_classification import (
 from sts2_training.selection.choice_card_heuristic import choice_card_preference_scores
 from sts2_training.selection.event_choice_heuristic import safe_event_option_candidates
 from sts2_training.selection.reward_card_selection import (
-    RandomRewardCardSelectionPolicy,
+    CardDataRewardCardSelectionPolicy,
     RewardCardSelectionPolicy,
 )
 from sts2_training.selection.room_heuristic import room_preference_scores
@@ -78,7 +78,7 @@ class HeuristicCombatSelector:
         self._reward_card_policy = (
             reward_card_policy
             if reward_card_policy is not None
-            else RandomRewardCardSelectionPolicy()
+            else CardDataRewardCardSelectionPolicy()
         )
 
     def select(
