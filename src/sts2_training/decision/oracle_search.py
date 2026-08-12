@@ -390,9 +390,10 @@ def build_oracle_targets(
 ) -> OracleTargets:
     """Derive root-action and stable-pruning targets from one oracle trace.
 
-    Stable-node targets use *future descendants only*. A node that the oracle itself
+    Stable-node targets use *future leaf descendants only*. A node that the oracle itself
     pruned before follow-up therefore receives ``no_target`` rather than its current
-    ValueModel score, avoiding direct self-imitation of the pruning rule.
+    ValueModel score, avoiding direct self-imitation of the pruning rule. Intermediate
+    states that were subsequently expanded are not treated as final Q outcomes either.
     """
 
     starts = [event for event in events if isinstance(event, SearchTraceStart)]
@@ -430,6 +431,7 @@ def build_oracle_targets(
     root_targets = _root_action_targets(
         root_proposal,
         resolved,
+        children=children,
         exhaustive_root_actions=exhaustive_root_actions,
         search_reason=end.reason,
     )
@@ -442,8 +444,8 @@ def build_oracle_targets(
                 children=children,
                 resolved_by_id=resolved_by_id,
             )
-            fresh_descendants = [candidate for candidate in descendants if candidate.value_is_fresh]
-            best = max(fresh_descendants, key=lambda candidate: candidate.value, default=None)
+            leaf_descendants = _leaf_fresh_nodes(descendants, children=children)
+            best = max(leaf_descendants, key=lambda candidate: candidate.value, default=None)
             if best is None:
                 target_value = None
                 target_source = "no_target"
@@ -458,7 +460,7 @@ def build_oracle_targets(
             else:
                 target_value = best.value
                 target_source = best.value_source
-                terminal_reached = any(candidate.terminal for candidate in fresh_descendants)
+                terminal_reached = any(candidate.terminal for candidate in leaf_descendants)
                 censored = best.value_source != "terminal"
                 censor_reason = None if not censored else f"value_bootstrap:{best.resolution}"
                 best_node_id = best.node_id
@@ -504,6 +506,7 @@ def _root_action_targets(
     root_proposal: PolicyProposalTrace,
     resolved: Sequence[ResolvedNodeTrace],
     *,
+    children: Mapping[str, Sequence[str]],
     exhaustive_root_actions: bool,
     search_reason: str,
 ) -> list[RootActionOracleTarget]:
@@ -550,10 +553,10 @@ def _root_action_targets(
         outcomes: list[OracleRngOutcome] = []
         for rng_id in rng_ids:
             nodes = nodes_by_key.get((action_id, rng_id), [])
-            fresh = [node for node in nodes if node.value_is_fresh]
-            best = max(fresh, key=lambda node: node.value, default=None)
+            leaves = _leaf_fresh_nodes(nodes, children=children)
+            best = max(leaves, key=lambda node: node.value, default=None)
             deepest = max((node.combat_depth for node in nodes), default=0)
-            terminal_reached = any(node.terminal for node in fresh)
+            terminal_reached = any(node.terminal for node in leaves)
             if best is None:
                 outcomes.append(
                     OracleRngOutcome(
@@ -563,7 +566,7 @@ def _root_action_targets(
                         terminal_reached=False,
                         deepest_combat_depth=deepest,
                         censored=True,
-                        censor_reason=f"no_fresh_resolved_state:{search_reason}",
+                        censor_reason=f"no_fresh_leaf_outcome:{search_reason}",
                         best_node_id=None,
                     )
                 )
@@ -635,6 +638,18 @@ def _descendant_nodes(
         result.append(node)
         queue.extend(children.get(child_id, ()))
     return result
+
+
+def _leaf_fresh_nodes(
+    nodes: Sequence[ResolvedNodeTrace],
+    *,
+    children: Mapping[str, Sequence[str]],
+) -> list[ResolvedNodeTrace]:
+    return [
+        node
+        for node in nodes
+        if node.value_is_fresh and not children.get(node.node_id)
+    ]
 
 
 def _value_top_k_ids(prune: StablePruneTrace, *, k: int) -> set[str]:
