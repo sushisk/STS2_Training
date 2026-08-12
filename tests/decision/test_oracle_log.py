@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
+from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION, OracleJsonlWriter
+from sts2_training.decision.oracle_search import (
+    OracleCollectionResult,
+    OracleTargetMetadata,
+    OracleTargets,
+)
+
+
+class OracleJsonlWriterTest(unittest.TestCase):
+    def _result(self) -> OracleCollectionResult:
+        metadata = OracleTargetMetadata(
+            search_id="search-1",
+            oracle_beam_width=16,
+            target_beam_width=4,
+            top_k_actions=8,
+            max_depth=4,
+            max_continuation_steps=8,
+            time_budget_ms=None,
+            exhaustive_root_actions=True,
+            rng_sampling="independent",
+            search_reason="max_depth",
+            pruner_name="value_top_k",
+            pruner_version="1",
+        )
+        return OracleCollectionResult(
+            search_result=BeamSearchResult(
+                best_root_action_id="play",
+                best_value=12.5,
+                best_node=None,
+                reason="max_depth",
+                stats=BeamSearchStats(depths_completed=4, nodes_expanded=10),
+            ),
+            trace=(),
+            targets=OracleTargets(metadata=metadata, root_actions=(), stable_nodes=()),
+        )
+
+    def test_writer_preserves_masked_dto_targets_and_provenance(self) -> None:
+        decision = {
+            "decision_point_id": "d-root",
+            "masked_emulator_dto": {
+                "hp": 37,
+                "legal_actions": [
+                    {"action_id": "play", "action_type": "card", "is_available": True}
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            record = OracleJsonlWriter(path).write(
+                decision,
+                self._result(),
+                policy_class="example.Policy",
+                value_class="example.Value",
+                training_commit="abc123",
+            )
+            parsed = json.loads(path.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(record["record_schema_version"], ORACLE_RECORD_SCHEMA_VERSION)
+        self.assertEqual(parsed["decision_point_id"], "d-root")
+        self.assertEqual(parsed["masked_emulator_dto"]["hp"], 37)
+        self.assertEqual(parsed["oracle_targets"]["metadata"]["oracle_beam_width"], 16)
+        self.assertEqual(parsed["provenance"]["training_commit"], "abc123")
+        self.assertEqual(parsed["provenance"]["rng_sampling"], "independent")
+
+    def test_writer_appends_one_record_per_decision(self) -> None:
+        decision = {
+            "decision_point_id": "d-root",
+            "masked_emulator_dto": {"legal_actions": []},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            writer = OracleJsonlWriter(path)
+            for index in range(2):
+                writer.write(
+                    {**decision, "decision_point_id": f"d-{index}"},
+                    self._result(),
+                    policy_class="Policy",
+                    value_class="Value",
+                )
+            lines = path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[1])["decision_point_id"], "d-1")
+
+
+if __name__ == "__main__":
+    unittest.main()
