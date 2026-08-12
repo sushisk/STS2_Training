@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.runner.floor_reach_eval import (
     FloorReachResult,
     run_floor_reach_eval,
@@ -20,7 +21,7 @@ _CARD_ACTION = {
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
@@ -82,6 +83,7 @@ class _FakeConnection:
     def _dto_for_step(self) -> dict:
         if self._step >= 2:
             return {
+                "mask_version": MASK_VERSION,
                 "legal_actions": [],
                 "terminal": True,
                 "outcome": "defeat",
@@ -89,6 +91,7 @@ class _FakeConnection:
                 "currentActIndex": 0,
             }
         return {
+            "mask_version": MASK_VERSION,
             "legal_actions": [_CARD_ACTION],
             "totalFloor": 1 + self._step,
             "currentActIndex": 0,

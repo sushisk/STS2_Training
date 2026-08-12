@@ -9,6 +9,7 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine
 from sts2_training.decision.policy import PriorHeuristicPolicy
 from sts2_training.decision.value import HeuristicValueFunction
@@ -16,7 +17,7 @@ from sts2_training.decision.value import HeuristicValueFunction
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
@@ -80,7 +81,12 @@ class _FakeConnection:
                 "branch_id": "root",
                 "decision_point_id": "d-root-committed",
                 "branch_log": [],
-                "masked_emulator_dto": {"legal_actions": [{"action_id": "noop", "action_type": "system"}]},
+                "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
+                    "legal_actions": [
+                        {"action_id": "noop", "action_type": "system"}
+                    ],
+                },
             }
 
         if operation == "emulate_actions":
@@ -147,12 +153,17 @@ class _FakeConnection:
 def _root_decision(legal_actions: list[dict], *, decision_point_id: str = "d-root", **dto_extra) -> dict:
     return {
         "decision_point_id": decision_point_id,
-        "masked_emulator_dto": {"legal_actions": legal_actions, **dto_extra},
+        "masked_emulator_dto": {
+            "mask_version": MASK_VERSION,
+            "legal_actions": legal_actions,
+            **dto_extra,
+        },
     }
 
 
 def _victory_dto() -> dict:
     return {
+        "mask_version": MASK_VERSION,
         "terminal": True,
         "outcome": "victory",
         "hp": 40,
@@ -164,6 +175,7 @@ def _victory_dto() -> dict:
 
 def _alive_dto(legal_actions: list[dict] | None = None) -> dict:
     dto = {
+        "mask_version": MASK_VERSION,
         "hp": 40,
         "maxHp": 50,
         "enemies": [{"hp": 10, "maxHp": 10, "isAlive": True, "intent": {}}],
@@ -292,7 +304,7 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(connection.release_calls[0]), created_branch_ids)
 
     async def test_splits_wide_frontier_across_max_batch_size(self) -> None:
-        # v0.7's max_branches capacity: a frontier wider than max_batch_size must be
+        # The max_branches capacity means a frontier wider than max_batch_size must be
         # sent as multiple same-depth emulate_actions requests, not one oversized one.
         three_actions = [
             {"action_id": "c1", "action_type": "card", "is_available": True},
