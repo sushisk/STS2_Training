@@ -39,12 +39,25 @@ def _common(request: dict) -> dict:
 class _FakeConnection:
     """One decision, then terminal victory; optional start/close failures."""
 
-    def __init__(self, *, fail_start: bool = False, fail_close: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        fail_close: bool = False,
+        observed_god_mode: bool | None = None,
+    ) -> None:
         self.client_session_id = f"session-{id(self)}"
         self._fail_start = fail_start
         self._fail_close = fail_close
+        self._observed_god_mode = observed_god_mode
+        self._requested_god_mode = False
         self._committed = False
         self.start_instance_configs: list[dict] = []
+
+    def _reported_god_mode(self) -> bool:
+        if self._observed_god_mode is not None:
+            return self._observed_god_mode
+        return self._requested_god_mode
 
     async def connect(self) -> None:
         pass
@@ -54,7 +67,9 @@ class _FakeConnection:
         operation = request["operation"]
 
         if operation == "start_instance":
-            self.start_instance_configs.append(request.get("instance_config", {}))
+            config = request.get("instance_config", {})
+            self.start_instance_configs.append(config)
+            self._requested_god_mode = config.get("god_mode") is True
             if self._fail_start:
                 return {**_common(request), "status": "rejected", "fault_kind": "invalid_request"}
             return {
@@ -69,6 +84,7 @@ class _FakeConnection:
                 if self._committed
                 else {"legal_actions": [_ACTION]}
             )
+            dto["godMode"] = self._reported_god_mode()
             return {
                 **_common(request),
                 "instance_id": request["instance_id"],
@@ -89,6 +105,7 @@ class _FakeConnection:
                     "legal_actions": [],
                     "terminal": True,
                     "outcome": "victory",
+                    "godMode": self._reported_god_mode(),
                 },
             }
         if operation == "close_instance":
@@ -275,6 +292,21 @@ class RunSelfPlayBatchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(results[0].error)
         self.assertEqual(connection.start_instance_configs[0].get("god_mode"), True)
+        self.assertTrue(results[0].episode.final_dto["godMode"])
+
+    async def test_god_mode_run_faults_when_emulator_does_not_confirm_it(self) -> None:
+        connection = _FakeConnection(observed_god_mode=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            results = await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: connection,
+                output_dir=Path(tmp),
+                god_mode=True,
+            )
+
+        self.assertIsNone(results[0].episode)
+        self.assertIn("did not report godMode=true", results[0].error or "")
 
     async def test_god_mode_false_omits_the_instance_config_key(self) -> None:
         connection = _FakeConnection()
