@@ -39,6 +39,7 @@ def _multiset_record(card_id: str, count: int, **overrides) -> dict:
 
 def _combat_start_dto(**overrides) -> dict:
     dto = {
+        "mask_version": "1.2",
         "characterId": "IRONCLAD",
         "hp": 70,
         "maxHp": 80,
@@ -94,6 +95,12 @@ def _combat_start_dto(**overrides) -> dict:
 
 
 class DtoToScenarioSpecTest(unittest.TestCase):
+    def test_rejects_legacy_or_missing_mask_version(self) -> None:
+        for mask_version in ("1.1", None, "invalid"):
+            with self.subTest(mask_version=mask_version):
+                with self.assertRaisesRegex(ValueError, r"mask_version >= 1\.2"):
+                    dto_to_scenario_spec(_combat_start_dto(mask_version=mask_version), seed=1)
+
     def test_strips_god_mode_powers_but_keeps_others(self) -> None:
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
 
