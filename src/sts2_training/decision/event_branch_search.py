@@ -6,6 +6,20 @@ the game as deterministic. This is provisional: ideally each option would be sam
 across multiple RNG hypotheses, but that larger multi-sample change belongs in a
 separate PR.
 
+Whole Run implementation note: RL does not clone or retain a ``GameInstance`` per
+public Branch. ``WholeRunInstance`` owns the public ``branch_id`` and Branch bookkeeping.
+For a speculative action it sends ``WholeRunWorkerPool`` a replay recipe consisting of
+the latest Map-boundary snapshot, room id, action prefix, target boundary, action id, and
+(for Events) an ``EventRngReplayPlan``. A worker process owns one persistent
+``WholeRunSession``/``GameInstance`` and reconstructs the requested frontier by loading
+the Map snapshot, entering the room, replaying the prefix, applying the Event RNG
+override at the original hypothesis point, and only then stepping the candidate action.
+The returned result is converted back into the Branch view; descendant Branches are
+reconstructed again from the same Map snapshot with an extended prefix. See
+``STS2_RL/API/instance_whole_run.py`` and ``STS2_RL/Run/worker_pool.py``. This replay
+architecture is also why a Whole Run Event before the first Map snapshot cannot be
+branched.
+
 ``AsyncTrainingApiClient`` intentionally permits only one wire request in flight, so the
 candidate simulations run sequentially here. Candidate-level faulted responses are
 treated as unusable samples; rejected requests and transport/protocol failures propagate
@@ -96,6 +110,11 @@ async def best_event_option(
                 return None
 
             try:
+                # ``branch_id`` is logical RL-coordinator state, not a cloned WorkerPool
+                # GameInstance. The RL Whole Run path reconstructs this candidate on a
+                # worker from Map snapshot + room + action prefix. ``rng_id`` selects the
+                # Event RNG hypothesis whose replay plan is applied at the original Event
+                # point before this action is stepped. See the module note above.
                 result = await client.emulate_action(
                     instance_id,
                     ROOT_BRANCH_ID,
