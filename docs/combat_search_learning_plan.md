@@ -40,6 +40,7 @@ Search-training traces are separate from `SelectionAudit` and include:
 - the complete stable frontier before pruning and survivor flags
 - full legal-action snapshots
 - inner-policy rank/optional score versus post-coverage rank/source
+- one `search_end` completion event for every normally completed traced Beam search
 
 Pending continuation values are explicitly marked inherited/stale and are not valid Value targets.
 
@@ -48,6 +49,8 @@ Pending continuation values are explicitly marked inherited/stale and are not va
 `BudgetedOracleCollector` runs a wider/deeper Beam search on the current root Decision and produces a **configuration-dependent estimate**, never a claim of ground truth.
 
 Default training budget is intentionally larger than runtime (`beam_width=32`, `top_k_actions=8`, `max_depth=4`), while `target_beam_width` represents the cheaper runtime-style K whose missed branches we want to study. All values remain configurable.
+
+When constructed with `BudgetedOracleCollector.from_beam_engine()`, the teacher policy is deep-copied from the runtime policy. Collection therefore cannot advance a runtime policy's RNG/counters/other mutable inference state. If the policy cannot be copied safely, construction fails closed and callers must provide an independent teacher policy instance explicitly.
 
 ### Root actions
 
@@ -73,12 +76,12 @@ Targets use only fresh **leaf outcomes** from the Oracle trace. An intermediate 
 
 Target source is explicit:
 
-- `terminal`: the selected leaf reached a terminal state
-- `value_bootstrap`: search stopped at a nonterminal leaf and uses `ValueModel`
+- `terminal`: the selected leaf reached a terminal state **and** the Value implementation explicitly supplied an exact terminal utility through `ValueModel.exact_terminal_utility()`
+- `value_bootstrap`: the fresh leaf uses `ValueModel`; this also covers a terminal state when the Value implementation does not opt in to the exact-terminal-utility contract
 - `mixed`: root-action aggregation contains both kinds
 - `no_target`: no valid fresh leaf was observed
 
-Each target carries `terminal_reached`, `censored`, and a censor/truncation reason. Root targets retain per-RNG outcomes before aggregation.
+A terminal DTO is therefore not enough by itself to promote an arbitrary learned Value prediction into an uncensored terminal target. Each target separately carries `terminal_reached`, `censored`, and a censor/truncation reason. Root targets retain per-RNG outcomes before aggregation.
 
 ### RNG policy
 
@@ -86,7 +89,7 @@ Ordinary collection uses independent RNG hypotheses, matching current Beam seman
 
 ## Phase 3: executable data collection — implemented
 
-`OracleEpisodeRunner` collects one Oracle record **before each runtime commit**. The committed action is still chosen by the normal `CombatDecisionEngine`, not by the expensive teacher search. This keeps the visited-state distribution aligned with the runtime policy/search stack we intend to improve.
+`OracleEpisodeRunner` collects one Oracle record **before each runtime commit**. The committed action is still chosen by the normal `CombatDecisionEngine`, not by the expensive teacher search. Together with teacher-policy state isolation, this keeps the visited-state distribution aligned with the runtime policy/search stack we intend to improve.
 
 Records are written by `OracleJsonlWriter` to a dedicated JSONL file, one root Decision per line. Each record contains:
 
@@ -95,7 +98,9 @@ Records are written by `OracleJsonlWriter` to a dedicated JSONL file, one root D
 - root-action targets
 - stable-pruning targets
 - full search trace
-- policy/value/pruner provenance and optional Training commit
+- teacher outer policy, inner policy, structural-coverage wrapper, Value, pruner, RNG, and optional Training commit provenance
+
+Provenance is finalized by `OracleCollectionResult`, not inferred from the runtime commit engine, so a deliberately different teacher policy/value configuration is recorded correctly.
 
 This remains separate from `SelectionAudit`.
 
@@ -125,7 +130,7 @@ score = f(node features, frontier-relative features, remaining budget)
 
 Then retain top-K subject to structural safety constraints. Independent per-node scoring is only a baseline; later training should support root-action-group-aware/listwise/set-selection objectives because the value of a retained set depends on redundancy and diversity.
 
-Training data should exclude `no_target` examples from value/ranking labels while retaining them for censoring diagnostics. Terminal targets should generally receive greater trust than Value-bootstrap targets.
+Training data should exclude `no_target` examples from value/ranking labels while retaining them for censoring diagnostics. Exact terminal targets should generally receive greater trust than Value-bootstrap targets.
 
 ## Phase 5: RL fine-tuning — later
 
@@ -140,14 +145,15 @@ The abstraction can then grow from stable pruning into `SearchController`: paren
 ## Current PR acceptance criteria
 
 1. `ValueTopKPruner` leaves default Combat-search decisions unchanged.
-2. Stable-pruning decisions are replayable from traces with deterministic grouping/order metadata.
+2. Stable-pruning decisions are replayable from traces with deterministic grouping/order metadata and normal searches emit completion events.
 3. Policy ranking and structural coverage provenance are distinguishable.
 4. Legal-but-policy-censored root actions are distinct from evaluated actions; exhaustive-root mode exists.
 5. A wide Oracle can produce downstream targets for nodes a cheaper runtime K would discard.
 6. Oracle-pruned/unobserved branches are `censored/no_target`, never implicit negative labels.
 7. Intermediate expanded Value estimates are not treated as final Oracle Q outcomes.
-8. Oracle labels identify terminal/bootstrap source, budget, and censoring rather than presenting themselves as ground truth.
+8. Terminal source requires an explicit exact-terminal-utility contract; arbitrary terminal Value predictions remain censored bootstrap targets.
 9. Common-RNG cross-action sampling remains disabled pending an explicit API semantic guarantee.
 10. Oracle JSONL is separate from normal selection logging and retains raw masked DTOs for re-featurization.
-11. Oracle collection commits actions using the runtime engine, preserving the runtime-induced state distribution.
-12. No learned model or RL dependency is introduced by this PR.
+11. Oracle collection commits actions using the runtime engine and does not advance runtime policy state, preserving the runtime-induced state distribution.
+12. JSONL provenance identifies the actual teacher inner/wrapper policy and Value configuration rather than inferring it from the runtime engine.
+13. No learned model or RL dependency is introduced by this PR.
