@@ -8,6 +8,7 @@ from sts2_training.decision.oracle_search import (
     BudgetedOracleCollector,
     OracleCollectionConfig,
     _OracleBeamSearchEngine,
+    _oracle_provenance,
     build_oracle_targets,
 )
 from sts2_training.decision.policy import ActionCandidate, PolicyModel
@@ -154,17 +155,21 @@ class OracleCollectionConfigTest(unittest.TestCase):
             {},
             top_k=1,
         )
+        provenance = _oracle_provenance(
+            oracle._policy,  # noqa: SLF001 - verify actual copied teacher
+            oracle._value_fn,  # noqa: SLF001
+        )
 
         self.assertEqual(inner.calls, 0)
         self.assertIsNot(oracle._policy, runtime_policy)  # noqa: SLF001
         self.assertTrue(
-            oracle._provenance.teacher_policy_class.endswith("CoverageConstrainedPolicy")  # noqa: SLF001
+            provenance.teacher_policy_class.endswith("CoverageConstrainedPolicy")
         )
         self.assertTrue(
-            oracle._provenance.teacher_inner_policy_class.endswith("_StatefulPolicy")  # noqa: SLF001
+            provenance.teacher_inner_policy_class.endswith("_StatefulPolicy")
         )
         self.assertTrue(
-            oracle._provenance.teacher_coverage_policy_class.endswith(  # type: ignore[union-attr]  # noqa: SLF001
+            provenance.teacher_coverage_policy_class.endswith(  # type: ignore[union-attr]
                 "CoverageConstrainedPolicy"
             )
         )
