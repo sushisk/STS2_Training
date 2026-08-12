@@ -176,6 +176,11 @@ class NewRunConfig:
     character_id: str
     ascension: int = 0
     seed: int | None = None
+    god_mode: bool = False
+    """Explicit, per-instance opt-in for RL's God Mode data-collection support (see
+    STS2_RL#39/#40) - the player is invincible for the whole run. Default False; never
+    silently enabled. Callers that set this are responsible for keeping the resulting
+    data separate from normal collection (see `runner.self_play`'s `--god-mode`)."""
 
     def to_instance_config(self) -> JsonObject:
         return {
@@ -183,4 +188,5 @@ class NewRunConfig:
             "character_id": self.character_id,
             "ascension": self.ascension,
             **({"seed": self.seed} if self.seed is not None else {}),
+            **({"god_mode": True} if self.god_mode else {}),
         }

@@ -15,6 +15,7 @@ from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.self_play import (
     SelfPlayRunResult,
     _parse_args,
+    _run_result_event,
     _summarize,
     main,
     run_self_play_batch,
@@ -38,11 +39,25 @@ def _common(request: dict) -> dict:
 class _FakeConnection:
     """One decision, then terminal victory; optional start/close failures."""
 
-    def __init__(self, *, fail_start: bool = False, fail_close: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        fail_close: bool = False,
+        observed_god_mode: bool | None = None,
+    ) -> None:
         self.client_session_id = f"session-{id(self)}"
         self._fail_start = fail_start
         self._fail_close = fail_close
+        self._observed_god_mode = observed_god_mode
+        self._requested_god_mode = False
         self._committed = False
+        self.start_instance_configs: list[dict] = []
+
+    def _reported_god_mode(self) -> bool:
+        if self._observed_god_mode is not None:
+            return self._observed_god_mode
+        return self._requested_god_mode
 
     async def connect(self) -> None:
         pass
@@ -52,6 +67,9 @@ class _FakeConnection:
         operation = request["operation"]
 
         if operation == "start_instance":
+            config = request.get("instance_config", {})
+            self.start_instance_configs.append(config)
+            self._requested_god_mode = config.get("god_mode") is True
             if self._fail_start:
                 return {**_common(request), "status": "rejected", "fault_kind": "invalid_request"}
             return {
@@ -66,6 +84,7 @@ class _FakeConnection:
                 if self._committed
                 else {"legal_actions": [_ACTION]}
             )
+            dto["godMode"] = self._reported_god_mode()
             return {
                 **_common(request),
                 "instance_id": request["instance_id"],
@@ -86,6 +105,7 @@ class _FakeConnection:
                     "legal_actions": [],
                     "terminal": True,
                     "outcome": "victory",
+                    "godMode": self._reported_god_mode(),
                 },
             }
         if operation == "close_instance":
@@ -259,6 +279,91 @@ class RunSelfPlayBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 6)
         self.assertLessEqual(max_active, 2)
 
+    async def test_god_mode_is_passed_through_to_instance_config(self) -> None:
+        connection = _FakeConnection()
+        with tempfile.TemporaryDirectory() as tmp:
+            results = await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: connection,
+                output_dir=Path(tmp),
+                god_mode=True,
+            )
+
+        self.assertIsNone(results[0].error)
+        self.assertEqual(connection.start_instance_configs[0].get("god_mode"), True)
+        self.assertTrue(results[0].episode.final_dto["godMode"])
+
+    async def test_god_mode_run_faults_when_emulator_does_not_confirm_it(self) -> None:
+        connection = _FakeConnection(observed_god_mode=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            results = await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: connection,
+                output_dir=Path(tmp),
+                god_mode=True,
+            )
+
+        self.assertIsNone(results[0].episode)
+        self.assertIn("did not report godMode=true", results[0].error or "")
+
+    async def test_god_mode_false_omits_the_instance_config_key(self) -> None:
+        connection = _FakeConnection()
+        with tempfile.TemporaryDirectory() as tmp:
+            await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: connection,
+                output_dir=Path(tmp),
+            )
+
+        self.assertNotIn("god_mode", connection.start_instance_configs[0])
+
+    async def test_god_mode_defaults_output_dir_to_a_distinct_subdirectory(self) -> None:
+        results = await run_self_play_batch(
+            character_id="IRONCLAD",
+            num_runs=1,
+            connection_factory=lambda: _FakeConnection(),
+            god_mode=True,
+        )
+
+        try:
+            self.assertEqual(results[0].log_path.parent, Path("data/self_play/godmode"))
+        finally:
+            for result in results:
+                result.log_path.unlink(missing_ok=True)
+            Path("data/self_play/godmode").rmdir()
+
+    async def test_god_mode_forces_beam_search_off(self) -> None:
+        captured: dict = {}
+        real_engine_cls = self._patch_engine_capture(captured)
+        with (
+            mock.patch("sts2_training.runner.self_play.CombatDecisionEngine", real_engine_cls),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: _FakeConnection(),
+                output_dir=Path(tmp),
+                god_mode=True,
+                search_mode="deep",
+            )
+
+        self.assertFalse(captured["beam_search_enabled"])
+
+    @staticmethod
+    def _patch_engine_capture(captured: dict):
+        from sts2_training.decision.engine import CombatDecisionEngine as _RealEngine
+
+        class _CapturingEngine(_RealEngine):
+            def __init__(self, *args, **kwargs):
+                captured["beam_search_enabled"] = kwargs.get("beam_search_enabled")
+                super().__init__(*args, **kwargs)
+
+        return _CapturingEngine
+
     async def test_shared_invalid_config_is_rejected_before_connection_factory(self) -> None:
         calls = 0
 
@@ -291,6 +396,24 @@ class RunSelfPlayBatchTest(unittest.IsolatedAsyncioTestCase):
                         await run_self_play_batch(**{**base, **override})
 
         self.assertEqual(calls, 0)
+
+
+class RunResultEventTest(unittest.TestCase):
+    def test_god_mode_flag_is_stamped_at_the_top_level(self) -> None:
+        episode = EpisodeResult(
+            instance_id="i1", decisions_made=1, final_dto={"outcome": "victory"}, elapsed_s=0.1
+        )
+        for god_mode in (True, False):
+            with self.subTest(god_mode=god_mode):
+                event = _run_result_event(
+                    run_id="r1",
+                    seed=1,
+                    character_id="IRONCLAD",
+                    ascension=0,
+                    episode=episode,
+                    god_mode=god_mode,
+                )
+                self.assertEqual(event["god_mode"], god_mode)
 
 
 class SummarizeTest(unittest.TestCase):
@@ -345,6 +468,17 @@ class SelfPlayCliTest(unittest.TestCase):
         self.assertEqual(args.concurrency, 3)
         self.assertEqual(args.output_dir, Path("custom-data"))
         self.assertEqual(args.search_mode, "deep")
+
+    def test_parse_args_god_mode_defaults_to_false_and_output_dir_to_none(self) -> None:
+        args = _parse_args(["--character-id", "IRONCLAD", "--num-runs", "1"])
+
+        self.assertFalse(args.god_mode)
+        self.assertIsNone(args.output_dir)
+
+    def test_parse_args_god_mode_flag(self) -> None:
+        args = _parse_args(["--character-id", "IRONCLAD", "--num-runs", "1", "--god-mode"])
+
+        self.assertTrue(args.god_mode)
 
     def test_main_prints_summary_and_uses_failure_exit_code(self) -> None:
         cases = (

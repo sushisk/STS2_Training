@@ -44,17 +44,25 @@ async def start_new_run(
     engine: CombatDecisionEngine | None = None,
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
+    god_mode: bool = False,
 ) -> EpisodeResult:
     """`seed=None` (default) picks a fresh random seed via `rng` (or module-level
     `random`) so repeated calls produce different runs; pass `seed` to pin one.
     `search_mode`/`beam_max_depth` select the beam config; pass `engine` instead for
-    full manual control (mutually exclusive, see `episode.build_engine`).
+    full manual control (mutually exclusive, see `episode.build_engine`). `god_mode`
+    is the explicit, per-instance RL data-collection opt-in (see `NewRunConfig`);
+    default False, never silently enabled.
+
+    When God Mode is requested, the completed run must also report `godMode: true`
+    in its terminal masked Emulator DTO. This observed check makes partial rollouts
+    fail closed instead of writing a successful God Mode-labelled run when an older
+    RL/Emulator process ignored the opt-in.
     """
     if seed is None:
         random_source = rng if rng is not None else random
         seed = random_source.randint(1, 2**31 - 1)
-    config = NewRunConfig(character_id=character_id, ascension=ascension, seed=seed)
-    return await start_and_run(
+    config = NewRunConfig(character_id=character_id, ascension=ascension, seed=seed, god_mode=god_mode)
+    result = await start_and_run(
         client,
         config.to_instance_config(),
         start_timeout_s=start_timeout_s,
@@ -64,6 +72,12 @@ async def start_new_run(
         search_mode=search_mode,
         beam_max_depth=beam_max_depth,
     )
+    if god_mode and result.final_dto.get("godMode") is not True:
+        raise RuntimeError(
+            "God Mode was requested but the terminal masked_emulator_dto did not "
+            "report godMode=true; refusing to treat this run as God Mode data"
+        )
+    return result
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
