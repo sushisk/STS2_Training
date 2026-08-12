@@ -1,8 +1,8 @@
 """One-line learning/validation entrypoint for stable-pruner logs.
 
 Inputs are log files/directories emitted by the current Training code. The command extracts
-current Oracle v3 and RL trajectory v2 records, performs temporary JSONL normalization, and
-runs the requested stable-pruner operation.
+current Oracle and RL trajectory records, performs temporary JSONL normalization, and runs
+the requested stable-pruner operation.
 """
 
 from __future__ import annotations
@@ -311,10 +311,20 @@ def run_learning(args: argparse.Namespace) -> LearningRunSummary:
             oracle_records=prepared.oracle_records,
         )
         output = Path(args.output or _default_output(plan, data_mode=data_mode))
-        if args.weights is not None and output.resolve() == args.weights.resolve():
+        output_resolved = output.resolve()
+        if args.weights is not None and output_resolved == args.weights.resolve():
             raise ValueError(
                 "--output must differ from --weights so the parent artifact remains immutable "
                 "and its pre-update SHA-256 provenance stays valid"
+            )
+        source_paths = {
+            Path(summary.path).expanduser().resolve()
+            for summary in prepared.sources
+        }
+        if output_resolved in source_paths:
+            raise ValueError(
+                "--output must differ from every resolved input log so source training data "
+                "cannot be overwritten by an artifact or validation report"
             )
         output.parent.mkdir(parents=True, exist_ok=True)
 
