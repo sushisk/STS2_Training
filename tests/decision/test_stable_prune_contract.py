@@ -264,6 +264,11 @@ class StablePrunePublicContractTest(unittest.TestCase):
         assert isinstance(trace, StablePruneTrace)
         assert pruner.frontier is not None
         self.assertEqual(trace.node_views(), pruner.frontier)
+        self.assertEqual(trace.selected_indices, (1, 0))
+        self.assertEqual(
+            trace.selected_node_views(),
+            (pruner.frontier[1], pruner.frontier[0]),
+        )
         self.assertEqual(
             [node.frontier_index_before_prune for node in trace.nodes],
             list(range(len(frontier))),
@@ -281,6 +286,30 @@ class StablePrunePublicContractTest(unittest.TestCase):
         self.assertEqual(narrowed.max_depth, runtime_context.max_depth)
         self.assertEqual(narrowed.depths_completed, runtime_context.depths_completed)
         self.assertEqual(narrowed.remaining_time_ms, runtime_context.remaining_time_ms)
+
+    def test_trace_replay_distinguishes_same_survivor_set_with_different_order(self) -> None:
+        frontier = [
+            _stable_node("a", 1.0),
+            _stable_node("b", 2.0),
+            _stable_node("c", 3.0),
+        ]
+        traces: list[StablePruneTrace] = []
+        for order in ([2, 0], [0, 2]):
+            collector = InMemorySearchTraceCollector()
+            selected = _prune(_engine(_FixedIndexPruner(order), collector=collector), frontier)
+            self.assertEqual(
+                [node.branch_id for node in selected],
+                [frontier[index].branch_id for index in order],
+            )
+            trace = collector.events[0]
+            assert isinstance(trace, StablePruneTrace)
+            traces.append(trace)
+
+        self.assertEqual(traces[0].selected_indices, (2, 0))
+        self.assertEqual(traces[1].selected_indices, (0, 2))
+        self.assertEqual([node.kept for node in traces[0].nodes], [True, False, True])
+        self.assertEqual([node.kept for node in traces[1].nodes], [True, False, True])
+        self.assertNotEqual(traces[0].selected_node_views(), traces[1].selected_node_views())
 
     def test_continuation_inherited_value_is_rejected_before_pruner_call(self) -> None:
         pruner = _FixedIndexPruner([0])

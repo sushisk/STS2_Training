@@ -10,7 +10,9 @@ from typing import Any
 
 from sts2_training.decision.oracle_search import OracleCollectionResult
 
-ORACLE_RECORD_SCHEMA_VERSION = 3
+# v4 adds StablePruneTrace.selected_indices so persisted traces retain the exact ordered
+# survivor action returned by StableFrontierPruner.select(), not only kept membership.
+ORACLE_RECORD_SCHEMA_VERSION = 4
 
 
 def oracle_collection_record(
