@@ -364,6 +364,61 @@ class RunSelfPlayBatchTest(unittest.IsolatedAsyncioTestCase):
 
         return _CapturingEngine
 
+    async def test_god_mode_defaults_max_decisions_to_1000(self) -> None:
+        captured: dict = {}
+        real_start_new_run = self._real_start_new_run()
+
+        async def capturing_start_new_run(*args, **kwargs):
+            captured["max_decisions"] = kwargs.get("max_decisions")
+            return await real_start_new_run(*args, **kwargs)
+
+        with (
+            mock.patch(
+                "sts2_training.runner.self_play.start_new_run", capturing_start_new_run
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: _FakeConnection(),
+                output_dir=Path(tmp),
+                god_mode=True,
+            )
+
+        self.assertEqual(captured["max_decisions"], 1000)
+
+    async def test_god_mode_explicit_max_decisions_is_not_overridden(self) -> None:
+        captured: dict = {}
+        real_start_new_run = self._real_start_new_run()
+
+        async def capturing_start_new_run(*args, **kwargs):
+            captured["max_decisions"] = kwargs.get("max_decisions")
+            return await real_start_new_run(*args, **kwargs)
+
+        with (
+            mock.patch(
+                "sts2_training.runner.self_play.start_new_run", capturing_start_new_run
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: _FakeConnection(),
+                output_dir=Path(tmp),
+                god_mode=True,
+                max_decisions=5,
+            )
+
+        self.assertEqual(captured["max_decisions"], 5)
+
+    @staticmethod
+    def _real_start_new_run():
+        from sts2_training.runner.start_new_run import start_new_run as _real
+
+        return _real
+
     async def test_shared_invalid_config_is_rejected_before_connection_factory(self) -> None:
         calls = 0
 

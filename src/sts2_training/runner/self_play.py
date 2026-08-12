@@ -56,6 +56,11 @@ __all__ = ["SelfPlayRunResult", "run_self_play_batch"]
 _LOG = logging.getLogger(__name__)
 _FILENAME_UNSAFE = re.compile(r"[^a-z0-9._-]+")
 _MAX_GAME_SEED = 2**31 - 1
+# An invincible player never dies, so a run only ends by actually finishing the game -
+# observed to take up to ~1200+ decisions to clear Act 2 alone (vs. ~100-260 for a
+# normal run's early death). 1000 is a practical default budget for --god-mode; pass
+# --max-decisions explicitly to override.
+_DEFAULT_GOD_MODE_MAX_DECISIONS = 1000
 
 
 @dataclass(frozen=True)
@@ -292,7 +297,10 @@ async def run_self_play_batch(
     `_run_one`). `output_dir` defaults to `data/self_play/godmode` in that case,
     `data/self_play` otherwise, so raw God Mode output is separated by construction
     rather than by caller discipline; pass `output_dir` explicitly to override either
-    default.
+    default. `max_decisions` likewise defaults to `_DEFAULT_GOD_MODE_MAX_DECISIONS`
+    (1000) when god_mode is set and no explicit value was passed - an invincible
+    player never dies, so without a budget a run only ends by actually finishing the
+    game.
     """
     _validate_positive_int("num_runs", num_runs)
     if num_runs > _MAX_GAME_SEED:
@@ -304,6 +312,8 @@ async def run_self_play_batch(
         raise ValueError("ascension must be an integer")
     _validate_positive_float("decision_timeout_s", decision_timeout_s)
     _validate_optional_positive_int("max_decisions", max_decisions)
+    if max_decisions is None and god_mode:
+        max_decisions = _DEFAULT_GOD_MODE_MAX_DECISIONS
     # Validate the shared beam configuration once, before spawning any network work.
     resolve_search_mode(search_mode, max_depth=beam_max_depth)
 
@@ -398,8 +408,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "invincible player for combat-data-diversity collection (see "
-            "STS2_RL#39/#40); forces Beam Search off and defaults --output-dir to a "
-            "distinct godmode/ subdirectory"
+            "STS2_RL#39/#40); forces Beam Search off, defaults --output-dir to a "
+            "distinct godmode/ subdirectory, and defaults --max-decisions to "
+            f"{_DEFAULT_GOD_MODE_MAX_DECISIONS}"
         ),
     )
     return parser.parse_args(argv)
