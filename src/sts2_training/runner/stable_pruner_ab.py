@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import sys
@@ -115,8 +116,13 @@ class StablePrunerABSummary:
 @dataclass(frozen=True)
 class StablePrunerABReport:
     schema_version: int
+    scenario_template_sha256: str
+    seeds: tuple[int, ...]
     search_config: dict[str, Any]
     arm_order: str
+    learned_pruner_name: str
+    learned_pruner_version: str
+    learned_artifact_sha256: str | None
     pairs: tuple[StablePrunerABPairResult, ...]
     summary: StablePrunerABSummary
 
@@ -175,8 +181,15 @@ class StablePrunerABRunner:
         pair_tuple = tuple(pairs)
         return StablePrunerABReport(
             schema_version=AB_REPORT_SCHEMA_VERSION,
+            scenario_template_sha256=_scenario_template_sha256(self._scenario),
+            seeds=normalized_seeds,
             search_config=_beam_config_record(self._beam_config),
             arm_order=self._arm_order,
+            learned_pruner_name=str(
+                getattr(self._learned_pruner, "name", type(self._learned_pruner).__name__)
+            ),
+            learned_pruner_version=str(getattr(self._learned_pruner, "version", "unknown")),
+            learned_artifact_sha256=_artifact_sha256(self._learned_pruner),
             pairs=pair_tuple,
             summary=summarize_pairs(pair_tuple),
         )
@@ -437,6 +450,26 @@ def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _scenario_template_sha256(scenario: CombatScenario) -> str:
+    payload = scenario.to_instance_config()
+    payload.pop("seed", None)
+    encoded = json.dumps(
+        _jsonable(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _artifact_sha256(pruner: StableFrontierPruner) -> str | None:
+    metadata = getattr(pruner, "artifact_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get("artifact_sha256")
+    return value if isinstance(value, str) and value else None
 
 
 def _default_engine_factory(
