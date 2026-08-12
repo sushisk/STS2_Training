@@ -2,58 +2,107 @@
 
 ## Goal
 
-Make combat search pruning measurable, replaceable, and learnable without changing current runtime behavior first.
+Make combat search decisions measurable, replaceable, and learnable without changing current runtime behavior first.
 
 The long-term search stack is intentionally split into three roles:
 
 1. `PolicyModel`: rank/propose legal combat actions.
 2. `ValueModel`: evaluate resolved stable/terminal combat states.
-3. `FrontierPruner` / later `SearchController`: decide which search branches deserve limited compute.
+3. Stable pruning first, then a broader `SearchController`: decide which search branches deserve limited compute.
 
 The first implementation step is infrastructure, not RL training.
 
-## Phase 1: Extract the pruning seam
+## Current search-control boundaries
 
-Introduce a `FrontierPruner` interface used by `BeamSearchEngine` after child states are scored.
+`BeamSearchEngine` currently contains several distinct forms of pruning / compute allocation:
 
-Provide `ValueTopKPruner` as the default implementation. It must reproduce the current behavior exactly: rank stable frontier nodes by `node.value` and retain the best `beam_width` nodes.
+- `PolicyModel` candidate truncation through `top_k_actions`
+- Whole Run active-branch capacity planning before emulation
+- continuation-frontier pruning by policy/item order while pending choices are resolved
+- stable/resolved frontier pruning by `node.value` top-K
 
-Keep structural candidate coverage in `CoverageConstrainedPolicy`; do not mix those constraints into the learned pruner yet.
+Phase 1 deliberately extracts only the last responsibility. It must not imply that all search allocation is already controlled by one pruner.
+
+## Phase 1: Extract the stable-frontier pruning seam
+
+Introduce a `StableFrontierPruner` interface used by `BeamSearchEngine` only when resolved/stable nodes are merged and selected for the next beam.
+
+Provide `ValueTopKPruner` as the default implementation. It must reproduce the current stable-frontier behavior exactly, including:
+
+- `waiting_stable` accumulation while continuation nodes remain unresolved
+- merging `waiting_stable` back into the stable frontier after continuation resolution
+- descending `node.value` ordering
+- Python stable-sort tie ordering
+- the `waiting_stable` fallback when the live beam becomes empty
+
+This seam does **not** control `PolicyModel.top_k_actions`, continuation ordering, or Whole Run active-branch capacity allocation.
+
+Keep structural candidate coverage in `CoverageConstrainedPolicy`; do not mix those constraints into the learned stable pruner yet.
+
+Longer term, parent expansion, actions-per-parent, continuation allocation, dynamic beam width, stopping, and Whole Run capacity allocation belong in a broader `SearchController` abstraction.
 
 ## Phase 2: Record search traces
 
 Add a dedicated search-training trace separate from `SelectionAudit`.
 
-For each pruning step, record enough information to reconstruct the decision, including:
+For each relevant search/pruning step, record enough information to reconstruct the decision, including:
 
 - decision/root action identity and semantic action data
 - depth and remaining search budget
-- policy rank/prior where available
 - value estimate and value delta from parent
 - stable/terminal/continuation state kind
 - root-action group and within-group rank
 - whether the node survived or was pruned
-- downstream best result discovered from the node when running an oracle search
-- RNG hypothesis/provenance and search configuration
+- RNG hypothesis/provenance
+- search configuration and model/artifact provenance
 
-Continuation nodes must be explicitly marked because their inherited `node.value` is not a fresh state-value estimate.
+Continuation nodes must be explicitly marked because their inherited `node.value` is not a fresh `ValueModel` estimate.
 
-## Phase 3: Add an oracle collection mode
+### Policy / coverage provenance
+
+The trace must distinguish the policy's own ranking from structural coverage applied afterward. Where available, record:
+
+- `policy_rank`: rank from the inner `PolicyModel`
+- optional `policy_score` / `policy_prior` / logit
+- `post_coverage_rank`: rank after `CoverageConstrainedPolicy`
+- `candidate_source = policy | structural_coverage`
+- whether structural coverage inserted or replaced a candidate
+
+The collector therefore needs an observation point around the policy/coverage boundary rather than reconstructing this information from the final `ActionCandidate` list. The runtime `ActionCandidate` contract does not need to treat opaque `action_id` as a learned global identity.
+
+## Phase 3: Add a budgeted oracle collection mode
 
 Add a data-collection mode with a wider/deeper search budget than runtime search.
+
+The result is a **configuration-dependent oracle estimate**, not ground truth. A wider/deeper search can still be censored by policy candidate limits, depth/time limits, active-branch capacity, and `ValueModel` bootstrap error.
+
+Each target therefore carries metadata sufficient to interpret its quality, including:
+
+- oracle/search budget and full search configuration
+- `terminal_reached`
+- `target_source = terminal | value_bootstrap`
+- `censored` plus a truncation/censoring reason
+- policy/value model provenance
+- raw per-RNG outcomes where stochastic simulation is involved
 
 The oracle trace should support deriving both:
 
 - action-policy targets: estimated `Q(s, a)` for legal root actions
-- pruning targets: estimated future utility of retaining each frontier node
+- pruning targets: estimated future utility of retaining each stable frontier node
 
-When alternatives are compared under stochastic simulation, use common RNG hypotheses where the API contract allows it and retain raw per-RNG outcomes in the trace.
+### Common-RNG comparisons
 
-## Phase 4: Bootstrap a learned pruner
+Common-random-number comparisons are an **oracle-only sampling experiment**, not an assumption about ordinary beam behavior.
+
+The current beam gives different root candidates different `rng_id` values and descendants inherit the root candidate's RNG hypothesis. Therefore merely increasing beam width/depth does not create paired-RNG comparisons.
+
+Before enabling paired comparisons across different root actions, explicitly verify the Training/RL API contract guarantees the intended meaning of reusing one RNG hypothesis across those different actions. If verified, record the paired experiment configuration and raw per-RNG outcomes; otherwise keep ordinary independent-hypothesis collection.
+
+## Phase 4: Bootstrap a learned stable pruner
 
 Start with supervised imitation/distillation from oracle traces rather than policy-gradient RL from scratch.
 
-Use a contextual per-node score:
+The initial baseline uses a contextual per-node score:
 
 ```text
 score = f(node features, frontier-relative features, remaining budget)
@@ -62,6 +111,8 @@ score = f(node features, frontier-relative features, remaining budget)
 Then apply structural safety constraints and retain top-K nodes.
 
 Initial targets can use reachable descendant value and oracle survivor labels. More expensive marginal-utility / leave-one-out labels should be collected selectively near the pruning boundary.
+
+Independent per-node scoring is only the first baseline. Root-action regret is fundamentally affected by the value of the retained **set**, including redundancy between similar nodes. Later versions may therefore use root-action-group-aware, listwise, or explicit set-selection control.
 
 ## Phase 5: RL fine-tuning
 
@@ -73,25 +124,37 @@ The eventual objective should optimize root-decision quality under a compute bud
 reward = - root_action_regret - lambda * emulator_cost - mu * latency
 ```
 
-This phase may later expand `FrontierPruner` into a `SearchController` that also controls parent expansion, actions-per-parent, dynamic beam width, and stopping.
+This phase may later expand `StableFrontierPruner` into a `SearchController` that also controls parent expansion, actions-per-parent, continuation allocation, dynamic beam width, stopping, and Whole Run active-branch capacity allocation.
 
 ## Initial implementation PR scope
 
 The first code PR after this plan should contain only:
 
-- `FrontierPruner` abstraction
-- `ValueTopKPruner` exact-behavior baseline
-- `BeamSearchEngine` integration
+- `StableFrontierPruner` abstraction
+- `ValueTopKPruner` exact-behavior baseline for stable/resolved frontier pruning
+- `BeamSearchEngine` integration at that single pruning seam
 - search trace schema / collector hooks
+- policy/coverage provenance hooks sufficient to distinguish inner ranking from structural coverage
 - regression tests proving default search decisions are unchanged
-- trace tests covering stable, terminal, and continuation nodes
+
+The regression suite must cover at least:
+
+- ordinary stable frontier pruning
+- `waiting_stable` merge
+- all-equal values / stable tie ordering
+- continuation resolving back into the stable frontier
+- `waiting_stable` fallback when the live beam becomes empty
+- coexistence with Whole Run active-branch capacity pruning
 
 No learned model, training dependency, or RL algorithm should be introduced in that PR.
 
 ## Acceptance criteria
 
-1. Existing combat-search behavior remains unchanged with the default pruner.
+1. Existing combat-search behavior remains unchanged with `ValueTopKPruner` as the default stable-frontier pruner.
 2. Search-pruning decisions can be replayed/analyzed from emitted traces.
-3. Trace records do not treat opaque `action_id` values as global learned identities.
-4. Training instrumentation remains separable from normal selection logging.
-5. The seam is sufficient to add a heuristic or learned pruner without modifying core beam-search traversal logic.
+3. Trace records distinguish inner-policy ranking from post-coverage candidate selection where instrumentation is available.
+4. Oracle-derived labels identify their budget/configuration, terminal-vs-bootstrap source, and censoring/truncation status rather than presenting themselves as ground truth.
+5. Paired/common-RNG collection is gated on an explicitly verified API semantic contract.
+6. Trace records do not treat opaque `action_id` values as global learned identities.
+7. Training instrumentation remains separable from normal selection logging.
+8. The Phase 1 seam is explicitly limited to stable/resolved frontier pruning; broader compute allocation remains future `SearchController` work.
