@@ -186,3 +186,29 @@ def test_select_room_explores_randomly_when_epsilon_is_one() -> None:
     }
 
     assert chosen_ids == {"a-elite", "a-treasure"}
+
+
+def _event_action(action_id: str, will_kill_player) -> dict:
+    action = _action(action_id, "choice_event_option")
+    action["parameters"] = {"eventId": "SLIPPERY_BRIDGE", "choiceId": action_id, "willKillPlayer": will_kill_player}
+    return action
+
+
+def test_select_event_option_never_picks_a_confirmed_lethal_option_when_a_safe_one_exists() -> None:
+    legal_actions = [_event_action("overcome", None), _event_action("hold_on", True)]
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=1.0)
+
+    # epsilon=1.0 (max exploration) still must never pick the lethal option - the
+    # lethality filter is a hard constraint, not gated by epsilon like card/room are.
+    chosen_ids = {selector.select(legal_actions)["action_id"] for _ in range(20)}
+
+    assert chosen_ids == {"overcome"}
+
+
+def test_select_event_option_allows_lethal_when_it_is_the_only_option() -> None:
+    legal_actions = [_event_action("forced", True)]
+    selector = HeuristicCombatSelector(rng=random.Random(0))
+
+    chosen = selector.select(legal_actions)
+
+    assert chosen["action_id"] == "forced"
