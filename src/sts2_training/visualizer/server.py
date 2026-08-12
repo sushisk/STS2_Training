@@ -6,9 +6,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from sts2_training.visualizer.dto_contract import present_event
 from sts2_training.visualizer.live import LiveRunController
 from sts2_training.visualizer.page import INDEX_HTML
-from sts2_training.visualizer.presentation import present_event
 from sts2_training.visualizer.store import EventStore
 
 
