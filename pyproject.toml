@@ -10,14 +10,27 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-test = ["pytest>=8.0"]
+# The hosted required check installs the test extra. Include the training-only
+# numerical dependencies here as test dependencies too so board_eval's model-fit
+# regression tests execute instead of being silently skipped in CI. Runtime
+# inference remains dependency-free; the separate train extra is still the
+# user-facing install for fitting models outside the test suite.
+test = ["pytest>=8.0", "scikit-learn>=1.3", "numpy>=1.24"]
+# CPU-only (PyPI's default scikit-learn/numpy wheels have no CUDA/GPU dependency
+# whatsoever) - fitting board_eval's Run-state model (tools/train_board_eval.py)
+# against self-play data does not need a GPU at the current data scale; see
+# src/sts2_training/board_eval/how_to_use.md. Runtime inference
+# (board_eval.LinearRunStateValueModel) does NOT depend on this - it only
+# reads the plain JSON weights file training produces, via the standard
+# library.
+train = ["scikit-learn>=1.3", "numpy>=1.24"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-pythonpath = ["src"]
+pythonpath = ["src", "tools"]
 testpaths = ["tests"]
 markers = [
   "integration: requires STS2_RL_ROOT and the real Emulator runtime",
