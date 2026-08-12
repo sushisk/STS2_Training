@@ -256,14 +256,12 @@ def _policy_only_proposals(
     for rank, candidate in enumerate(ranked):
         if not isinstance(candidate, ActionCandidate):
             raise RuntimeError("PolicyModel.propose_batch must return ActionCandidate objects")
-        if len(proposals) >= top_k:
-            break
         proposals.append(
             CandidateProposal(
                 candidate=candidate,
                 policy_rank=rank,
                 policy_score=_policy_score(candidate),
-                post_coverage_rank=len(proposals),
+                post_coverage_rank=rank,
                 candidate_source="policy",
             )
         )
