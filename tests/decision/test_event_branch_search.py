@@ -75,7 +75,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(client.cancelled[0]), branch_ids)
         self.assertEqual(set(client.released[0]), branch_ids)
 
-    async def test_compares_candidates_under_the_same_rng_hypothesis(self) -> None:
+    async def test_uses_distinct_non_root_rng_hypotheses(self) -> None:
         client = _FakeClient({"a-overcome": 60.0, "a-hold-on": 53.0})
 
         await best_event_option(
@@ -86,8 +86,9 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
             timeout_s=5.0,
         )
 
-        # Different rng_id values would mix option quality with different RNG hypotheses.
-        self.assertEqual([call["rng_id"] for call in client.emulate_calls], [1, 1])
+        rng_ids = [call["rng_id"] for call in client.emulate_calls]
+        self.assertEqual(rng_ids, [1, 2])
+        self.assertNotIn(0, rng_ids)
 
     async def test_excludes_branches_that_resolve_to_death(self) -> None:
         client = _FakeClient({"a-overcome": 0.0, "a-hold-on": 3.0})
