@@ -122,11 +122,7 @@ class HeuristicCombatSelector:
                 return self._choose_card(candidates, dto)
             return self._choose(candidates)
 
-        reward_cards = by_type.get(CHOICE_REWARD_CARD_ACTION_TYPE)
-        if reward_cards:
-            # Reward-card decisions are a distinct Emulator boundary from choice_card.
-            # Delegate the whole available action set so a future policy can compare
-            # cards against skip/reroll/alternative actions in one place.
+        if by_type.get(CHOICE_REWARD_CARD_ACTION_TYPE):
             return self._reward_card_policy.select(actions, dto, rng=self._rng)
 
         return self._choose(actions)
