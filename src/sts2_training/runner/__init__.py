@@ -56,6 +56,22 @@ _LAZY_EXPORTS = {
         "sts2_training.runner.stable_pruner_ab",
         "StablePrunerABSummary",
     ),
+    "StablePrunerABCaseResult": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABCaseResult",
+    ),
+    "StablePrunerABCaseSpec": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABCaseSpec",
+    ),
+    "StablePrunerABSuiteReport": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABSuiteReport",
+    ),
+    "StablePrunerABSuiteRunner": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABSuiteRunner",
+    ),
 }
 
 __all__ = [
@@ -71,9 +87,13 @@ __all__ = [
     "SEARCH_MODES",
     "SelfPlayRunResult",
     "StablePrunerABArmResult",
+    "StablePrunerABCaseResult",
+    "StablePrunerABCaseSpec",
     "StablePrunerABPairResult",
     "StablePrunerABReport",
     "StablePrunerABRunner",
+    "StablePrunerABSuiteReport",
+    "StablePrunerABSuiteRunner",
     "StablePrunerABSummary",
     "build_engine",
     "resolve_search_mode",
