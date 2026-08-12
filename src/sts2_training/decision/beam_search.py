@@ -48,6 +48,7 @@ from sts2_training.decision.search_trace import (
 from sts2_training.decision.stable_pruner import (
     StableFrontierPruner,
     StablePruneContext,
+    StablePruneNodeView,
     ValueTopKPruner,
 )
 from sts2_training.decision.value import ValueModel
@@ -592,19 +593,21 @@ class BeamSearchEngine:
             depths_completed=depths_completed,
             remaining_time_ms=remaining_time_ms,
         )
-        selected = self._stable_pruner.select(
-            frontier,
+        frontier_views = tuple(_stable_prune_node_view(node) for node in frontier)
+        selected_indices = self._stable_pruner.select(
+            frontier_views,
             k=self.config.beam_width,
             context=context,
         )
-        selected = _validated_pruner_selection(
-            selected,
-            frontier=frontier,
+        selected_indices = _validated_pruner_indices(
+            selected_indices,
+            frontier_size=len(frontier),
             k=self.config.beam_width,
         )
+        selected = [frontier[index] for index in selected_indices]
 
         if self._trace_collector is not None:
-            selected_object_ids = {id(node) for node in selected}
+            selected_index_set = set(selected_indices)
             self._record_trace(
                 StablePruneTrace(
                     search_id=search_id,
@@ -626,24 +629,24 @@ class BeamSearchEngine:
                             branch_id=node.branch_id,
                             parent_branch_id=node.parent_branch_id,
                             frontier_index_before_prune=index,
-                            kept=id(node) in selected_object_ids,
-                            value=node.value,
-                            root_action_id=node.root_action_id,
+                            kept=index in selected_index_set,
+                            value=view.value,
+                            root_action_id=view.root_action_id,
                             rng_id=node.rng_id,
                             decision_point_id=node.decision_point_id,
-                            depth=node.depth,
-                            combat_depth=node.combat_depth,
-                            continuation_steps=node.continuation_steps,
-                            terminal=node.terminal,
+                            depth=view.depth,
+                            combat_depth=view.combat_depth,
+                            continuation_steps=view.continuation_steps,
+                            terminal=view.terminal,
                             action_id=node.action_id,
-                            action_type=node.action_type,
+                            action_type=view.action_type,
                             action=None if node.action is None else dict(node.action),
-                            policy_rank=node.policy_rank,
-                            policy_score=node.policy_score,
-                            post_coverage_rank=node.post_coverage_rank,
-                            candidate_source=node.candidate_source,
+                            policy_rank=view.policy_rank,
+                            policy_score=view.policy_score,
+                            post_coverage_rank=view.post_coverage_rank,
+                            candidate_source=view.candidate_source,
                         )
-                        for index, node in enumerate(frontier)
+                        for index, (node, view) in enumerate(zip(frontier, frontier_views))
                     ),
                 )
             )
@@ -1049,28 +1052,47 @@ def _action_for_id(
     return None
 
 
-def _validated_pruner_selection(
-    selected: Sequence[BeamNode],
+def _stable_prune_node_view(node: BeamNode) -> StablePruneNodeView:
+    if is_continuation_decision(node.masked_emulator_dto):
+        raise RuntimeError(
+            "StableFrontierPruner cannot receive continuation nodes with inherited/stale values"
+        )
+    return StablePruneNodeView(
+        value=node.value,
+        root_action_id=node.root_action_id,
+        depth=node.depth,
+        combat_depth=node.combat_depth,
+        continuation_steps=node.continuation_steps,
+        terminal=node.terminal,
+        action_type=node.action_type,
+        policy_rank=node.policy_rank,
+        policy_score=node.policy_score,
+        post_coverage_rank=node.post_coverage_rank,
+        candidate_source=node.candidate_source,
+    )
+
+
+def _validated_pruner_indices(
+    selected: object,
     *,
-    frontier: Sequence[BeamNode],
+    frontier_size: int,
     k: int,
-) -> list[BeamNode]:
-    if not isinstance(selected, Sequence) or isinstance(selected, (str, bytes)):
-        raise RuntimeError("StableFrontierPruner.select must return a node sequence")
+) -> list[int]:
+    if not isinstance(selected, list):
+        raise RuntimeError("StableFrontierPruner.select must return list[int]")
     if len(selected) > k:
-        raise RuntimeError("StableFrontierPruner.select returned more than k nodes")
-    frontier_object_ids = {id(node) for node in frontier}
+        raise RuntimeError("StableFrontierPruner.select returned more than k indices")
     seen: set[int] = set()
-    normalized: list[BeamNode] = []
-    for node in selected:
-        if not isinstance(node, BeamNode) or id(node) not in frontier_object_ids:
-            raise RuntimeError(
-                "StableFrontierPruner.select must return nodes from the supplied frontier"
-            )
-        if id(node) in seen:
-            raise RuntimeError("StableFrontierPruner.select returned a duplicate node")
-        seen.add(id(node))
-        normalized.append(node)
+    normalized: list[int] = []
+    for index in selected:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise RuntimeError("StableFrontierPruner.select indices must be integers, not bool")
+        if index < 0 or index >= frontier_size:
+            raise RuntimeError("StableFrontierPruner.select returned an out-of-range index")
+        if index in seen:
+            raise RuntimeError("StableFrontierPruner.select returned a duplicate index")
+        seen.add(index)
+        normalized.append(index)
     return normalized
 
 
