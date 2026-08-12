@@ -92,6 +92,90 @@ raise the bound with `await connection.set_max_response_bytes(...)` and replay t
 selection is logged on the first attempt; replay of the same `request_id` is recorded as
 selection recovery rather than a second logical selection.
 
+## Board evaluation: Run-state value model
+
+`sts2_training.board_eval` is the Whole Run state-value path. It is intentionally separate
+from Combat tactical scoring: `RunStateValueModel` does **not** inherit
+`decision.value.ValueModel`, and `LinearRunStateValueModel` is not passed to
+`CombatDecisionEngine(value_fn=...)`.
+
+The card/deck input pipeline reads `tools/output/card_secondary_features.csv` through a
+repository-anchored default path. `CardFeatureExtractor` produces fixed-order
+`CardFeatures`, and `summarize_deck()` produces `DeckSummary`. The former
+`other_effect_magnitude` catch-all has been split into effect families such as heal, max-HP,
+gold, card generation/transform/tutor, buff/debuff, orb, character-resource, known-other,
+and unparsed counts. Upgrade handling is deliberately instance-count based only;
+`upgraded_count` / `upgrade_ratio` and type-specific upgraded counts are the final
+representation rather than guessed upgraded damage/block deltas.
+
+Energy and Stars are separate resource dimensions. Star-cost cards keep `star_cost` and do
+not enter the ordinary Energy cost bins as free 0-Energy cards. Upstream uncertain counts
+such as `SOUL:1?` are kept separate from confirmed generation/transform/tutor/orb counts.
+`damage_per_energy` and `block_per_energy` use only Energy-cost cards contributing the
+corresponding effect.
+
+Referential cards retain structured `ReferenceScaling` data with a separate `referent`
+(`self` / `enemy` / `None`) and `filter_value`. Dynamic multi-hit cards additionally retain
+`hit_count_reference`, recording what determines hit count without inventing a numeric hit
+count or `effective_total_damage`. Deck summaries also expose `unknown_card_count` and
+`known_card_ratio`; unknown cards may be skipped for live Run-state inference without
+silently disappearing from model coverage features. No coverage-threshold fallback or
+runtime catalog-version rejection is added.
+
+The planned neural Deck Embedder remains a follow-up to the current engineered logistic
+baseline. Its boundary is:
+
+```text
+Card ID Embedding
++ Card instance/mechanical features
+        ↓
+Shared Card MLP
+        ↓
+64-d Card Vector per card
+        ↓
+SUM / MEAN / MAX pooling
+        ↓
+192-d Deck Embedding
+```
+
+The per-card side is intended to carry card identity plus the mechanical/instance signals
+represented by `CardFeatures`: upgrade state; Energy/Star cost; damage, block, draw and
+energy gain; card type and AOE/multi-hit/keyword/scaling flags; separated effect-family and
+uncertainty signals; and structured dynamic/reference metadata where applicable. Enchantment
+will join the CardInstance state after its explicit follow-up implementation. `DeckSummary`
+is **not** pooled into this embedding: it remains a parallel engineered input, alongside the
+Deck Embedding and later Relic / Encounter / Floor / HP / Gold state features, to the final
+value model. The initial Deck Encoder uses SUM / MEAN / MAX pooling; MIN is intentionally
+not part of the initial design.
+
+`board_eval.training_data.build_examples_from_log` turns one self-play JSONL Run into
+Win/Lose-labeled examples. `hp`, `max_hp`, `gold`, `act_floor`, and `total_floor` each have a
+matching `*_missing` feature so a missing value is distinguishable from a genuine zero.
+For log-derived examples, `state_kind` uses `currentRoomType` first and then the selection
+event's `boundary`; DTO-local `boundary` remains a final compatibility fallback. Callers can
+optionally filter `build_examples_from_log(..., state_kinds=...)`, including values obtained
+from the event-level boundary. The concrete Whole Run state-kind policy remains a follow-up
+decision.
+
+`tools/train_board_eval.py` fits a CPU-only `LogisticRegression` over
+`MODEL_FEATURE_NAMES`. Train/validation/test are split by whole Run and stratified by final
+Win/Lose outcome. The output JSON includes coefficients/scaling plus model/artifact schema,
+creation time, card-catalog SHA-256/path, training commit, training state-kind scope, and
+feature-schema hash metadata. These metadata are recorded for traceability;
+`LinearRunStateValueModel.from_weights_file` does not enforce catalog/version matching.
+
+```python
+from sts2_training.board_eval import LinearRunStateValueModel
+
+model = LinearRunStateValueModel.from_weights_file(
+    "tools/output/board_eval_model_weights.json"
+)
+win_probability = model.predict_win_probability(masked_emulator_dto)
+```
+
+See `src/sts2_training/board_eval/how_to_use.md` for the full feature contract, training
+options, and current limitations.
+
 ## Decision logic: Policy + Beam Search + Value function
 
 `sts2_training.decision.CombatDecisionEngine` wires `get_decision` -> policy-guided
