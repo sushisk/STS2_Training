@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from sts2_training.decision.learned_pruner import LinearStableFrontierPruner
+from sts2_training.decision.oracle_teacher_provenance import (
+    inspect_oracle_teacher_provenance,
+    require_matching_teacher_provenance,
+)
 from sts2_training.decision.pruner_training_data import (
     PrunerFrontierTrainingExample,
     load_pruner_frontiers,
@@ -105,6 +110,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-dir", type=Path, required=True)
     parser.add_argument("--terminal-weight", type=float, default=1.0)
     parser.add_argument("--bootstrap-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--allow-mixed-teachers",
+        action="store_true",
+        help="allow multiple teacher provenance fingerprints inside the held-out dataset",
+    )
+    parser.add_argument(
+        "--allow-teacher-mismatch",
+        action="store_true",
+        help="evaluate even when held-out teacher provenance differs from the artifact; "
+        "both provenance sets remain recorded in the report",
+    )
     return parser.parse_args(argv)
 
 
@@ -115,13 +131,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no *.jsonl files found under {args.log_dir}", file=sys.stderr)
         return 1
 
+    evaluation_provenance = inspect_oracle_teacher_provenance(
+        paths,
+        allow_mixed_teachers=args.allow_mixed_teachers,
+    )
     pruner = LinearStableFrontierPruner.from_weights_file(args.weights)
+    raw_training_provenance = pruner.artifact_metadata.get("oracle_teacher_provenance")
+    training_provenance = (
+        raw_training_provenance if isinstance(raw_training_provenance, Mapping) else None
+    )
+    provenance_match = require_matching_teacher_provenance(
+        training_provenance,
+        evaluation_provenance,
+        allow_teacher_mismatch=args.allow_teacher_mismatch,
+    )
     frontiers = load_pruner_frontiers(
         paths,
         terminal_weight=args.terminal_weight,
         bootstrap_weight=args.bootstrap_weight,
     )
     metrics = evaluate_artifact(pruner, frontiers)
+    metrics["teacher_provenance_match"] = provenance_match
+    metrics["training_oracle_teacher_provenance"] = training_provenance
+    metrics["evaluation_oracle_teacher_provenance"] = evaluation_provenance.to_json()
     print(json.dumps(metrics, indent=2, sort_keys=True))
     return 0
 
