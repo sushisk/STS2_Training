@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from sts2_training.decision.beam_search import BeamNode, BeamSearchConfig
+from sts2_training.decision.beam_search import BeamNode, BeamSearchConfig, BeamSearchEngine
+from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.oracle_search import (
+    BudgetedOracleCollector,
     OracleCollectionConfig,
     _OracleBeamSearchEngine,
     build_oracle_targets,
@@ -28,6 +30,18 @@ class _AllRequestedPolicy(PolicyModel):
         return [
             ActionCandidate(action_id=action["action_id"])
             for action in available[:top_k]
+        ]
+
+
+class _StatefulPolicy(PolicyModel):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def propose(self, legal_actions, masked_emulator_dto, *, top_k):
+        self.calls += 1
+        return [
+            ActionCandidate(action_id=action["action_id"])
+            for action in legal_actions[:top_k]
         ]
 
 
@@ -125,6 +139,36 @@ class OracleCollectionConfigTest(unittest.TestCase):
                 target_beam_width=3,
             )
 
+    def test_from_beam_engine_copies_stateful_policy_and_records_inner_provenance(self) -> None:
+        inner = _StatefulPolicy()
+        runtime_policy = CoverageConstrainedPolicy(inner)
+        engine = BeamSearchEngine(
+            object(),
+            policy=runtime_policy,
+            value_fn=_DummyValue(),
+        )
+
+        oracle = BudgetedOracleCollector.from_beam_engine(engine)
+        oracle._policy.propose(  # noqa: SLF001 - explicit state-isolation regression test
+            [{"action_id": "a", "action_type": "card", "is_available": True}],
+            {},
+            top_k=1,
+        )
+
+        self.assertEqual(inner.calls, 0)
+        self.assertIsNot(oracle._policy, runtime_policy)  # noqa: SLF001
+        self.assertTrue(
+            oracle._provenance.teacher_policy_class.endswith("CoverageConstrainedPolicy")  # noqa: SLF001
+        )
+        self.assertTrue(
+            oracle._provenance.teacher_inner_policy_class.endswith("_StatefulPolicy")  # noqa: SLF001
+        )
+        self.assertTrue(
+            oracle._provenance.teacher_coverage_policy_class.endswith(  # type: ignore[union-attr]  # noqa: SLF001
+                "CoverageConstrainedPolicy"
+            )
+        )
+
 
 class ExhaustiveRootProposalTest(unittest.TestCase):
     def test_exhaustive_root_ignores_descendant_top_k_limit(self) -> None:
@@ -162,6 +206,62 @@ class ExhaustiveRootProposalTest(unittest.TestCase):
         self.assertEqual([item["action_id"] for item in items], ["a", "b", "c"])
         self.assertEqual(len(metadata), 3)
         self.assertEqual(engine.config.top_k_actions, 1)
+
+    def test_generic_value_model_terminal_prediction_is_not_promoted_to_terminal_target(self) -> None:
+        collector = InMemorySearchTraceCollector()
+        collector.record(
+            SearchTraceStart(
+                search_id="search",
+                instance_id="inst",
+                root_decision_point_id="d-root",
+                beam_width=2,
+                top_k_actions=1,
+                max_depth=2,
+                max_continuation_steps=8,
+                time_budget_ms=None,
+                pruner_name="value_top_k",
+                pruner_version="1",
+            )
+        )
+        engine = _OracleBeamSearchEngine(
+            object(),
+            policy=_AllRequestedPolicy(),
+            value_fn=_DummyValue(),
+            config=BeamSearchConfig(beam_width=2, top_k_actions=1, max_depth=2),
+            trace_collector=collector,
+            exhaustive_root_actions=False,
+        )
+        action = {"action_id": "a", "action_type": "card", "is_available": True}
+        parent = BeamNode(
+            branch_id="root",
+            parent_branch_id="root",
+            rng_id=0,
+            decision_point_id="d-root",
+            masked_emulator_dto={"legal_actions": [action]},
+            depth=0,
+            value=0.0,
+            root_action_id=None,
+        )
+
+        engine._score_frontier(
+            [(parent, ActionCandidate("a"), "branch", 1)],
+            {
+                "branch": {
+                    "status": "completed",
+                    "decision_point_id": "d-terminal",
+                    "masked_emulator_dto": {
+                        "terminal": True,
+                        "outcome": "victory",
+                        "legal_actions": [],
+                    },
+                }
+            },
+        )
+
+        resolved = [event for event in collector.events if isinstance(event, ResolvedNodeTrace)]
+        self.assertEqual(len(resolved), 1)
+        self.assertTrue(resolved[0].terminal)
+        self.assertEqual(resolved[0].value_source, "value_bootstrap")
 
 
 class OracleTargetBuilderTest(unittest.TestCase):
