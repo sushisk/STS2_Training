@@ -78,6 +78,7 @@ def _artifact_base() -> dict:
         "stable_prune_node_view_schema_version": STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION,
         "feature_schema_version": PRUNER_FEATURE_SCHEMA_VERSION,
         "oracle_teacher_provenance": {"teacher_fingerprints": ["abc"]},
+        "metrics": {"val": {"pairwise_accuracy": 0.5}},
     }
 
 
@@ -197,7 +198,7 @@ def test_loader_accepts_fully_consistent_exact_trajectory(tmp_path: Path) -> Non
     assert examples[0].reward == pytest.approx(0.2)
 
 
-def test_updated_artifact_preserves_provenance_and_hashes_trajectory_bytes(
+def test_updated_artifact_hashes_trajectory_bytes_and_invalidates_old_metrics(
     tmp_path: Path,
 ) -> None:
     result = update_stable_pruner_rl.RLUpdateResult(
@@ -213,9 +214,10 @@ def test_updated_artifact_preserves_provenance_and_hashes_trajectory_bytes(
     )
     trajectory = tmp_path / "batch.jsonl"
     trajectory.write_bytes(b'{"record_type":"stable_pruner_rl_episode"}\n')
+    base = _artifact_base()
 
     payload = update_stable_pruner_rl.updated_artifact_payload(
-        _artifact_base(),
+        base,
         base_artifact_sha256="parent",
         coefficients=[0.1],
         result=result,
@@ -241,6 +243,15 @@ def test_updated_artifact_preserves_provenance_and_hashes_trajectory_bytes(
         {
             "path": str(trajectory),
             "sha256": hashlib.sha256(trajectory.read_bytes()).hexdigest(),
+            "hash_scope": "updater_input_bytes",
         }
     ]
+    assert payload["metrics"] is None
+    assert payload["metrics_status"] == {
+        "status": "requires_revalidation",
+        "update_stage": "rl_resume",
+        "parent_artifact_sha256": "parent",
+    }
+    assert payload["metrics_history"][0]["artifact_sha256"] == "parent"
+    assert payload["metrics_history"][0]["metrics"] == base["metrics"]
     assert len(payload["rl_finetuning_history"]) == 1
