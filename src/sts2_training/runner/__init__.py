@@ -1,18 +1,8 @@
-"""Top-level entry points for starting an instance and driving it to completion,
-layered on `sts2_training.decision.CombatDecisionEngine`. See `how_to_use.md`.
+"""Top-level entry points for starting and collecting Training instances.
 
-Two entry points sharing one loop (`EpisodeRunner`):
-
-- `start_combat_from_state`: Combat from a fully-specified board (`CombatScenario`).
-- `start_new_run`: a normal, from-scratch Whole Run (`NewRunConfig`).
-
-Both accept `search_mode`/`beam_max_depth` to pick the beam config (see
-`decision.search_modes`) without hand-constructing a `BeamSearchConfig`.
-
-The executable `start_*` modules are lazy exports. Importing them eagerly here would
-preload the target before `python -m sts2_training.runner.start_*` executes it, causing
-runpy's "found in sys.modules" RuntimeWarning and executing the module in a second
-namespace.
+Ordinary episode runners and training-only oracle collection share the same Combat
+decision stack. Executable modules remain lazy exports so ``python -m`` does not preload
+the target module and trigger runpy's duplicate-module warning.
 """
 
 from __future__ import annotations
@@ -38,6 +28,14 @@ _LAZY_EXPORTS = {
     "start_new_run": ("sts2_training.runner.start_new_run", "start_new_run"),
     "SelfPlayRunResult": ("sts2_training.runner.self_play", "SelfPlayRunResult"),
     "run_self_play_batch": ("sts2_training.runner.self_play", "run_self_play_batch"),
+    "OracleEpisodeResult": (
+        "sts2_training.runner.oracle_collection",
+        "OracleEpisodeResult",
+    ),
+    "OracleEpisodeRunner": (
+        "sts2_training.runner.oracle_collection",
+        "OracleEpisodeRunner",
+    ),
 }
 
 __all__ = [
@@ -48,6 +46,8 @@ __all__ = [
     "EpisodeResult",
     "EpisodeRunner",
     "NewRunConfig",
+    "OracleEpisodeResult",
+    "OracleEpisodeRunner",
     "SEARCH_MODES",
     "SelfPlayRunResult",
     "build_engine",
