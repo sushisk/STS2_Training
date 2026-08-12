@@ -5,7 +5,12 @@ import json
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import ApiProtocolError, RequestRejectedError
+from sts2_training.api.contract import (
+    MASK_VERSION,
+    SCHEMA_VERSION,
+    ApiProtocolError,
+    RequestRejectedError,
+)
 from sts2_training.api.tcp_connection import TcpConnection
 from sts2_training.api.transport import TransportError
 
@@ -39,7 +44,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 if request.get("transport_operation") == "hello":
                     response = {
                         "transport_operation": "hello",
-                        "schema_version": "0.7",
+                        "schema_version": SCHEMA_VERSION,
                         "client_session_id": request["client_session_id"],
                         "server_epoch": "epoch-1",
                     }
@@ -65,7 +70,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _common(request: dict) -> dict:
         return {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -108,13 +113,16 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             response.update(
                 branch_id=request["branch_id"],
                 decision_point_id="d-root-001",
-                masked_emulator_dto={"legal_actions": [{"action_id": "a-001"}]},
+                masked_emulator_dto={
+                    "mask_version": MASK_VERSION,
+                    "legal_actions": [{"action_id": "a-001"}],
+                },
             )
         elif operation == "commit_action":
             response.update(
                 branch_id="root",
                 decision_point_id="d-root-002",
-                masked_emulator_dto={"legal_actions": []},
+                masked_emulator_dto={"mask_version": MASK_VERSION, "legal_actions": []},
             )
         elif operation == "emulate_action":
             response.update(
@@ -122,7 +130,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
                 parent_branch_id=request["parent_branch_id"],
                 rng_id=request["rng_id"],
                 decision_point_id="d-branch-001",
-                masked_emulator_dto={"legal_actions": []},
+                masked_emulator_dto={"mask_version": MASK_VERSION, "legal_actions": []},
             )
         return response
 
@@ -136,7 +144,7 @@ class AsyncTrainingApiClientTcpTest(unittest.IsolatedAsyncioTestCase):
             self.requests,
             [
                 {
-                    "schema_version": "0.7",
+                    "schema_version": SCHEMA_VERSION,
                     "client_session_id": "session-a",
                     "request_seq": 1,
                     "request_id": "session-a:1",

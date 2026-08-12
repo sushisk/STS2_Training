@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import RequestFaultedError
+from sts2_training.api.contract import MASK_VERSION, RequestFaultedError, SCHEMA_VERSION
 
 
 class _CloseFaultConnection:
@@ -15,7 +15,7 @@ class _CloseFaultConnection:
     @staticmethod
     def _common(request: dict) -> dict:
         return {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -33,7 +33,10 @@ class _CloseFaultConnection:
                 "instance_id": "inst-001",
                 "max_emulate_actions_items": 64,
                 "decision_point_id": "decision-1",
-                "masked_emulator_dto": {"state": "initial"},
+                "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
+                    "state": "initial",
+                },
             }
         if request["operation"] == "close_instance":
             return {

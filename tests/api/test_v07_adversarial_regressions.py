@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sts2_training.api.contract import ApiContract
+from sts2_training.api.contract import ApiContract, MASK_VERSION, SCHEMA_VERSION
 from sts2_training.selection_log import SelectionAudit
 
 
@@ -28,6 +28,7 @@ def test_emulate_actions_accepts_terminal_completed_result_with_no_legal_moves()
                 "decision_point_id": "d-b1-terminal",
                 "branch_log": [],
                 "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
                     "terminal": True,
                     "outcome": "victory",
                     "legal_actions": [],
@@ -53,7 +54,7 @@ def test_batch_result_is_remembered_for_next_depth_received_audit() -> None:
 
     audit.record_action(
         {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "client_session_id": "session-a",
             "request_seq": 2,
             "request_id": "session-a:2",
@@ -79,7 +80,7 @@ def test_batch_result_is_remembered_for_next_depth_received_audit() -> None:
 
     audit.record_action(
         {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "client_session_id": "session-a",
             "request_seq": 3,
             "request_id": "session-a:3",

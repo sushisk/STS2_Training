@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.api.transport import (
     RetryRequest,
     ServerEpochChangedError,
@@ -25,7 +26,7 @@ class _Connection:
     @staticmethod
     def _response(request: dict, **fields) -> dict:
         return {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -68,7 +69,7 @@ class _Connection:
                 instance_id="inst-001",
                 max_emulate_actions_items=64,
                 decision_point_id="decision-1",
-                masked_emulator_dto={"state": "initial"},
+                masked_emulator_dto={"mask_version": MASK_VERSION, "state": "initial"},
             )
         if operation == "get_decision":
             response = self._response(
@@ -78,6 +79,7 @@ class _Connection:
                 branch_id=request["branch_id"],
                 decision_point_id="decision-1",
                 masked_emulator_dto={
+                    "mask_version": MASK_VERSION,
                     "state": "decision",
                     "legal_actions": [{"action_id": "action-1"}],
                 },
@@ -94,6 +96,7 @@ class _Connection:
                 branch_id="root",
                 decision_point_id="decision-2",
                 masked_emulator_dto={
+                    "mask_version": MASK_VERSION,
                     "state": "after",
                     "legal_actions": [{"action_id": "action-2"}],
                 },
