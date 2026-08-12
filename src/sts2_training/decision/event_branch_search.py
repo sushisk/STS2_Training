@@ -6,6 +6,11 @@ the game as deterministic. This is provisional: ideally each option would be sam
 across multiple RNG hypotheses, but that larger multi-sample change belongs in a
 separate PR.
 
+When RL advertises ``event_choice`` in ``emulate_actions_boundaries`` candidates are
+submitted together through ``emulate_actions``. Older RL deployments omit that semantic
+capability, so Training falls back to the existing singleton ``emulate_action`` route
+instead of relying on cross-repository deployment order.
+
 Whole Run implementation note: RL does not clone or retain a ``GameInstance`` per
 public Branch. ``WholeRunInstance`` owns the public ``branch_id`` and Branch bookkeeping.
 For a speculative action it sends ``WholeRunWorkerPool`` a replay recipe consisting of
@@ -20,14 +25,14 @@ reconstructed again from the same Map snapshot with an extended prefix. See
 architecture is also why a Whole Run Event before the first Map snapshot cannot be
 branched.
 
-``AsyncTrainingApiClient`` intentionally permits only one wire request in flight, so the
-candidate simulations run sequentially here. Candidate-level faulted AND rejected
-responses are treated as unusable samples - a rejection at this decision point is
-expected whenever no Map snapshot exists yet (see the pre-Map Event note above; this is
-literally every run's first decision), not evidence of a caller bug, so it must not sink
-the whole run. Only a client left genuinely unusable (see ``_client_unusable``) still
-propagates; transport/protocol failures propagate unconditionally because they can leave
-the session's in-flight state ambiguous.
+A usable request-level rejection at this decision point is treated as an unavailable
+sample rather than a fatal run error. In particular, the pre-Map Event that starts a run
+cannot be branched even on an RL server that advertises Event batch support. A rejected
+batch therefore yields no Event score, while singleton fallback skips a rejected
+candidate. Faulted requests are also unusable samples, but may have created Branch
+state and are cleaned up. Transport/protocol failures propagate; completion-uncertain
+requests transfer Branch ownership to their exact retry token so cleanup cannot race the
+replay.
 
 This is an HP-preservation heuristic, not a general Whole Run value function. Candidates
 that fail to resolve, produce a non-finite HP value, or resolve to ``hp <= 0`` are ignored.
@@ -57,6 +62,7 @@ __all__ = ["best_event_option"]
 
 _LOG = logging.getLogger(__name__)
 _MAX_CLEANUP_RESERVE_S = 1.0
+_EVENT_BATCH_BOUNDARY = "event_choice"
 
 
 async def best_event_option(
@@ -71,7 +77,13 @@ async def best_event_option(
 
     Each candidate is evaluated once under its own positive RNG hypothesis. Returns
     ``None`` when there are fewer than two usable candidates, every candidate faults or
-    resolves to death, or the evaluation budget expires before all candidates are tried.
+    is rejected, resolves to death, or the evaluation budget expires before all
+    candidates are tried.
+
+    Branch ownership stays with this lifecycle even across an exact transport replay.
+    If an evaluation becomes completion-uncertain, the client is told which Branches
+    this search owns; once the exact retry resolves, the client releases those Branches
+    before allowing the recovered request to escape back to its caller.
     """
 
     if (
@@ -86,13 +98,13 @@ async def best_event_option(
     if len(event_actions) <= 1:
         return None
 
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str, int]] = []
     for index, action in enumerate(event_actions):
         action_id = action.get("action_id")
         if not isinstance(action_id, str) or not action_id:
             continue
         branch_id = f"event-eval-{decision_point_id}-{index}-{uuid.uuid4().hex[:8]}"
-        candidates.append((branch_id, action_id))
+        candidates.append((branch_id, action_id, index + 1))
 
     if len(candidates) <= 1:
         return None
@@ -105,50 +117,99 @@ async def best_event_option(
     created_branch_ids: list[str] = []
     primary_error: BaseException | None = None
     try:
-        best_action_id: str | None = None
-        best_hp: float | None = None
-
-        for index, (branch_id, action_id) in enumerate(candidates):
+        if _supports_event_batch(client):
             remaining = evaluation_deadline - time.monotonic()
             if remaining <= 0:
                 return None
-
+            items = [
+                {
+                    "parent_branch_id": ROOT_BRANCH_ID,
+                    "branch_id": branch_id,
+                    "rng_id": rng_id,
+                    "decision_point_id": decision_point_id,
+                    "action_id": action_id,
+                }
+                for branch_id, action_id, rng_id in candidates
+            ]
             try:
-                # ``branch_id`` is logical RL-coordinator state, not a cloned WorkerPool
-                # GameInstance. The RL Whole Run path reconstructs this candidate on a
-                # worker from Map snapshot + room + action prefix. ``rng_id`` selects the
-                # Event RNG hypothesis whose replay plan is applied at the original Event
-                # point before this action is stepped. See the module note above.
+                response = await client.emulate_actions(
+                    instance_id,
+                    items,
+                    timeout_s=remaining,
+                )
+            except RequestRejectedError:
+                # Validation rejection means the batch did not create its candidate
+                # Branches. The common pre-Map Event is expected to take this path.
+                if _client_unusable(client):
+                    raise
+                return None
+            except RequestFaultedError:
+                # A fault consumes the request and may leave any/all candidate Branches
+                # behind, so own them until the common release in ``finally``.
+                if _client_unusable(client):
+                    raise
+                created_branch_ids.extend(
+                    branch_id for branch_id, _, _ in candidates
+                )
+                return None
+            except BaseException:
+                # Completion uncertainty applies to the whole batch: any/all Branches
+                # may already exist server-side. Preserve their ownership on the exact
+                # replay token rather than attempting a different cleanup request.
+                _defer_retry_cleanup(
+                    client,
+                    instance_id=instance_id,
+                    branch_ids=[branch_id for branch_id, _, _ in candidates],
+                )
+                raise
+
+            created_branch_ids.extend(branch_id for branch_id, _, _ in candidates)
+            branch_results = response.get("branch_results")
+            if not isinstance(branch_results, Mapping):
+                return None
+            return _best_from_batch(branch_results, candidates)
+
+        best_action_id: str | None = None
+        best_hp: float | None = None
+        for branch_id, action_id, rng_id in candidates:
+            remaining = evaluation_deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
                 result = await client.emulate_action(
                     instance_id,
                     ROOT_BRANCH_ID,
                     branch_id,
-                    index + 1,
+                    rng_id,
                     decision_point_id,
                     action_id,
                     timeout_s=remaining,
                 )
-            except (RequestFaultedError, RequestRejectedError):
-                # Faulted requests consume the session sequence and may leave a faulted
-                # Branch to release. A rejection here is most often the structural
-                # pre-Map-snapshot case documented above, not a caller bug. Either way,
-                # only a client left genuinely unusable is not a candidate-level failure
-                # and must propagate.
+            except RequestRejectedError:
+                # A usable rejection is an unavailable candidate (most notably the
+                # structural pre-Map case) and did not create this Branch.
+                if _client_unusable(client):
+                    raise
+                continue
+            except RequestFaultedError:
                 if _client_unusable(client):
                     raise
                 created_branch_ids.append(branch_id)
                 continue
+            except BaseException:
+                # Earlier singleton candidates are already owned by this scope and the
+                # current candidate may have completed server-side. Carry all of them
+                # with the exact retry so recovery can release the complete set.
+                _defer_retry_cleanup(
+                    client,
+                    instance_id=instance_id,
+                    branch_ids=[*created_branch_ids, branch_id],
+                )
+                raise
 
             created_branch_ids.append(branch_id)
-            if not isinstance(result, Mapping) or result.get("status") != "completed":
-                continue
-            result_dto = result.get("masked_emulator_dto")
-            if not isinstance(result_dto, Mapping):
-                continue
-            hp = _finite_number(result_dto.get("hp"))
-            if hp is None or hp <= 0:
-                continue
-            if best_hp is None or hp > best_hp:
+            hp = _hp_from_result(result)
+            if hp is not None and (best_hp is None or hp > best_hp):
                 best_hp = hp
                 best_action_id = action_id
 
@@ -157,9 +218,9 @@ async def best_event_option(
         primary_error = exc
         raise
     finally:
-        # release_branches cancels active Branches before releasing them. Reserve a small
-        # part of the caller's deadline so a completed/faulted evaluation does not consume
-        # the entire budget and make cleanup impossible.
+        # release_branches cancels active Branches before releasing them. Never send a
+        # different request while exact replay is pending; deferred cleanup is performed
+        # by AsyncTrainingApiClient after that replay resolves.
         remaining = overall_deadline - time.monotonic()
         if created_branch_ids and remaining > 0 and not _client_unusable(client):
             try:
@@ -196,6 +257,51 @@ async def best_event_option(
                     "error for instance_id=%s",
                     instance_id,
                 )
+
+
+def _supports_event_batch(client: Any) -> bool:
+    boundaries = getattr(client, "emulate_actions_boundaries", ())
+    return isinstance(boundaries, (set, frozenset, list, tuple)) and (
+        _EVENT_BATCH_BOUNDARY in boundaries
+    )
+
+
+def _defer_retry_cleanup(
+    client: Any,
+    *,
+    instance_id: str,
+    branch_ids: Sequence[str],
+) -> None:
+    retry = getattr(client, "pending_retry", None)
+    defer = getattr(client, "defer_branch_cleanup_after_retry", None)
+    if retry is None or not callable(defer):
+        return
+    defer(retry, instance_id, branch_ids)
+
+
+def _best_from_batch(
+    branch_results: Mapping[str, Any],
+    candidates: Sequence[tuple[str, str, int]],
+) -> str | None:
+    best_action_id: str | None = None
+    best_hp: float | None = None
+    for branch_id, action_id, _ in candidates:
+        result = branch_results.get(branch_id)
+        hp = _hp_from_result(result)
+        if hp is not None and (best_hp is None or hp > best_hp):
+            best_hp = hp
+            best_action_id = action_id
+    return best_action_id
+
+
+def _hp_from_result(result: Any) -> float | None:
+    if not isinstance(result, Mapping) or result.get("status") != "completed":
+        return None
+    result_dto = result.get("masked_emulator_dto")
+    if not isinstance(result_dto, Mapping):
+        return None
+    hp = _finite_number(result_dto.get("hp"))
+    return hp if hp is not None and hp > 0 else None
 
 
 def _client_unusable(client: Any) -> bool:

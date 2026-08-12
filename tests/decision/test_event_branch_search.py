@@ -25,6 +25,9 @@ class _FakeClient:
         invalidate_on_fault: bool = False,
         invalidate_on_reject: bool = False,
         release_error: Exception | None = None,
+        supports_event_batch: bool = True,
+        reject_batch: bool = False,
+        fault_batch: bool = False,
     ) -> None:
         self.hp_by_action = hp_by_action
         self.fault_action_id = fault_action_id
@@ -33,11 +36,72 @@ class _FakeClient:
         self.invalidate_on_fault = invalidate_on_fault
         self.invalidate_on_reject = invalidate_on_reject
         self.release_error = release_error
+        self.reject_batch = reject_batch
+        self.fault_batch = fault_batch
+        self.emulate_actions_boundaries = (
+            frozenset({"event_choice"}) if supports_event_batch else frozenset()
+        )
         self.session_invalid = False
-        self.pending_retry = None
-        self.emulate_calls: list[dict[str, object]] = []
+        self.pending_retry: object | None = None
+        self.emulate_batches: list[list[dict[str, object]]] = []
+        self.emulate_singletons: list[dict[str, object]] = []
         self.released: list[list[str]] = []
         self.release_timeouts: list[float] = []
+        self.deferred_cleanup: list[tuple[object, str, list[str]]] = []
+
+    def _branch_result(self, item: dict[str, object]) -> dict[str, object]:
+        action_id = item["action_id"]
+        if action_id == self.fault_action_id:
+            return {
+                "status": "faulted",
+                "error": "candidate simulation failed",
+            }
+        hp = self.hp_by_action.get(action_id)
+        if hp is None:
+            return {"status": "faulted"}
+        return {
+            "status": "completed",
+            "masked_emulator_dto": {"hp": hp, "boundary": "map_select"},
+        }
+
+    async def emulate_actions(
+        self,
+        instance_id,
+        items,
+        *,
+        timeout_s,
+        simulation_options=None,
+    ):
+        batch = [dict(item) for item in items]
+        self.emulate_batches.append(batch)
+        if any(item["action_id"] == self.transport_fail_action_id for item in batch):
+            self.pending_retry = object()
+            raise TransportError("candidate transport failed", completion_uncertain=True)
+        if self.reject_batch:
+            self.session_invalid = self.invalidate_on_reject
+            raise RequestRejectedError(
+                {
+                    "operation": "emulate_actions",
+                    "status": "rejected",
+                    "fault_kind": "invalid_action",
+                    "error": "batch request rejected",
+                }
+            )
+        if self.fault_batch:
+            self.session_invalid = self.invalidate_on_fault
+            raise RequestFaultedError(
+                {
+                    "operation": "emulate_actions",
+                    "status": "faulted",
+                    "error": "batch request faulted",
+                }
+            )
+        return {
+            "status": "completed",
+            "branch_results": {
+                item["branch_id"]: self._branch_result(item) for item in batch
+            },
+        }
 
     async def emulate_action(
         self,
@@ -49,15 +113,16 @@ class _FakeClient:
         action_id,
         *,
         timeout_s,
+        simulation_options=None,
     ):
-        self.emulate_calls.append(
-            {
-                "branch_id": branch_id,
-                "action_id": action_id,
-                "rng_id": rng_id,
-                "timeout_s": timeout_s,
-            }
-        )
+        item = {
+            "parent_branch_id": parent_branch_id,
+            "branch_id": branch_id,
+            "rng_id": rng_id,
+            "decision_point_id": decision_point_id,
+            "action_id": action_id,
+        }
+        self.emulate_singletons.append(item)
         if action_id == self.transport_fail_action_id:
             self.pending_retry = object()
             raise TransportError("candidate transport failed", completion_uncertain=True)
@@ -80,13 +145,10 @@ class _FakeClient:
                     "error": "candidate simulation failed",
                 }
             )
-        hp = self.hp_by_action.get(action_id)
-        if hp is None:
-            return {"status": "faulted"}
-        return {
-            "status": "completed",
-            "masked_emulator_dto": {"hp": hp, "boundary": "map_select"},
-        }
+        return self._branch_result(item)
+
+    def defer_branch_cleanup_after_retry(self, retry, instance_id, branch_ids):
+        self.deferred_cleanup.append((retry, instance_id, list(branch_ids)))
 
     async def release_branches(self, instance_id, branch_ids, *, timeout_s):
         self.released.append(list(branch_ids))
@@ -114,8 +176,9 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "a-overcome")
-        self.assertEqual(len(client.emulate_calls), 2)
-        branch_ids = {call["branch_id"] for call in client.emulate_calls}
+        self.assertEqual(len(client.emulate_batches), 1)
+        self.assertEqual(len(client.emulate_batches[0]), 2)
+        branch_ids = {item["branch_id"] for item in client.emulate_batches[0]}
         self.assertEqual(set(client.released[0]), branch_ids)
         self.assertLess(client.release_timeouts[0], 5.0)
 
@@ -130,7 +193,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
             timeout_s=5.0,
         )
 
-        rng_ids = [call["rng_id"] for call in client.emulate_calls]
+        rng_ids = [item["rng_id"] for item in client.emulate_batches[0]]
         self.assertEqual(rng_ids, [1, 2])
         self.assertNotIn(0, rng_ids)
 
@@ -193,9 +256,10 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result_empty)
         self.assertIsNone(result_one)
-        self.assertEqual(client.emulate_calls, [])
+        self.assertEqual(client.emulate_batches, [])
+        self.assertEqual(client.emulate_singletons, [])
 
-    async def test_one_candidate_fault_does_not_sink_the_others(self) -> None:
+    async def test_one_branch_fault_in_batch_does_not_sink_the_others(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
             fault_action_id="a-hold-on",
@@ -212,13 +276,59 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "a-overcome")
         self.assertEqual(len(client.released[0]), 2)
 
-    async def test_one_candidate_rejection_does_not_sink_the_others(self) -> None:
-        # Every run's very first decision (the pre-Map-snapshot NEOW-style event) is
-        # rejected by construction (see module docstring) - a rejection here must fall
-        # back to the heuristic selector, not abort the whole run.
+    async def test_pre_map_batch_rejection_returns_none_without_cleanup(self) -> None:
+        client = _FakeClient({}, reject_batch=True)
+
+        result = await best_event_option(
+            client,
+            instance_id="inst-1",
+            decision_point_id="d1",
+            legal_actions=[_OVERCOME, _HOLD_ON],
+            timeout_s=5.0,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(client.emulate_batches), 1)
+        self.assertEqual(client.released, [])
+        self.assertEqual(client.deferred_cleanup, [])
+
+    async def test_session_invalid_batch_rejection_propagates(self) -> None:
+        client = _FakeClient(
+            {},
+            reject_batch=True,
+            invalidate_on_reject=True,
+        )
+
+        with self.assertRaises(RequestRejectedError):
+            await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
+
+        self.assertEqual(client.released, [])
+
+    async def test_request_level_batch_fault_is_cleaned_up_and_returns_none(self) -> None:
+        client = _FakeClient({}, fault_batch=True)
+
+        result = await best_event_option(
+            client,
+            instance_id="inst-1",
+            decision_point_id="d1",
+            legal_actions=[_OVERCOME, _HOLD_ON],
+            timeout_s=5.0,
+        )
+
+        self.assertIsNone(result)
+        batch_ids = [item["branch_id"] for item in client.emulate_batches[0]]
+        self.assertEqual(client.released, [batch_ids])
+
+    async def test_missing_event_batch_capability_falls_back_to_singletons(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
-            reject_action_id="a-hold-on",
+            supports_event_batch=False,
         )
 
         result = await best_event_option(
@@ -230,10 +340,39 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "a-overcome")
+        self.assertEqual(client.emulate_batches, [])
+        self.assertEqual(len(client.emulate_singletons), 2)
+        self.assertEqual(
+            [item["rng_id"] for item in client.emulate_singletons],
+            [1, 2],
+        )
         self.assertEqual(len(client.released[0]), 2)
 
-    async def test_all_candidates_rejected_returns_none(self) -> None:
-        client = _FakeClient({})
+    async def test_singleton_rejection_does_not_sink_the_other_candidate(self) -> None:
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            reject_action_id="a-hold-on",
+            supports_event_batch=False,
+        )
+
+        result = await best_event_option(
+            client,
+            instance_id="inst-1",
+            decision_point_id="d1",
+            legal_actions=[_OVERCOME, _HOLD_ON],
+            timeout_s=5.0,
+        )
+
+        self.assertEqual(result, "a-overcome")
+        self.assertEqual(len(client.emulate_singletons), 2)
+        self.assertEqual(len(client.released), 1)
+        self.assertEqual(len(client.released[0]), 1)
+        released_id = client.released[0][0]
+        successful_id = client.emulate_singletons[0]["branch_id"]
+        self.assertEqual(released_id, successful_id)
+
+    async def test_all_singleton_candidates_rejected_returns_none(self) -> None:
+        client = _FakeClient({}, supports_event_batch=False)
 
         async def reject_both(*args, **kwargs):
             raise RequestRejectedError(
@@ -256,12 +395,14 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
+        self.assertEqual(client.released, [])
 
-    async def test_session_invalid_rejection_propagates(self) -> None:
+    async def test_session_invalid_singleton_rejection_propagates(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
             reject_action_id="a-hold-on",
             invalidate_on_reject=True,
+            supports_event_batch=False,
         )
 
         with self.assertRaises(RequestRejectedError):
@@ -275,11 +416,12 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.released, [])
 
-    async def test_session_invalid_fault_propagates(self) -> None:
+    async def test_session_invalid_singleton_fault_propagates(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
             fault_action_id="a-hold-on",
             invalidate_on_fault=True,
+            supports_event_batch=False,
         )
 
         with self.assertRaises(RequestFaultedError):
@@ -293,7 +435,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.released, [])
 
-    async def test_transport_failure_propagates_instead_of_becoming_a_bad_sample(self) -> None:
+    async def test_transport_uncertainty_defers_full_batch_cleanup_to_exact_retry(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
             transport_fail_action_id="a-hold-on",
@@ -309,6 +451,33 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(client.released, [])
+        self.assertEqual(len(client.deferred_cleanup), 1)
+        _, instance_id, cleanup_ids = client.deferred_cleanup[0]
+        self.assertEqual(instance_id, "inst-1")
+        batch_ids = [item["branch_id"] for item in client.emulate_batches[0]]
+        self.assertEqual(cleanup_ids, batch_ids)
+
+    async def test_singleton_transport_uncertainty_carries_prior_owned_branch(self) -> None:
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            transport_fail_action_id="a-hold-on",
+            supports_event_batch=False,
+        )
+
+        with self.assertRaises(TransportError):
+            await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
+
+        self.assertEqual(client.released, [])
+        self.assertEqual(len(client.deferred_cleanup), 1)
+        _, _, cleanup_ids = client.deferred_cleanup[0]
+        singleton_ids = [item["branch_id"] for item in client.emulate_singletons]
+        self.assertEqual(cleanup_ids, singleton_ids)
 
     async def test_cleanup_completion_uncertain_transport_failure_propagates(self) -> None:
         client = _FakeClient(
@@ -327,9 +496,12 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(client.pending_retry)
 
-    async def test_reserves_deadline_for_cleanup_when_evaluation_budget_expires(self) -> None:
+    async def test_reserves_deadline_for_cleanup_when_singleton_budget_expires(self) -> None:
         clock = [0.0]
-        client = _FakeClient({"a-overcome": 60.0, "a-hold-on": 53.0})
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            supports_event_batch=False,
+        )
         original_emulate = client.emulate_action
 
         async def consume_evaluation_budget(*args, **kwargs):
@@ -352,7 +524,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIsNone(result)
-        self.assertEqual(len(client.emulate_calls), 1)
+        self.assertEqual(len(client.emulate_singletons), 1)
         self.assertEqual(len(client.released), 1)
         self.assertEqual(len(client.released[0]), 1)
         self.assertGreater(client.release_timeouts[0], 0.0)
