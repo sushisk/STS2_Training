@@ -39,8 +39,10 @@ from sts2_training.decision.search_trace import (
     StablePruneTrace,
 )
 from sts2_training.decision.stable_pruner import (
+    STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION,
     StableFrontierPruner,
     StablePruneContext,
+    StablePruneNodeView,
     ValueTopKPruner,
 )
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
@@ -71,6 +73,7 @@ __all__ = [
     "ResolvedNodeTrace",
     "RootActionOracleTarget",
     "SEARCH_MODES",
+    "STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION",
     "SearchTraceCollector",
     "SearchTraceEnd",
     "SearchTraceStart",
@@ -78,6 +81,7 @@ __all__ = [
     "StableNodeOracleTarget",
     "StablePruneContext",
     "StablePruneNodeTrace",
+    "StablePruneNodeView",
     "StablePruneTrace",
     "ValueModel",
     "ValueTopKPruner",
