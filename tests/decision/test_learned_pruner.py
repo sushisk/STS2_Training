@@ -141,7 +141,21 @@ def test_oracle_jsonl_builds_censoring_aware_pairwise_examples(tmp_path: Path) -
     ]
     record = {
         "record_type": "combat_oracle_decision",
+        "record_schema_version": 3,
         "decision_point_id": "d0",
+        "provenance": {
+            "training_commit": "test",
+            "teacher_policy_class": "test.Policy",
+            "teacher_inner_policy_class": "test.Policy",
+            "teacher_coverage_policy_class": None,
+            "teacher_value_class": "test.Value",
+            "teacher_policy_metadata": {},
+            "teacher_inner_policy_metadata": {},
+            "teacher_value_metadata": {},
+            "pruner_name": "value_top_k",
+            "pruner_version": "1",
+            "rng_sampling": "independent",
+        },
         "search_trace": [
             {
                 "event_type": "stable_prune",
