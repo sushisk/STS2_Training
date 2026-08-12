@@ -13,9 +13,10 @@ artifact. Consumers that need exact reconstructed power state must use a differe
 baseline-aware representation instead of this scrub.
 
 To avoid corrupting ordinary data during partial rollouts, a file is scrubbed only
-when its terminal `self_play_run_result` proves both that God Mode was requested
-(`god_mode: true`) and that the Emulator actually reported it active
-(`final_dto.godMode: true`).
+when it contains exactly one `self_play_run_result`, that record is the final non-empty
+record, and it proves both that God Mode was requested (`god_mode: true`) and that the
+Emulator actually reported it active (`final_dto.godMode: true`). This matches the
+self-play contract of one run per JSONL file and fails closed on appended/mixed logs.
 
 `hp`/`maxHp` correction (the player is pinned near max HP throughout) is a separate,
 still-open design question and is intentionally not attempted here - see the proposal
@@ -49,12 +50,12 @@ GOD_MODE_POWER_IDS = frozenset({"STRENGTH_POWER", "BUFFER_POWER", "REGEN_POWER"}
 
 
 class GodModeFlagMissingError(ValueError):
-    """Raised when a file lacks verified evidence that God Mode was actually active.
+    """Raised when a file lacks unambiguous evidence that God Mode was active.
 
-    A file must contain a terminal `self_play_run_result` with both top-level
-    `god_mode: true` (requested) and `final_dto.godMode: true` (observed). Requiring
-    both makes the scrub fail closed if Training is newer than the RL/Emulator process
-    or a partial rollout otherwise ignores the requested opt-in.
+    The one-run-per-file contract requires exactly one terminal `self_play_run_result`,
+    as the final non-empty record, with both top-level `god_mode: true` (requested) and
+    `final_dto.godMode: true` (observed). Requiring all of these makes the scrub fail
+    closed on partial rollouts and on files that were later appended with another run.
     """
 
 
@@ -84,19 +85,19 @@ def strip_god_mode_powers(node: Any) -> Any:
     return node
 
 
+def _is_run_result(record: Any) -> bool:
+    return isinstance(record, dict) and record.get("event") == "self_play_run_result"
+
+
 def _is_verified_god_mode_run_result(record: Any) -> bool:
-    if not (
-        isinstance(record, dict)
-        and record.get("event") == "self_play_run_result"
-        and record.get("god_mode") is True
-    ):
+    if not (_is_run_result(record) and record.get("god_mode") is True):
         return False
     final_dto = record.get("final_dto")
     return isinstance(final_dto, dict) and final_dto.get("godMode") is True
 
 
 def correct_jsonl_file(input_path: Path, output_path: Path) -> int:
-    """Scrub one verified God Mode JSONL log and return records written.
+    """Scrub one verified one-run God Mode JSONL log and return records written.
 
     The historical function/module name says "correct", but the operation is an
     intentional contamination scrub of three training features, not exact power-state
@@ -105,10 +106,18 @@ def correct_jsonl_file(input_path: Path, output_path: Path) -> int:
     """
     lines = [line for line in input_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     records = [json.loads(line) for line in lines]
-    if not any(_is_verified_god_mode_run_result(record) for record in records):
+    run_results = [record for record in records if _is_run_result(record)]
+    verified_terminal = (
+        len(run_results) == 1
+        and bool(records)
+        and records[-1] is run_results[0]
+        and _is_verified_god_mode_run_result(records[-1])
+    )
+    if not verified_terminal:
         raise GodModeFlagMissingError(
-            f"{input_path}: no self_play_run_result with both god_mode=true and "
-            "final_dto.godMode=true - refusing to scrub data without observed God Mode"
+            f"{input_path}: expected exactly one final self_play_run_result with both "
+            "god_mode=true and final_dto.godMode=true - refusing to scrub a mixed, "
+            "appended, or unverified log"
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
