@@ -39,6 +39,9 @@ from sts2_training.decision.pruner_rl import (
 from sts2_training.decision.stable_pruner import STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION
 from sts2_training.runner.stable_pruner_rl import RL_TRAJECTORY_SCHEMA_VERSION
 
+_INTEGRITY_REL_TOL = 1e-9
+_INTEGRITY_ABS_TOL = 1e-9
+
 
 @dataclass(frozen=True)
 class RLUpdateExample:
@@ -96,7 +99,7 @@ def load_update_examples(
                 reward_payload = raw.get("reward")
                 if not isinstance(reward_payload, Mapping):
                     raise ValueError(f"{source}: missing reward")
-                reward = _finite_float(reward_payload.get("total"), f"{source}: reward.total")
+                reward = _validate_reward_contract(raw, reward_payload, source=source)
                 steps_raw = raw.get("steps")
                 if not isinstance(steps_raw, Sequence) or isinstance(
                     steps_raw, (str, bytes, bytearray)
@@ -108,6 +111,7 @@ def load_update_examples(
                 for step in steps:
                     _validate_behavior_step(
                         step,
+                        behavior=behavior,
                         coefficients=coefficients,
                         scale=scale,
                         source=source,
@@ -210,11 +214,17 @@ def updated_artifact_payload(
     payload = dict(base_payload)
     history_raw = payload.get("rl_finetuning_history")
     history = list(history_raw) if isinstance(history_raw, list) else []
+    trajectory_inputs = [
+        {"path": str(path), "sha256": _file_sha256(path)} for path in trajectory_files
+    ]
     update = {
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "training_commit": _training_commit(),
         "parent_artifact_sha256": base_artifact_sha256,
+        # Keep the original path-only field for artifact compatibility while making exact
+        # trajectory bytes independently auditable.
         "trajectory_files": [str(path) for path in trajectory_files],
+        "trajectory_inputs": trajectory_inputs,
         "learning_rate": float(learning_rate),
         "gradient_clip_norm": float(gradient_clip_norm),
         "algorithm": "paired_on_policy_reinforce_plackett_luce",
@@ -263,11 +273,16 @@ def _validate_behavior_contract(
         PRUNER_FEATURE_SCHEMA_VERSION,
         source,
     )
+    temperature = _finite_float(behavior.get("temperature"), f"{source}: behavior.temperature")
+    if temperature <= 0:
+        raise ValueError(f"{source}: behavior.temperature must be positive")
+    _integer(behavior.get("sampler_seed"), f"{source}: behavior.sampler_seed")
 
 
 def _validate_behavior_step(
     step: Mapping[str, Any],
     *,
+    behavior: Mapping[str, Any],
     coefficients: Sequence[float],
     scale: Sequence[float],
     source: str,
@@ -297,7 +312,12 @@ def _validate_behavior_step(
     ]
     for index, (logged, actual) in enumerate(zip(logged_scores, recomputed, strict=True)):
         logged_value = _finite_float(logged, f"{source}: behavior_scores[{index}]")
-        if not math.isclose(logged_value, actual, rel_tol=1e-9, abs_tol=1e-9):
+        if not math.isclose(
+            logged_value,
+            actual,
+            rel_tol=_INTEGRITY_REL_TOL,
+            abs_tol=_INTEGRITY_ABS_TOL,
+        ):
             raise ValueError(
                 f"{source}: behavior score does not match base artifact at index {index}"
             )
@@ -319,9 +339,21 @@ def _validate_behavior_step(
     if returned_indices != expected_returned:
         raise ValueError(f"{source}: returned_indices do not match deterministic survivor order")
 
-    temperature = _finite_float(step.get("temperature"), f"{source}: temperature")
+    temperature = _finite_float(step.get("temperature"), f"{source}: step.temperature")
     if temperature <= 0:
-        raise ValueError(f"{source}: temperature must be positive")
+        raise ValueError(f"{source}: step.temperature must be positive")
+    behavior_temperature = _finite_float(
+        behavior.get("temperature"), f"{source}: behavior.temperature"
+    )
+    if temperature != behavior_temperature:
+        raise ValueError(f"{source}: step.temperature does not match behavior.temperature")
+    sampler_seed = _integer(step.get("sampler_seed"), f"{source}: step.sampler_seed")
+    behavior_seed = _integer(
+        behavior.get("sampler_seed"), f"{source}: behavior.sampler_seed"
+    )
+    if sampler_seed != behavior_seed:
+        raise ValueError(f"{source}: step.sampler_seed does not match behavior.sampler_seed")
+
     expected_logp = plackett_luce_log_probability(
         recomputed,
         sampled_indices,
@@ -331,8 +363,94 @@ def _validate_behavior_step(
         step.get("selection_log_probability"),
         f"{source}: selection_log_probability",
     )
-    if not math.isclose(logged_logp, expected_logp, rel_tol=1e-9, abs_tol=1e-9):
+    if not math.isclose(
+        logged_logp,
+        expected_logp,
+        rel_tol=_INTEGRITY_REL_TOL,
+        abs_tol=_INTEGRITY_ABS_TOL,
+    ):
         raise ValueError(f"{source}: selection_log_probability does not match behavior policy")
+
+
+def _validate_reward_contract(
+    record: Mapping[str, Any], reward: Mapping[str, Any], *, source: str
+) -> float:
+    outcome_delta = _finite_float(reward.get("outcome_delta"), f"{source}: reward.outcome_delta")
+    nodes_delta = _integer(
+        reward.get("nodes_expanded_delta"), f"{source}: reward.nodes_expanded_delta"
+    )
+    beam_ms_delta = _finite_float(
+        reward.get("beam_ms_delta"), f"{source}: reward.beam_ms_delta"
+    )
+    node_cost_weight = _finite_float(
+        reward.get("node_cost_weight"), f"{source}: reward.node_cost_weight"
+    )
+    beam_ms_cost_weight = _finite_float(
+        reward.get("beam_ms_cost_weight"), f"{source}: reward.beam_ms_cost_weight"
+    )
+    if node_cost_weight < 0 or beam_ms_cost_weight < 0:
+        raise ValueError(f"{source}: reward cost weights must be non-negative")
+    total = _finite_float(reward.get("total"), f"{source}: reward.total")
+    recomputed_total = (
+        outcome_delta - node_cost_weight * nodes_delta - beam_ms_cost_weight * beam_ms_delta
+    )
+    _require_close(total, recomputed_total, f"{source}: reward.total")
+
+    paired = record.get("paired_result")
+    if not isinstance(paired, Mapping):
+        raise ValueError(f"{source}: missing paired_result")
+    baseline_score = _outcome_score(paired.get("baseline_outcome"))
+    learned_score = _outcome_score(paired.get("learned_outcome"))
+    if baseline_score is None or learned_score is None:
+        raise ValueError(f"{source}: paired_result outcomes must be resolved win/loss values")
+    _require_close(
+        outcome_delta,
+        learned_score - baseline_score,
+        f"{source}: reward.outcome_delta",
+    )
+
+    baseline_nodes = _integer(
+        paired.get("baseline_nodes_expanded"), f"{source}: paired_result.baseline_nodes_expanded"
+    )
+    learned_nodes = _integer(
+        paired.get("learned_nodes_expanded"), f"{source}: paired_result.learned_nodes_expanded"
+    )
+    if nodes_delta != learned_nodes - baseline_nodes:
+        raise ValueError(f"{source}: reward.nodes_expanded_delta does not match paired_result")
+
+    baseline_beam_ms = _finite_float(
+        paired.get("baseline_beam_total_ms"), f"{source}: paired_result.baseline_beam_total_ms"
+    )
+    learned_beam_ms = _finite_float(
+        paired.get("learned_beam_total_ms"), f"{source}: paired_result.learned_beam_total_ms"
+    )
+    _require_close(
+        beam_ms_delta,
+        learned_beam_ms - baseline_beam_ms,
+        f"{source}: reward.beam_ms_delta",
+    )
+    return total
+
+
+def _outcome_score(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"victory", "win"}:
+        return 1.0
+    if normalized in {"defeat", "loss"}:
+        return 0.0
+    return None
+
+
+def _require_close(actual: float, expected: float, field: str) -> None:
+    if not math.isclose(
+        actual,
+        expected,
+        rel_tol=_INTEGRITY_REL_TOL,
+        abs_tol=_INTEGRITY_ABS_TOL,
+    ):
+        raise ValueError(f"{field} does not match recomputed trajectory value")
 
 
 def _feature_rows(step: Mapping[str, Any], *, width: int) -> tuple[tuple[float, ...], ...]:
@@ -431,16 +549,31 @@ def _finite_float(value: Any, field: str) -> float:
     return result
 
 
-def _positive_int(value: Any, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{field} must be a positive integer")
+def _integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
     return value
+
+
+def _positive_int(value: Any, field: str) -> int:
+    result = _integer(value, field)
+    if result <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return result
 
 
 def _validate_positive_finite(name: str, value: float) -> None:
     result = _finite_float(value, name)
     if result <= 0:
         raise ValueError(f"{name} must be positive")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _training_commit() -> str | None:
