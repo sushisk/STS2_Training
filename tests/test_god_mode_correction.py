@@ -19,6 +19,13 @@ _GOD_MODE_POWERS = [
 ]
 
 
+def _verified_run_result(*, final_dto: dict | None = None) -> dict:
+    dto = {"godMode": True}
+    if final_dto:
+        dto.update(final_dto)
+    return {"event": "self_play_run_result", "god_mode": True, "final_dto": dto}
+
+
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
 
@@ -28,7 +35,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 class StripGodModePowersTest(unittest.TestCase):
-    def test_removes_only_the_three_god_mode_powers(self) -> None:
+    def test_removes_only_the_three_god_mode_power_features(self) -> None:
         dto = {
             "hp": 80,
             "playerPowers": [
@@ -41,6 +48,18 @@ class StripGodModePowersTest(unittest.TestCase):
 
         self.assertEqual(corrected["playerPowers"], [{"id": "VULNERABLE_POWER", "amount": 2}])
         self.assertEqual(corrected["hp"], 80)
+
+    def test_scrub_intentionally_masks_merged_gameplay_stacks_too(self) -> None:
+        dto = {
+            "playerPowers": [
+                {"id": "STRENGTH_POWER", "amount": 1_000_000_004},
+                {"id": "DEXTERITY_POWER", "amount": 4},
+            ]
+        }
+
+        corrected = strip_god_mode_powers(dto)
+
+        self.assertEqual(corrected["playerPowers"], [{"id": "DEXTERITY_POWER", "amount": 4}])
 
     def test_does_not_mutate_input(self) -> None:
         dto = {"playerPowers": list(_GOD_MODE_POWERS)}
@@ -69,7 +88,7 @@ class StripGodModePowersTest(unittest.TestCase):
 
 
 class CorrectJsonlFileTest(unittest.TestCase):
-    def test_refuses_a_file_without_a_god_mode_run_result_record(self) -> None:
+    def test_refuses_a_file_without_a_requested_god_mode_run_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "in.jsonl"
             output_path = Path(tmp) / "out.jsonl"
@@ -77,13 +96,29 @@ class CorrectJsonlFileTest(unittest.TestCase):
                 input_path,
                 [
                     {"event": "selection", "received": {"masked_emulator_dto": {}}},
-                    {"event": "self_play_run_result", "god_mode": False},
+                    {"event": "self_play_run_result", "god_mode": False, "final_dto": {"godMode": False}},
                 ],
             )
 
             with self.assertRaises(GodModeFlagMissingError):
                 correct_jsonl_file(input_path, output_path)
             self.assertFalse(output_path.exists())
+
+    def test_refuses_requested_god_mode_when_emulator_did_not_observe_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for final_dto in ({}, {"godMode": False}):
+                with self.subTest(final_dto=final_dto):
+                    input_path = Path(tmp) / "in.jsonl"
+                    output_path = Path(tmp) / "out.jsonl"
+                    output_path.unlink(missing_ok=True)
+                    _write_jsonl(
+                        input_path,
+                        [{"event": "self_play_run_result", "god_mode": True, "final_dto": final_dto}],
+                    )
+
+                    with self.assertRaises(GodModeFlagMissingError):
+                        correct_jsonl_file(input_path, output_path)
+                    self.assertFalse(output_path.exists())
 
     def test_corrects_every_record_and_preserves_record_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,11 +131,7 @@ class CorrectJsonlFileTest(unittest.TestCase):
                         "event": "selection",
                         "received": {"masked_emulator_dto": {"playerPowers": list(_GOD_MODE_POWERS)}},
                     },
-                    {
-                        "event": "self_play_run_result",
-                        "god_mode": True,
-                        "final_dto": {"playerPowers": list(_GOD_MODE_POWERS)},
-                    },
+                    _verified_run_result(final_dto={"playerPowers": list(_GOD_MODE_POWERS)}),
                 ],
             )
 
@@ -111,6 +142,7 @@ class CorrectJsonlFileTest(unittest.TestCase):
             self.assertEqual(len(written), 2)
             self.assertEqual(written[0]["received"]["masked_emulator_dto"]["playerPowers"], [])
             self.assertEqual(written[1]["final_dto"]["playerPowers"], [])
+            self.assertTrue(written[1]["final_dto"]["godMode"])
 
     def test_never_mutates_the_input_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +150,7 @@ class CorrectJsonlFileTest(unittest.TestCase):
             output_path = Path(tmp) / "out.jsonl"
             _write_jsonl(
                 input_path,
-                [{"event": "self_play_run_result", "god_mode": True, "final_dto": {"playerPowers": list(_GOD_MODE_POWERS)}}],
+                [_verified_run_result(final_dto={"playerPowers": list(_GOD_MODE_POWERS)})],
             )
             original_text = input_path.read_text(encoding="utf-8")
 
@@ -134,13 +166,10 @@ class MainCliTest(unittest.TestCase):
             output_dir = Path(tmp) / "out"
             input_dir.mkdir()
 
-            _write_jsonl(
-                input_dir / "good.jsonl",
-                [{"event": "self_play_run_result", "god_mode": True, "final_dto": {}}],
-            )
+            _write_jsonl(input_dir / "good.jsonl", [_verified_run_result()])
             _write_jsonl(
                 input_dir / "bad.jsonl",
-                [{"event": "self_play_run_result", "god_mode": False, "final_dto": {}}],
+                [{"event": "self_play_run_result", "god_mode": True, "final_dto": {"godMode": False}}],
             )
 
             code = main(["--input-dir", str(input_dir), "--output-dir", str(output_dir)])
@@ -154,10 +183,7 @@ class MainCliTest(unittest.TestCase):
             input_dir = Path(tmp) / "in"
             output_dir = Path(tmp) / "out"
             input_dir.mkdir()
-            _write_jsonl(
-                input_dir / "good.jsonl",
-                [{"event": "self_play_run_result", "god_mode": True, "final_dto": {}}],
-            )
+            _write_jsonl(input_dir / "good.jsonl", [_verified_run_result()])
 
             code = main(["--input-dir", str(input_dir), "--output-dir", str(output_dir)])
 
