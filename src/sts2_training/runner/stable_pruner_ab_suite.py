@@ -40,6 +40,10 @@ from sts2_training.runner.stable_pruner_ab import (
     StablePrunerABSummary,
     summarize_pairs,
 )
+from sts2_training.runner.stable_pruner_ab_stats import (
+    PairedOutcomeStatistics,
+    paired_outcome_statistics,
+)
 
 AB_SUITE_REPORT_SCHEMA_VERSION = 1
 _ARM_ORDERS = ("alternate", "baseline-first", "learned-first")
@@ -65,6 +69,7 @@ class StablePrunerABSuiteReport:
     manifest_sha256: str
     cases: tuple[StablePrunerABCaseResult, ...]
     aggregate: StablePrunerABSummary
+    outcome_statistics: PairedOutcomeStatistics
 
 
 class StablePrunerABSuiteRunner:
@@ -128,11 +133,13 @@ class StablePrunerABSuiteRunner:
             )
             all_pairs.extend(report.pairs)
 
+        pair_tuple = tuple(all_pairs)
         return StablePrunerABSuiteReport(
             schema_version=AB_SUITE_REPORT_SCHEMA_VERSION,
             manifest_sha256=manifest_sha256,
             cases=tuple(case_results),
-            aggregate=summarize_pairs(tuple(all_pairs)),
+            aggregate=summarize_pairs(pair_tuple),
+            outcome_statistics=paired_outcome_statistics(pair_tuple),
         )
 
 
