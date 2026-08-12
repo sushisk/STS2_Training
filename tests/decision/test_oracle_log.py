@@ -9,6 +9,7 @@ from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
 from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION, OracleJsonlWriter
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
+    OracleProvenance,
     OracleTargetMetadata,
     OracleTargets,
 )
@@ -40,6 +41,12 @@ class OracleJsonlWriterTest(unittest.TestCase):
             ),
             trace=(),
             targets=OracleTargets(metadata=metadata, root_actions=(), stable_nodes=()),
+            provenance=OracleProvenance(
+                teacher_policy_class="example.CoveragePolicy",
+                teacher_inner_policy_class="example.Policy",
+                teacher_coverage_policy_class="example.CoveragePolicy",
+                teacher_value_class="example.Value",
+            ),
         )
 
     def test_writer_preserves_masked_dto_targets_and_provenance(self) -> None:
@@ -57,8 +64,6 @@ class OracleJsonlWriterTest(unittest.TestCase):
             record = OracleJsonlWriter(path).write(
                 decision,
                 self._result(),
-                policy_class="example.Policy",
-                value_class="example.Value",
                 training_commit="abc123",
             )
             parsed = json.loads(path.read_text(encoding="utf-8").strip())
@@ -69,6 +74,13 @@ class OracleJsonlWriterTest(unittest.TestCase):
         self.assertEqual(parsed["oracle_targets"]["metadata"]["oracle_beam_width"], 16)
         self.assertEqual(parsed["provenance"]["training_commit"], "abc123")
         self.assertEqual(parsed["provenance"]["rng_sampling"], "independent")
+        self.assertEqual(parsed["provenance"]["teacher_policy_class"], "example.CoveragePolicy")
+        self.assertEqual(parsed["provenance"]["teacher_inner_policy_class"], "example.Policy")
+        self.assertEqual(
+            parsed["provenance"]["teacher_coverage_policy_class"],
+            "example.CoveragePolicy",
+        )
+        self.assertEqual(parsed["provenance"]["teacher_value_class"], "example.Value")
 
     def test_writer_appends_one_record_per_decision(self) -> None:
         decision = {
@@ -82,8 +94,6 @@ class OracleJsonlWriterTest(unittest.TestCase):
                 writer.write(
                     {**decision, "decision_point_id": f"d-{index}"},
                     self._result(),
-                    policy_class="Policy",
-                    value_class="Value",
                 )
             lines = path.read_text(encoding="utf-8").splitlines()
 
