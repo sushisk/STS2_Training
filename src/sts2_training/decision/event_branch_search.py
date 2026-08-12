@@ -11,6 +11,29 @@ submitted together through ``emulate_actions``. Older RL deployments omit that s
 capability, so Training falls back to the existing singleton ``emulate_action`` route
 instead of relying on cross-repository deployment order.
 
+Whole Run implementation note: RL does not clone or retain a ``GameInstance`` per
+public Branch. ``WholeRunInstance`` owns the public ``branch_id`` and Branch bookkeeping.
+For a speculative action it sends ``WholeRunWorkerPool`` a replay recipe consisting of
+the latest Map-boundary snapshot, room id, action prefix, target boundary, action id, and
+(for Events) an ``EventRngReplayPlan``. A worker process owns one persistent
+``WholeRunSession``/``GameInstance`` and reconstructs the requested frontier by loading
+the Map snapshot, entering the room, replaying the prefix, applying the Event RNG
+override at the original hypothesis point, and only then stepping the candidate action.
+The returned result is converted back into the Branch view; descendant Branches are
+reconstructed again from the same Map snapshot with an extended prefix. See
+``STS2_RL/API/instance_whole_run.py`` and ``STS2_RL/Run/worker_pool.py``. This replay
+architecture is also why a Whole Run Event before the first Map snapshot cannot be
+branched.
+
+A usable request-level rejection at this decision point is treated as an unavailable
+sample rather than a fatal run error. In particular, the pre-Map Event that starts a run
+cannot be branched even on an RL server that advertises Event batch support. A rejected
+batch therefore yields no Event score, while singleton fallback skips a rejected
+candidate. Faulted requests are also unusable samples, but may have created Branch
+state and are cleaned up. Transport/protocol failures propagate; completion-uncertain
+requests transfer Branch ownership to their exact retry token so cleanup cannot race the
+replay.
+
 This is an HP-preservation heuristic, not a general Whole Run value function. Candidates
 that fail to resolve, produce a non-finite HP value, or resolve to ``hp <= 0`` are ignored.
 """
@@ -54,7 +77,8 @@ async def best_event_option(
 
     Each candidate is evaluated once under its own positive RNG hypothesis. Returns
     ``None`` when there are fewer than two usable candidates, every candidate faults or
-    resolves to death, or the evaluation budget expires before all candidates are tried.
+    is rejected, resolves to death, or the evaluation budget expires before all
+    candidates are tried.
 
     Branch ownership stays with this lifecycle even across an exact transport replay.
     If an evaluation becomes completion-uncertain, the client is told which Branches
@@ -113,6 +137,21 @@ async def best_event_option(
                     items,
                     timeout_s=remaining,
                 )
+            except RequestRejectedError:
+                # Validation rejection means the batch did not create its candidate
+                # Branches. The common pre-Map Event is expected to take this path.
+                if _client_unusable(client):
+                    raise
+                return None
+            except RequestFaultedError:
+                # A fault consumes the request and may leave any/all candidate Branches
+                # behind, so own them until the common release in ``finally``.
+                if _client_unusable(client):
+                    raise
+                created_branch_ids.extend(
+                    branch_id for branch_id, _, _ in candidates
+                )
+                return None
             except BaseException:
                 # Completion uncertainty applies to the whole batch: any/all Branches
                 # may already exist server-side. Preserve their ownership on the exact
@@ -146,6 +185,12 @@ async def best_event_option(
                     action_id,
                     timeout_s=remaining,
                 )
+            except RequestRejectedError:
+                # A usable rejection is an unavailable candidate (most notably the
+                # structural pre-Map case) and did not create this Branch.
+                if _client_unusable(client):
+                    raise
+                continue
             except RequestFaultedError:
                 if _client_unusable(client):
                     raise
@@ -177,11 +222,7 @@ async def best_event_option(
         # different request while exact replay is pending; deferred cleanup is performed
         # by AsyncTrainingApiClient after that replay resolves.
         remaining = overall_deadline - time.monotonic()
-        if (
-            created_branch_ids
-            and remaining > 0
-            and not _client_unusable(client)
-        ):
+        if created_branch_ids and remaining > 0 and not _client_unusable(client):
             try:
                 await client.release_branches(
                     instance_id,
