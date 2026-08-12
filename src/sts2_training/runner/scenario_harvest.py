@@ -6,10 +6,13 @@ Mirrors STS2_RL's `Combat/battle_emulator.py::build_scenario_from_state()` field
 mapping (the canonical `masked_emulator_dto` -> `CombatScenario` conversion used
 in-process for restore/lookahead), but in pure Python producing the on-disk JSON
 spec shape `oracle_collection.py`'s `_scenario_from_json()` already loads
-(`CombatScenario(**data)`, `EnemyScenario(**enemy)` - card-pile order/upgrade state
-and orbs go through the `extra` escape hatch as `hand_cards`/`draw_pile_cards`/
-`discard_pile_cards`/`exhaust_pile_cards`/`orbs`/`orb_slots`, matching
-`build_scenario_from_spec()`'s accepted structured input).
+(`CombatScenario(**data)`, `EnemyScenario(**enemy)`). Every pile (`hand` and the
+`drawPile`/`discardPile`/`exhaustPile` multisets, mask_version >= 1.2) goes through
+the `extra` escape hatch as `hand_cards`/`draw_pile_cards`/`discard_pile_cards`/
+`exhaust_pile_cards`/`orbs`/`orb_slots`, matching `build_scenario_from_spec()`'s
+accepted structured input - card identity (upgrade level, enchantment, Mad Science
+tinker-time state) is preserved for all four piles; only pile ORDER is genuinely lost
+(Hidden Information, masked server-side before this module ever sees it).
 
 `player_powers`/enemy `powers` always drop the three GOD MODE powers
 (`STRENGTH_POWER`/`BUFFER_POWER`/`REGEN_POWER`) regardless of whether the source
@@ -43,14 +46,28 @@ __all__ = ["dto_to_scenario_spec", "harvest_scenarios_from_jsonl", "main"]
 
 
 def _card_instance(card: JsonObject) -> JsonObject:
+    """Build a `{"card_id","is_upgraded",...}` structured card instance from any DTO
+    card dict - both a `hand` entry and a `drawPile`/`discardPile`/`exhaustPile`
+    multiset record (API/masking.py's `_multiset_of`, mask_version >= 1.2) share this
+    shape (id/upgraded/upgradeLevel/tinkerTimeType/tinkerTimeRider/enchantment), so one
+    function builds a scenario-ready instance from either."""
     instance: JsonObject = {
         "card_id": card["id"],
         "is_upgraded": bool(card.get("upgraded", False)),
     }
+    upgrade_level = card.get("upgradeLevel")
+    if upgrade_level:
+        instance["upgrade_level"] = int(upgrade_level)
     if card.get("tinkerTimeType"):
         instance["tinker_time_type"] = card["tinkerTimeType"]
     if card.get("tinkerTimeRider"):
         instance["tinker_time_rider"] = card["tinkerTimeRider"]
+    enchantment = card.get("enchantment")
+    if enchantment:
+        instance["enchantment"] = {
+            "id": enchantment["id"],
+            "amount": enchantment.get("amount", 1),
+        }
     return instance
 
 
@@ -74,11 +91,16 @@ def _power_stacks(powers: Any) -> list[JsonObject]:
     return result
 
 
-def _expand_multiset(multiset: Any) -> list[str]:
-    """Expand a `{card_id: count}` masked-pile multiset back into a plain id list."""
-    result: list[str] = []
-    for card_id, count in (multiset or {}).items():
-        result.extend([card_id] * int(count))
+def _expand_multiset_cards(multiset: Any) -> list[JsonObject]:
+    """Expand a masked-pile multiset (API/masking.py's `_multiset_of`, mask_version
+    >= 1.2) into full-fidelity `_card_instance` records, repeated `count` times each.
+    Pile order is genuinely Hidden Information and stays lost - per-card upgrade level
+    and enchantment state are recovered (mask_version < 1.2 exposed neither)."""
+    result: list[JsonObject] = []
+    for entry in multiset or []:
+        if not isinstance(entry, dict):
+            continue
+        result.extend([_card_instance(entry)] * int(entry.get("count", 0)))
     return result
 
 
@@ -137,20 +159,26 @@ def dto_to_scenario_spec(dto: JsonObject, *, seed: int) -> JsonObject | None:
     if dto.get("stars") is not None:
         spec["stars"] = int(dto["stars"])
 
-    # "hand" is exposed as a full ordered list of card dicts (upgrade info intact);
-    # "drawPile"/"discardPile"/"exhaustPile" are masked down to {card_id: count}
-    # multisets (API/masking.py's _MULTISET_PILE_KEYS) - order and per-card upgrade
-    # state for cards sitting in those three piles is not recoverable from the DTO,
-    # so they go through the plain id-list fields (repeated `count` times) instead
-    # of the upgrade-preserving *_cards extra used for hand.
-    spec["draw_pile"] = _expand_multiset(dto.get("drawPile"))
-    spec["discard_pile"] = _expand_multiset(dto.get("discardPile"))
-    spec["exhaust_pile"] = _expand_multiset(dto.get("exhaustPile"))
-
+    # "hand" is exposed as a full ordered list of card dicts; "drawPile"/"discardPile"/
+    # "exhaustPile" are masked down to per-distinct-instance multisets (API/masking.py's
+    # _multiset_of, mask_version >= 1.2) - pile ORDER is genuinely lost either way
+    # (Hidden Information), but upgrade/enchantment state is preserved for both via the
+    # upgrade-preserving *_cards extra fields; plain draw_pile/discard_pile/exhaust_pile
+    # stay empty (never both populated for the same pile - see CombatScenario.HandCards
+    # / GameInstance.ResolveCardSpecs's doc comments).
     extra: JsonObject = {}
     hand_cards = [_card_instance(c) for c in dto.get("hand") or []]
     if hand_cards:
         extra["hand_cards"] = hand_cards
+    draw_pile_cards = _expand_multiset_cards(dto.get("drawPile"))
+    if draw_pile_cards:
+        extra["draw_pile_cards"] = draw_pile_cards
+    discard_pile_cards = _expand_multiset_cards(dto.get("discardPile"))
+    if discard_pile_cards:
+        extra["discard_pile_cards"] = discard_pile_cards
+    exhaust_pile_cards = _expand_multiset_cards(dto.get("exhaustPile"))
+    if exhaust_pile_cards:
+        extra["exhaust_pile_cards"] = exhaust_pile_cards
     orb_slots = dto.get("orbSlots")
     if orb_slots is not None:
         extra["orb_slots"] = int(orb_slots)

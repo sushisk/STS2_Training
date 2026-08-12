@@ -19,6 +19,24 @@ def _card(card_id: str, *, upgraded: bool = False) -> dict:
     return {"id": card_id, "type": "Attack", "rarity": "Basic", "cost": 1, "upgraded": upgraded}
 
 
+def _multiset_record(card_id: str, count: int, **overrides) -> dict:
+    record = {
+        "id": card_id,
+        "type": "Attack",
+        "rarity": "Basic",
+        "cost": 1,
+        "targetType": "AnyEnemy",
+        "upgraded": False,
+        "upgradeLevel": 0,
+        "tinkerTimeType": None,
+        "tinkerTimeRider": None,
+        "enchantment": None,
+        "count": count,
+    }
+    record.update(overrides)
+    return record
+
+
 def _combat_start_dto(**overrides) -> dict:
     dto = {
         "characterId": "IRONCLAD",
@@ -43,9 +61,19 @@ def _combat_start_dto(**overrides) -> dict:
             {"id": "VULNERABLE_POWER", "amount": 2, "type": "Debuff"},
         ],
         "hand": [_card("STRIKE_IRONCLAD"), _card("BASH", upgraded=True)],
-        "drawPile": {"DEFEND_IRONCLAD": 1, "STRIKE_IRONCLAD": 2},
-        "discardPile": {},
-        "exhaustPile": {},
+        "drawPile": [
+            _multiset_record("DEFEND_IRONCLAD", 1),
+            _multiset_record("STRIKE_IRONCLAD", 1),
+            _multiset_record(
+                "STRIKE_IRONCLAD",
+                1,
+                upgraded=True,
+                upgradeLevel=1,
+                enchantment={"id": "SHARP", "amount": 1},
+            ),
+        ],
+        "discardPile": [],
+        "exhaustPile": [],
         "orbSlots": None,
         "orbs": [],
         "enemies": [
@@ -89,6 +117,31 @@ class DtoToScenarioSpecTest(unittest.TestCase):
         dto = _combat_start_dto(pendingChoice={"choiceType": "discard"})
         self.assertIsNone(dto_to_scenario_spec(dto, seed=1))
 
+    def test_preserves_hand_card_upgrade_level_and_enchantment(self) -> None:
+        enchanted_card = {
+            "id": "STRIKE_IRONCLAD",
+            "upgraded": True,
+            "upgradeLevel": 1,
+            "enchantment": {"id": "SHARP", "amount": 2, "status": "Normal"},
+        }
+        dto = _combat_start_dto(hand=[enchanted_card])
+
+        spec = dto_to_scenario_spec(dto, seed=1)
+
+        assert spec is not None
+        hand_cards = spec["extra"]["hand_cards"]
+        self.assertEqual(
+            hand_cards,
+            [
+                {
+                    "card_id": "STRIKE_IRONCLAD",
+                    "is_upgraded": True,
+                    "upgrade_level": 1,
+                    "enchantment": {"id": "SHARP", "amount": 2},
+                }
+            ],
+        )
+
     def test_preserves_upgraded_cards_via_extra_hand_cards(self) -> None:
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
 
@@ -104,13 +157,32 @@ class DtoToScenarioSpecTest(unittest.TestCase):
         # Plain piles stay empty - upgrade-preserving *_cards in extra carry the real data.
         self.assertEqual(spec["hand"], [])
 
-    def test_expands_multiset_piles_to_plain_id_lists(self) -> None:
+    def test_expands_multiset_piles_into_extra_cards_preserving_upgrade_state(self) -> None:
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
 
         assert spec is not None
-        self.assertEqual(sorted(spec["draw_pile"]), ["DEFEND_IRONCLAD", "STRIKE_IRONCLAD", "STRIKE_IRONCLAD"])
+        # Plain draw_pile/discard_pile/exhaust_pile stay empty - the upgrade-preserving
+        # *_cards extra fields carry the real data, mirroring hand_cards.
+        self.assertEqual(spec["draw_pile"], [])
         self.assertEqual(spec["discard_pile"], [])
         self.assertEqual(spec["exhaust_pile"], [])
+
+        draw_pile_cards = spec["extra"]["draw_pile_cards"]
+        self.assertEqual(
+            draw_pile_cards,
+            [
+                {"card_id": "DEFEND_IRONCLAD", "is_upgraded": False},
+                {"card_id": "STRIKE_IRONCLAD", "is_upgraded": False},
+                {
+                    "card_id": "STRIKE_IRONCLAD",
+                    "is_upgraded": True,
+                    "upgrade_level": 1,
+                    "enchantment": {"id": "SHARP", "amount": 1},
+                },
+            ],
+        )
+        self.assertNotIn("discard_pile_cards", spec["extra"])
+        self.assertNotIn("exhaust_pile_cards", spec["extra"])
 
     def test_produced_spec_deserializes_into_a_real_combat_scenario(self) -> None:
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=42)
