@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         paths,
         terminal_weight=args.terminal_weight,
         bootstrap_weight=args.bootstrap_weight,
+        allow_mixed_teachers=args.allow_mixed_teachers,
     )
     metrics = evaluate_artifact(pruner, frontiers)
     metrics["teacher_provenance_match"] = provenance_match
