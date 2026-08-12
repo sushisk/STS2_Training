@@ -22,6 +22,7 @@ TEACHER_PROVENANCE_SUMMARY_SCHEMA_VERSION = 1
 _REQUIRED_PROVENANCE_FIELDS = (
     "teacher_policy_class",
     "teacher_inner_policy_class",
+    "teacher_coverage_policy_class",
     "teacher_value_class",
     "teacher_policy_metadata",
     "teacher_inner_policy_metadata",

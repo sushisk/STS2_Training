@@ -63,6 +63,27 @@ def test_single_teacher_summary_retains_complete_provenance(tmp_path: Path) -> N
     assert payload["teachers"][0]["record_count"] == 2
 
 
+def test_missing_coverage_policy_class_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "missing-coverage-policy.jsonl"
+    provenance = _provenance(value_checkpoint="value-a")
+    del provenance["teacher_coverage_policy_class"]
+    _write(path, [_record(provenance)])
+
+    with pytest.raises(ValueError, match="teacher_coverage_policy_class"):
+        inspect_oracle_teacher_provenance([path])
+
+
+def test_null_coverage_policy_class_is_allowed(tmp_path: Path) -> None:
+    path = tmp_path / "null-coverage-policy.jsonl"
+    provenance = _provenance(value_checkpoint="value-a")
+    provenance["teacher_coverage_policy_class"] = None
+    _write(path, [_record(provenance)])
+
+    summary = inspect_oracle_teacher_provenance([path])
+
+    assert summary.to_json()["teachers"][0]["provenance"]["teacher_coverage_policy_class"] is None
+
+
 def test_mixed_teacher_is_rejected_by_default_and_explicitly_recorded_when_allowed(
     tmp_path: Path,
 ) -> None:
