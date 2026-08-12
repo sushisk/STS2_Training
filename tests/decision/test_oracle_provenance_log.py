@@ -57,7 +57,8 @@ class OracleProvenanceLogTest(unittest.TestCase):
             result,
         )
 
-        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 3)
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 4)
+        self.assertEqual(record["record_schema_version"], 4)
         self.assertEqual(
             record["provenance"]["teacher_value_metadata"]["checkpoint"],
             "value-v7",
