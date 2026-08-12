@@ -10,6 +10,7 @@ from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
 from sts2_training.decision.oracle_log import OracleJsonlWriter
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
+    OracleProvenance,
     OracleTargetMetadata,
     OracleTargets,
 )
@@ -51,10 +52,7 @@ class _FakeClient:
 class _FakeCommitEngine:
     def __init__(self, client) -> None:
         self.client = client
-        self.beam_search = SimpleNamespace(
-            _policy=SimpleNamespace(),
-            _value_fn=SimpleNamespace(),
-        )
+        self.beam_search = SimpleNamespace()
         self.decisions: list[str] = []
 
     async def decide(self, instance_id, *, timeout_s, decision):
@@ -92,6 +90,12 @@ class _FakeOracle:
             ),
             trace=(),
             targets=OracleTargets(metadata=metadata, root_actions=(), stable_nodes=()),
+            provenance=OracleProvenance(
+                teacher_policy_class="teacher.Coverage",
+                teacher_inner_policy_class="teacher.Policy",
+                teacher_coverage_policy_class="teacher.Coverage",
+                teacher_value_class="teacher.Value",
+            ),
         )
 
 
@@ -125,6 +129,7 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["decision_point_id"], "d-root")
         self.assertEqual(records[0]["provenance"]["training_commit"], "abc")
+        self.assertEqual(records[0]["provenance"]["teacher_inner_policy_class"], "teacher.Policy")
 
     def test_cli_defaults_to_exhaustive_root_and_runtime_target_beam(self) -> None:
         args = _parse_args(["--scenario", "scenario.json", "--output", "oracle.jsonl"])
