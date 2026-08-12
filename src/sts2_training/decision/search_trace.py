@@ -19,9 +19,9 @@ class SearchTraceStart:
     max_depth: int
     max_continuation_steps: int
     time_budget_ms: float | None
-    exhaustive_root_actions: bool
     pruner_name: str
     pruner_version: str
+    exhaustive_root_actions: bool = False
     event_type: str = field(default="search_start", init=False)
 
 
@@ -46,8 +46,8 @@ class PolicyProposalTrace:
     decision_point_id: str
     legal_actions: tuple[JsonObject, ...]
     candidates: tuple[PolicyCandidateTrace, ...]
-    requested_top_k: int
-    exhaustive_root: bool
+    requested_top_k: int = 0
+    exhaustive_root: bool = False
     event_type: str = field(default="policy_proposal", init=False)
 
 
