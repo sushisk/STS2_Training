@@ -128,19 +128,55 @@ engine = CombatDecisionEngine(client, stable_pruner=pruner)
 The artifact SHA-256 prefix becomes the pruner `version` recorded in search traces, so
 results from different learned artifacts remain distinguishable.
 
-## Evaluation before RL
+## Fixed-seed A/B evaluation before RL
 
-After held-out Oracle evaluation, the next validation step is fixed-seed A/B evaluation
-with identical PolicyModel, ValueModel, beam/time budget, and emulator configuration:
+After held-out Oracle evaluation, validate the artifact against the exact current
+`ValueTopKPruner` baseline with the real emulator:
 
-```text
-ValueTopKPruner  vs  LinearStableFrontierPruner
+```bash
+python -m sts2_training.runner.stable_pruner_ab \
+  --scenario data/scenarios/slime.json \
+  --weights tools/output/stable_pruner_weights.json \
+  --seeds 101,102,103,104 \
+  --search-mode standard \
+  --output tools/output/stable_pruner_ab.json
 ```
 
-Compare root-action agreement/regret where an Oracle teacher is available, plus gameplay
-outcomes and search cost on held-out scenarios. Only after this supervised baseline is
-stable should the search policy be fine-tuned on trajectories induced by its own pruning
-choices.
+Each seed is run twice from the same `CombatScenario`: once with `ValueTopKPruner` and once
+with `LinearStableFrontierPruner`. Both arms receive the same scenario seed and an
+independently constructed `CombatDecisionEngine` with the same Beam configuration and the
+same default Policy/Value implementations. `--arm-order alternate` is the default, so the
+first/second execution order alternates between seed pairs instead of systematically
+favoring one arm through server warm-up or ordering effects.
+
+The report records, per arm:
+
+- final terminal outcome
+- committed action sequence
+- number of decisions and heuristic fallbacks
+- Beam reason / best value per decision
+- nodes expanded and branches created
+- measured Beam search milliseconds and episode elapsed time
+- pruner name/version (the learned artifact version contains its hash prefix)
+
+Action IDs are compared only while the two arms have committed the same action prefix.
+Once a pruner changes a committed action, later states can differ, so subsequent action IDs
+are not treated as paired counterfactuals. The pair report therefore exposes
+`common_action_prefix` and `first_divergence_index`; after divergence, compare terminal
+outcomes and arm-level search cost instead.
+
+The summary reports learned/baseline wins, ties/unknown outcomes, divergence rate, mean
+search cost for each arm, and learned-minus-baseline cost deltas. A gameplay promotion
+decision should combine these real-emulator results with held-out Oracle regret/Recall@K;
+neither one replaces the other.
+
+Real-emulator A/B is intentionally separate from the repo-local hosted unit/contract gate.
+The current CI proves deterministic code/contract behavior but does not attest an exact
+Training/RL runtime pair or gameplay quality.
+
+Only after the supervised artifact is stable under both held-out Oracle evaluation and
+fixed-seed emulator A/B should the search policy be fine-tuned on trajectories induced by
+its own pruning choices.
 
 The per-node ranker is intentionally a baseline. It cannot fully model the value of a
 *set* of retained nodes, especially redundancy among many branches from one root action.
