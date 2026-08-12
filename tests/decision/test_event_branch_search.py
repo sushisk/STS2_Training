@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-from sts2_training.api.contract import ApiOperationError
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.event_branch_search import best_event_option
 
@@ -24,52 +23,42 @@ class _FakeClient:
         self.hp_by_action = hp_by_action
         self.fail_action_id = fail_action_id
         self.transport_fail_action_id = transport_fail_action_id
-        self.session_invalid = False
-        self.emulate_calls: list[dict[str, object]] = []
-        self.cancelled: list[list[str]] = []
+        self.emulate_batches: list[list[dict[str, object]]] = []
         self.released: list[list[str]] = []
         self.release_timeouts: list[float] = []
 
-    async def emulate_action(
+    async def emulate_actions(
         self,
         instance_id,
-        parent_branch_id,
-        branch_id,
-        rng_id,
-        decision_point_id,
-        action_id,
+        items,
         *,
         timeout_s,
+        simulation_options=None,
     ):
-        self.emulate_calls.append(
-            {
-                "branch_id": branch_id,
-                "action_id": action_id,
-                "rng_id": rng_id,
-                "timeout_s": timeout_s,
-            }
-        )
-        if action_id == self.transport_fail_action_id:
+        batch = [dict(item) for item in items]
+        self.emulate_batches.append(batch)
+        if any(item["action_id"] == self.transport_fail_action_id for item in batch):
             raise TransportError("candidate transport failed", completion_uncertain=True)
-        if action_id == self.fail_action_id:
-            raise ApiOperationError(
-                {
-                    "operation": "emulate_action",
+
+        branch_results = {}
+        for item in batch:
+            action_id = item["action_id"]
+            branch_id = item["branch_id"]
+            if action_id == self.fail_action_id:
+                branch_results[branch_id] = {
                     "status": "faulted",
                     "error": "candidate simulation failed",
                 }
-            )
-        hp = self.hp_by_action.get(action_id)
-        if hp is None:
-            return {"status": "faulted"}
-        return {
-            "status": "completed",
-            "masked_emulator_dto": {"hp": hp, "boundary": "map_select"},
-        }
-
-    async def cancel_branches(self, instance_id, branch_ids, *, timeout_s):
-        self.cancelled.append(list(branch_ids))
-        return {}
+                continue
+            hp = self.hp_by_action.get(action_id)
+            if hp is None:
+                branch_results[branch_id] = {"status": "faulted"}
+                continue
+            branch_results[branch_id] = {
+                "status": "completed",
+                "masked_emulator_dto": {"hp": hp, "boundary": "map_select"},
+            }
+        return {"status": "completed", "branch_results": branch_results}
 
     async def release_branches(self, instance_id, branch_ids, *, timeout_s):
         self.released.append(list(branch_ids))
@@ -90,10 +79,10 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "a-overcome")
-        self.assertEqual(len(client.emulate_calls), 2)
-        branch_ids = {call["branch_id"] for call in client.emulate_calls}
+        self.assertEqual(len(client.emulate_batches), 1)
+        self.assertEqual(len(client.emulate_batches[0]), 2)
+        branch_ids = {item["branch_id"] for item in client.emulate_batches[0]}
         self.assertEqual(set(client.released[0]), branch_ids)
-        self.assertEqual(client.cancelled, [])
         self.assertLess(client.release_timeouts[0], 5.0)
 
     async def test_uses_distinct_non_root_rng_hypotheses(self) -> None:
@@ -107,7 +96,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
             timeout_s=5.0,
         )
 
-        rng_ids = [call["rng_id"] for call in client.emulate_calls]
+        rng_ids = [item["rng_id"] for item in client.emulate_batches[0]]
         self.assertEqual(rng_ids, [1, 2])
         self.assertNotIn(0, rng_ids)
 
@@ -170,7 +159,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result_empty)
         self.assertIsNone(result_one)
-        self.assertEqual(client.emulate_calls, [])
+        self.assertEqual(client.emulate_batches, [])
 
     async def test_one_candidate_fault_does_not_sink_the_others(self) -> None:
         client = _FakeClient(
@@ -189,7 +178,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "a-overcome")
         self.assertEqual(len(client.released[0]), 2)
 
-    async def test_transport_failure_propagates_instead_of_becoming_a_bad_sample(self) -> None:
+    async def test_transport_failure_propagates_without_followup_cleanup_request(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
             transport_fail_action_id="a-hold-on",
@@ -204,7 +193,9 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_s=5.0,
             )
 
-        self.assertEqual(len(client.released[0]), 1)
+        # Completion is uncertain for the whole batch. The real client retains an exact
+        # replay token and blocks any different follow-up request, including cleanup.
+        self.assertEqual(client.released, [])
 
 
 if __name__ == "__main__":
