@@ -50,7 +50,7 @@ Pending continuation values are explicitly marked inherited/stale and are not va
 
 Default training budget is intentionally larger than runtime (`beam_width=32`, `top_k_actions=8`, `max_depth=4`), while `target_beam_width` represents the cheaper runtime-style K whose missed branches we want to study. All values remain configurable.
 
-When constructed with `BudgetedOracleCollector.from_beam_engine()`, the teacher policy is deep-copied from the runtime policy. Collection therefore cannot advance a runtime policy's RNG/counters/other mutable inference state. If the policy cannot be copied safely, construction fails closed and callers must provide an independent teacher policy instance explicitly.
+When constructed with `BudgetedOracleCollector.from_beam_engine()`, both the teacher policy and teacher `ValueModel` are deep-copied from the runtime engine. Collection therefore cannot advance runtime RNG/counters/caches/stochastic inference or other mutable model state. If either model cannot be copied safely, construction fails closed and callers must provide independent teacher instances explicitly.
 
 ### Root actions
 
@@ -89,7 +89,7 @@ Ordinary collection uses independent RNG hypotheses, matching current Beam seman
 
 ## Phase 3: executable data collection — implemented
 
-`OracleEpisodeRunner` collects one Oracle record **before each runtime commit**. The committed action is still chosen by the normal `CombatDecisionEngine`, not by the expensive teacher search. Together with teacher-policy state isolation, this keeps the visited-state distribution aligned with the runtime policy/search stack we intend to improve.
+`OracleEpisodeRunner` collects one Oracle record **before each runtime commit**. The committed action is still chosen by the normal `CombatDecisionEngine`, not by the expensive teacher search. Together with teacher policy/Value state isolation, this keeps the visited-state distribution aligned with the runtime policy/search stack we intend to improve.
 
 Records are written by `OracleJsonlWriter` to a dedicated JSONL file, one root Decision per line. Each record contains:
 
@@ -99,8 +99,9 @@ Records are written by `OracleJsonlWriter` to a dedicated JSONL file, one root D
 - stable-pruning targets
 - full search trace
 - teacher outer policy, inner policy, structural-coverage wrapper, Value, pruner, RNG, and optional Training commit provenance
+- JSON-safe teacher policy/value configuration metadata supplied through `oracle_provenance()` (for example heuristic weights, checkpoint/version/config hashes, or RNG-state identity)
 
-Provenance is finalized by `OracleCollectionResult`, not inferred from the runtime commit engine, so a deliberately different teacher policy/value configuration is recorded correctly.
+Provenance is captured by `OracleCollectionResult` at the start of each collection pass, not inferred from the runtime commit engine, so a deliberately different or stateful teacher configuration is recorded correctly. Implementations that return non-JSON-safe provenance fail closed rather than silently producing ambiguous dataset lineage.
 
 This remains separate from `SelectionAudit`.
 
@@ -154,6 +155,6 @@ The abstraction can then grow from stable pruning into `SearchController`: paren
 8. Terminal source requires an explicit exact-terminal-utility contract; arbitrary terminal Value predictions remain censored bootstrap targets.
 9. Common-RNG cross-action sampling remains disabled pending an explicit API semantic guarantee.
 10. Oracle JSONL is separate from normal selection logging and retains raw masked DTOs for re-featurization.
-11. Oracle collection commits actions using the runtime engine and does not advance runtime policy state, preserving the runtime-induced state distribution.
-12. JSONL provenance identifies the actual teacher inner/wrapper policy and Value configuration rather than inferring it from the runtime engine.
+11. Oracle collection commits actions using the runtime engine and does not advance runtime policy or ValueModel state, preserving the runtime-induced state distribution.
+12. JSONL provenance identifies the actual teacher inner/wrapper policy and Value class plus JSON-safe configuration metadata rather than inferring it from the runtime engine.
 13. No learned model or RL dependency is introduced by this PR.
