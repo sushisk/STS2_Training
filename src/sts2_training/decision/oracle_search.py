@@ -432,6 +432,8 @@ def build_oracle_targets(
     pruned before follow-up therefore receives ``no_target`` rather than its current
     ValueModel score, avoiding direct self-imitation of the pruning rule. Intermediate
     states that were subsequently expanded are not treated as final Q outcomes either.
+    A node with a recorded policy proposal is also not a final leaf when that expansion
+    attempt failed to materialize a resolved child.
     """
 
     starts = [event for event in events if isinstance(event, SearchTraceStart)]
@@ -451,11 +453,11 @@ def build_oracle_targets(
 
     resolved = [event for event in events if isinstance(event, ResolvedNodeTrace)]
     prune_events = [event for event in events if isinstance(event, StablePruneTrace)]
+    proposal_events = [event for event in events if isinstance(event, PolicyProposalTrace)]
     root_proposals = [
         event
-        for event in events
-        if isinstance(event, PolicyProposalTrace)
-        and event.parent_branch_id == ROOT_BRANCH_ID
+        for event in proposal_events
+        if event.parent_branch_id == ROOT_BRANCH_ID
     ]
     if len(root_proposals) != 1:
         raise ValueError("oracle target derivation requires exactly one root policy proposal")
@@ -471,12 +473,14 @@ def build_oracle_targets(
         for node in prune.nodes
         if not node.kept
     }
+    expanded_node_ids = {proposal.parent_node_id for proposal in proposal_events}
 
     root_targets = _root_action_targets(
         root_proposal,
         resolved,
         children=children,
         oracle_pruned_node_ids=oracle_pruned_node_ids,
+        expanded_node_ids=expanded_node_ids,
         exhaustive_root_actions=exhaustive_root_actions,
         search_reason=end.reason,
     )
@@ -494,6 +498,7 @@ def build_oracle_targets(
                 candidate
                 for candidate in raw_leaf_descendants
                 if candidate.node_id not in oracle_pruned_node_ids
+                and candidate.node_id not in expanded_node_ids
             ]
             best = max(leaf_descendants, key=lambda candidate: candidate.value, default=None)
             if best is None:
@@ -510,7 +515,14 @@ def build_oracle_targets(
                             candidate.node_id in oracle_pruned_node_ids
                             for candidate in raw_leaf_descendants
                         )
-                        else f"search_ended_before_followup:{end.reason}"
+                        else (
+                            f"oracle_descendant_expansion_without_outcome:{end.reason}"
+                            if any(
+                                candidate.node_id in expanded_node_ids
+                                for candidate in raw_leaf_descendants
+                            )
+                            else f"search_ended_before_followup:{end.reason}"
+                        )
                     )
                 )
                 best_node_id = None
@@ -565,6 +577,7 @@ def _root_action_targets(
     *,
     children: Mapping[str, Sequence[str]],
     oracle_pruned_node_ids: set[str],
+    expanded_node_ids: set[str],
     exhaustive_root_actions: bool,
     search_reason: str,
 ) -> list[RootActionOracleTarget]:
@@ -635,6 +648,7 @@ def _root_action_targets(
                 node
                 for node in raw_leaves
                 if node.node_id not in oracle_pruned_node_ids
+                and node.node_id not in expanded_node_ids
             ]
             best = max(leaves, key=lambda node: node.value, default=None)
             deepest = max((node.combat_depth for node in nodes), default=0)
@@ -645,7 +659,11 @@ def _root_action_targets(
                     if any(
                         node.node_id in oracle_pruned_node_ids for node in raw_leaves
                     )
-                    else f"no_fresh_leaf_outcome:{search_reason}"
+                    else (
+                        f"expansion_attempted_without_outcome:{search_reason}"
+                        if any(node.node_id in expanded_node_ids for node in raw_leaves)
+                        else f"no_fresh_leaf_outcome:{search_reason}"
+                    )
                 )
                 outcomes.append(
                     OracleRngOutcome(
