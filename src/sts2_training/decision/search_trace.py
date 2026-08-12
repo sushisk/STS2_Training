@@ -19,6 +19,7 @@ class SearchTraceStart:
     max_depth: int
     max_continuation_steps: int
     time_budget_ms: float | None
+    exhaustive_root_actions: bool
     pruner_name: str
     pruner_version: str
     event_type: str = field(default="search_start", init=False)
@@ -45,7 +46,45 @@ class PolicyProposalTrace:
     decision_point_id: str
     legal_actions: tuple[JsonObject, ...]
     candidates: tuple[PolicyCandidateTrace, ...]
+    requested_top_k: int
+    exhaustive_root: bool
     event_type: str = field(default="policy_proposal", init=False)
+
+
+@dataclass(frozen=True)
+class ResolvedNodeTrace:
+    """One emulator result materialized as a Beam node.
+
+    ``value_source`` is ``terminal`` or ``value_bootstrap`` only when ``value_is_fresh``
+    is true. Pending continuation nodes carry an inherited parent value and therefore use
+    ``value_source='inherited'``; those values must not become learning targets.
+    """
+
+    search_id: str
+    node_id: str
+    parent_node_id: str
+    branch_id: str
+    parent_branch_id: str
+    root_action_id: str | None
+    rng_id: int
+    decision_point_id: str
+    depth: int
+    combat_depth: int
+    continuation_steps: int
+    value: float
+    value_is_fresh: bool
+    value_source: str
+    state_kind: str
+    resolution: str
+    terminal: bool
+    action_id: str | None
+    action_type: str | None
+    action: JsonObject | None
+    policy_rank: int | None
+    policy_score: float | None
+    post_coverage_rank: int | None
+    candidate_source: str | None
+    event_type: str = field(default="resolved_node", init=False)
 
 
 @dataclass(frozen=True)
@@ -89,7 +128,25 @@ class StablePruneTrace:
     event_type: str = field(default="stable_prune", init=False)
 
 
-SearchTraceEvent: TypeAlias = SearchTraceStart | PolicyProposalTrace | StablePruneTrace
+@dataclass(frozen=True)
+class SearchTraceEnd:
+    search_id: str
+    reason: str
+    best_root_action_id: str | None
+    best_value: float | None
+    depths_completed: int
+    nodes_expanded: int
+    branches_created: int
+    event_type: str = field(default="search_end", init=False)
+
+
+SearchTraceEvent: TypeAlias = (
+    SearchTraceStart
+    | PolicyProposalTrace
+    | ResolvedNodeTrace
+    | StablePruneTrace
+    | SearchTraceEnd
+)
 
 
 class SearchTraceCollector(Protocol):
