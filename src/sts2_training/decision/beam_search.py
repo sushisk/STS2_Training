@@ -39,6 +39,7 @@ from sts2_training.decision.search_trace import (
     PolicyCandidateTrace,
     PolicyProposalTrace,
     SearchTraceCollector,
+    SearchTraceEnd,
     SearchTraceEvent,
     SearchTraceStart,
     StablePruneNodeTrace,
@@ -459,11 +460,24 @@ class BeamSearchEngine:
             if node.root_action_id is not None and _is_macro_resolved(node)
         ]
         if not actionable:
-            return BeamSearchResult(None, None, None, reason, stats)
-        best_node = max(actionable, key=lambda node: node.value)
-        return BeamSearchResult(
-            best_node.root_action_id, best_node.value, best_node, reason, stats
+            result = BeamSearchResult(None, None, None, reason, stats)
+        else:
+            best_node = max(actionable, key=lambda node: node.value)
+            result = BeamSearchResult(
+                best_node.root_action_id, best_node.value, best_node, reason, stats
+            )
+        self._record_trace(
+            SearchTraceEnd(
+                search_id=search_id,
+                reason=result.reason,
+                best_root_action_id=result.best_root_action_id,
+                best_value=result.best_value,
+                depths_completed=result.stats.depths_completed,
+                nodes_expanded=result.stats.nodes_expanded,
+                branches_created=result.stats.branches_created,
+            )
         )
+        return result
 
     def _propose_frontier(
         self,
