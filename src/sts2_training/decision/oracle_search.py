@@ -12,6 +12,7 @@ its semantics.
 from __future__ import annotations
 
 import copy
+import json
 import math
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
@@ -144,12 +145,15 @@ class OracleTargets:
 
 @dataclass(frozen=True)
 class OracleProvenance:
-    """Identity of the actual teacher inference stack used for collection."""
+    """Identity and configuration of the actual teacher inference stack."""
 
     teacher_policy_class: str
     teacher_inner_policy_class: str
     teacher_coverage_policy_class: str | None
     teacher_value_class: str
+    teacher_policy_metadata: JsonObject = field(default_factory=dict)
+    teacher_inner_policy_metadata: JsonObject = field(default_factory=dict)
+    teacher_value_metadata: JsonObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -328,7 +332,6 @@ class BudgetedOracleCollector:
         self._value_fn = value_fn
         self.config = config or OracleCollectionConfig()
         self._stable_pruner = stable_pruner or ValueTopKPruner()
-        self._provenance = _oracle_provenance(policy, value_fn)
 
     @classmethod
     def from_beam_engine(
@@ -339,10 +342,11 @@ class BudgetedOracleCollector:
         stable_pruner: StableFrontierPruner | None = None,
     ) -> "BudgetedOracleCollector":
         policy = _independent_policy_copy(engine._policy)  # noqa: SLF001
+        value_fn = _independent_value_copy(engine._value_fn)  # noqa: SLF001
         return cls(
             engine._client,  # noqa: SLF001 - same-package training instrumentation
             policy=policy,
-            value_fn=engine._value_fn,  # noqa: SLF001
+            value_fn=value_fn,
             config=config,
             stable_pruner=stable_pruner,
         )
@@ -366,6 +370,7 @@ class BudgetedOracleCollector:
             descendant_top_k=beam_config.top_k_actions,
             exhaustive_root_actions=self.config.exhaustive_root_actions,
         )
+        provenance = _oracle_provenance(self._policy, self._value_fn)
         engine = _OracleBeamSearchEngine(
             self._client,
             policy=self._policy,
@@ -390,7 +395,7 @@ class BudgetedOracleCollector:
             search_result=result,
             trace=tuple(trace_collector.events),
             targets=targets,
-            provenance=self._provenance,
+            provenance=provenance,
         )
 
 
@@ -711,20 +716,64 @@ def _independent_policy_copy(policy: PolicyModel) -> PolicyModel:
     return copied
 
 
+def _independent_value_copy(value_fn: ValueModel) -> ValueModel:
+    try:
+        copied = copy.deepcopy(value_fn)
+    except Exception as exc:  # noqa: BLE001 - fail closed rather than sharing runtime state
+        raise TypeError(
+            "BudgetedOracleCollector.from_beam_engine requires a deepcopy-able ValueModel "
+            "so teacher inference cannot mutate runtime value state; construct the "
+            "collector explicitly with an independent ValueModel instance instead"
+        ) from exc
+    if copied is value_fn:
+        raise TypeError(
+            "ValueModel deepcopy returned the runtime ValueModel object; construct the "
+            "oracle explicitly with an independent ValueModel instance"
+        )
+    return copied
+
+
 def _oracle_provenance(policy: PolicyModel, value_fn: ValueModel) -> OracleProvenance:
     policy_class = _qualified_class_name(policy)
+    policy_metadata = _model_provenance_metadata(policy, "PolicyModel")
     if isinstance(policy, CoverageConstrainedPolicy):
         inner_policy_class = _qualified_class_name(policy.inner)
+        inner_policy_metadata = _model_provenance_metadata(
+            policy.inner, "inner PolicyModel"
+        )
         coverage_policy_class = policy_class
     else:
         inner_policy_class = policy_class
+        inner_policy_metadata = policy_metadata
         coverage_policy_class = None
     return OracleProvenance(
         teacher_policy_class=policy_class,
         teacher_inner_policy_class=inner_policy_class,
         teacher_coverage_policy_class=coverage_policy_class,
         teacher_value_class=_qualified_class_name(value_fn),
+        teacher_policy_metadata=policy_metadata,
+        teacher_inner_policy_metadata=inner_policy_metadata,
+        teacher_value_metadata=_model_provenance_metadata(value_fn, "ValueModel"),
     )
+
+
+def _model_provenance_metadata(value: Any, label: str) -> JsonObject:
+    hook = getattr(value, "oracle_provenance", None)
+    if not callable(hook):
+        return {}
+    raw = hook()
+    if not isinstance(raw, Mapping):
+        raise TypeError(f"{label}.oracle_provenance must return a mapping")
+    try:
+        encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        normalized = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"{label}.oracle_provenance must return JSON-serializable finite metadata"
+        ) from exc
+    if not isinstance(normalized, dict):
+        raise TypeError(f"{label}.oracle_provenance must serialize to a JSON object")
+    return normalized
 
 
 def _qualified_class_name(value: Any) -> str:
