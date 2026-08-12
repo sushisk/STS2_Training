@@ -4,7 +4,7 @@ from sts2_training.visualizer.dto_contract import present_event
 from sts2_training.visualizer.page import INDEX_HTML
 
 
-def test_presenter_prefers_formal_emulator_vitals_enemy_identity_and_intent() -> None:
+def test_presenter_prefers_formal_emulator_vitals_floor_block_enemy_identity_and_intent() -> None:
     event = present_event(
         0,
         {
@@ -14,6 +14,9 @@ def test_presenter_prefers_formal_emulator_vitals_enemy_identity_and_intent() ->
                 "masked_emulator_dto": {
                     "hp": 37,
                     "maxHp": 80,
+                    "block": 13,
+                    "actFloor": 4,
+                    "totalFloor": 21,
                     "enemies": [
                         {
                             "id": "JAW_WORM",
@@ -65,6 +68,9 @@ def test_presenter_prefers_formal_emulator_vitals_enemy_identity_and_intent() ->
     frame = event["frame"]
     assert frame["player"]["current_hp"] == 37
     assert frame["player"]["max_hp"] == 80
+    assert frame["player"]["block"] == 13
+    # FLOOR is run-wide, so totalFloor is authoritative over actFloor.
+    assert frame["resources"]["floor"] == 21
 
     attacking_enemy, unnamed_enemy = frame["enemies"]
     assert attacking_enemy["name"] == "Jaw Worm"
@@ -88,6 +94,14 @@ def test_presenter_prefers_formal_emulator_vitals_enemy_identity_and_intent() ->
     assert card_choice["cost"] == 2
     assert system_choice["name"] == "end_turn"
     assert system_choice["name"] != system_choice["action_type"]
+
+
+def test_enhanced_page_keeps_multiple_enemies_inside_arena_and_shows_player_block() -> None:
+    assert "grid-template-columns:repeat(var(--enemy-count,1),minmax(0,1fr))" in INDEX_HTML
+    assert "overflow:hidden" in INDEX_HTML
+    assert "style.setProperty('--enemy-count'" in INDEX_HTML
+    assert "classList.toggle('many-enemies', enemies.length >= 3)" in INDEX_HTML
+    assert "◇ BLOCK ${esc(value.block)}" in INDEX_HTML
 
 
 def test_enhanced_page_renders_enemy_hp_intent_compact_card_choices_and_restart() -> None:
