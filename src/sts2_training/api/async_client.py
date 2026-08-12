@@ -110,10 +110,10 @@ class AsyncTrainingApiClient(ApiContract):
 
         A caller that created speculative Branches must not send ``release_branches``
         while an earlier request is completion-uncertain. Registering the ownership here
-        keeps cleanup in the same serialized lifecycle: once the exact replay succeeds,
-        the client sends the release as the immediately following sequence before
-        returning the recovered result. If that release itself becomes uncertain, its
-        exact request becomes ``pending_retry`` and remains recoverable in the same way.
+        keeps cleanup in the same serialized lifecycle: once the exact replay resolves,
+        the client sends the release as the immediately following sequence before the
+        recovered outcome is returned or re-raised. If that release itself becomes
+        uncertain, its exact request becomes ``pending_retry`` and remains recoverable.
         """
 
         if self._session_invalid:
@@ -243,9 +243,23 @@ class AsyncTrainingApiClient(ApiContract):
                 parent = request.get("parent_branch_id")
                 if not isinstance(parent, str) or not parent:
                     raise ApiProtocolError("retry emulate_action is missing parent_branch_id")
-                result = await self._execute_selected_action(
-                    request, source_branch_id=parent, deadline=deadline
-                )
+                try:
+                    result = await self._execute_selected_action(
+                        request, source_branch_id=parent, deadline=deadline
+                    )
+                except BaseException as primary_error:
+                    # ApiOperationError is definitive and consumes the source sequence;
+                    # protocol/transport uncertainty keeps pending_retry on the source.
+                    # Only the former is safe to follow with the owned Branch release.
+                    if self._pending_retry is None and not self._session_invalid:
+                        try:
+                            await self._complete_deferred_branch_cleanup(
+                                retry_request,
+                                deadline=deadline,
+                            )
+                        except BaseException as cleanup_error:
+                            raise cleanup_error from primary_error
+                    raise
                 await self._complete_deferred_branch_cleanup(
                     retry_request,
                     deadline=deadline,
@@ -256,7 +270,20 @@ class AsyncTrainingApiClient(ApiContract):
                 items = request.get("items")
                 if not isinstance(items, list) or not items:
                     raise ApiProtocolError("retry emulate_actions is missing items")
-                result = await self._execute_emulate_actions(request, deadline=deadline)
+                try:
+                    result = await self._execute_emulate_actions(
+                        request, deadline=deadline
+                    )
+                except BaseException as primary_error:
+                    if self._pending_retry is None and not self._session_invalid:
+                        try:
+                            await self._complete_deferred_branch_cleanup(
+                                retry_request,
+                                deadline=deadline,
+                            )
+                        except BaseException as cleanup_error:
+                            raise cleanup_error from primary_error
+                    raise
                 await self._complete_deferred_branch_cleanup(
                     retry_request,
                     deadline=deadline,
