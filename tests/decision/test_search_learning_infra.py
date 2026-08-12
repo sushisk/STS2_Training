@@ -16,6 +16,7 @@ from sts2_training.decision.search_trace import (
 from sts2_training.decision.stable_pruner import (
     StableFrontierPruner,
     StablePruneContext,
+    StablePruneNodeView,
     ValueTopKPruner,
 )
 from sts2_training.decision.value import ValueModel
@@ -39,11 +40,12 @@ class _ReversePruner(StableFrontierPruner):
     version = "test"
 
     def __init__(self) -> None:
-        self.seen: list[str] = []
+        self.seen: list[StablePruneNodeView] = []
 
     def select(self, frontier, *, k, context):
-        self.seen = [node.branch_id for node in frontier]
-        return list(reversed(frontier))[:k]
+        del context
+        self.seen = list(frontier)
+        return list(reversed(range(len(frontier))))[:k]
 
 
 class _TerminalClient:
@@ -98,6 +100,22 @@ def _node(branch_id: str, value: float, *, parent: str = "root") -> BeamNode:
     )
 
 
+def _view(value: float) -> StablePruneNodeView:
+    return StablePruneNodeView(
+        value=value,
+        root_action_id="root-action",
+        depth=1,
+        combat_depth=1,
+        continuation_steps=0,
+        terminal=False,
+        action_type="card",
+        policy_rank=0,
+        policy_score=None,
+        post_coverage_rank=0,
+        candidate_source="policy",
+    )
+
+
 class StableFrontierPrunerTest(unittest.TestCase):
     def _context(self) -> StablePruneContext:
         return StablePruneContext(
@@ -111,15 +129,13 @@ class StableFrontierPrunerTest(unittest.TestCase):
         )
 
     def test_value_top_k_preserves_existing_tie_order(self) -> None:
-        first = _node("first", 5.0)
-        second = _node("second", 5.0)
-        lower = _node("lower", 1.0)
-        frontier = [first, second, lower]
+        frontier = [_view(5.0), _view(5.0), _view(1.0)]
+        before = list(frontier)
 
         selected = ValueTopKPruner().select(frontier, k=2, context=self._context())
 
-        self.assertEqual([node.branch_id for node in selected], ["first", "second"])
-        self.assertEqual([node.branch_id for node in frontier], ["first", "second", "lower"])
+        self.assertEqual(selected, [0, 1])
+        self.assertEqual(frontier, before)
 
     def test_rejects_non_positive_k(self) -> None:
         with self.assertRaises(ValueError):
@@ -183,7 +199,8 @@ class BeamSearchInstrumentationTest(unittest.TestCase):
             depths_completed=1,
         )
 
-        self.assertEqual(pruner.seen, ["a", "b", "c"])
+        self.assertEqual([view.value for view in pruner.seen], [1.0, 2.0, 3.0])
+        self.assertTrue(all(isinstance(view, StablePruneNodeView) for view in pruner.seen))
         self.assertEqual([node.branch_id for node in selected], ["c", "b"])
         self.assertEqual(len(collector.events), 1)
         event = collector.events[0]
@@ -200,6 +217,10 @@ class BeamSearchInstrumentationTest(unittest.TestCase):
         self.assertEqual([node.kept for node in event.nodes], [False, True, True])
         self.assertEqual(event.nodes[0].node_id, "search:a")
         self.assertEqual(event.nodes[0].parent_node_id, "search:root")
+        self.assertEqual(event.node_views(), tuple(pruner.seen))
+        replay_context = event.to_prune_context()
+        self.assertEqual(replay_context.beam_width, 2)
+        self.assertEqual(replay_context.search_id, "search")
 
     def test_policy_trace_records_legal_actions_and_coverage_provenance(self) -> None:
         collector = InMemorySearchTraceCollector()
