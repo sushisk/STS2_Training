@@ -10,7 +10,7 @@ from typing import Any
 
 from sts2_training.decision.oracle_search import OracleCollectionResult
 
-ORACLE_RECORD_SCHEMA_VERSION = 2
+ORACLE_RECORD_SCHEMA_VERSION = 3
 
 
 def oracle_collection_record(
@@ -46,6 +46,15 @@ def oracle_collection_record(
                 result.provenance.teacher_coverage_policy_class
             ),
             "teacher_value_class": result.provenance.teacher_value_class,
+            "teacher_policy_metadata": _jsonable(
+                result.provenance.teacher_policy_metadata
+            ),
+            "teacher_inner_policy_metadata": _jsonable(
+                result.provenance.teacher_inner_policy_metadata
+            ),
+            "teacher_value_metadata": _jsonable(
+                result.provenance.teacher_value_metadata
+            ),
             "pruner_name": result.targets.metadata.pruner_name,
             "pruner_version": result.targets.metadata.pruner_version,
             "rng_sampling": result.targets.metadata.rng_sampling,
