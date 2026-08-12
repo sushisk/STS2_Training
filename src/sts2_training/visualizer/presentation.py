@@ -45,6 +45,25 @@ def _status_label(value: Any) -> Any:
     return deepcopy(value)
 
 
+def _intent_label(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        label = _pick(
+            value,
+            (
+                "move",
+                "move_id",
+                "moveId",
+                "name",
+                "display_name",
+                "displayName",
+                "id",
+                "type",
+            ),
+        )
+        return deepcopy(dict(value)) if label is None else label
+    return deepcopy(value)
+
+
 def _power_items(value: Any) -> list[Any]:
     """Normalize list-shaped and keyed-map power payloads into power-like objects."""
     if isinstance(value, Mapping):
@@ -103,19 +122,68 @@ def _power_view(value: Any) -> dict[str, Any]:
 
 def _entity_view(value: Any, *, fallback_name: str) -> dict[str, Any]:
     entity = _mapping(value)
-    current_hp = _pick(entity, ("current_hp", "hp", "health", "current_health"))
+    current_hp = _pick(
+        entity,
+        (
+            "current_hp",
+            "currentHp",
+            "hp",
+            "health",
+            "current_health",
+            "currentHealth",
+        ),
+    )
     statuses = _pick(entity, ("statuses", "effects", "buffs"), [])
-    powers = _pick(entity, ("powers", "power_list", "active_powers"), [])
+    powers = _pick(entity, ("powers", "power", "power_list", "active_powers"), [])
+    intent = _pick(
+        entity,
+        (
+            "intent_move",
+            "intentMove",
+            "next_move",
+            "nextMove",
+            "move_intent",
+            "moveIntent",
+            "intent",
+            "intent_damage",
+            "intentDamage",
+        ),
+    )
     return {
         "name": _pick(
             entity,
-            ("name", "display_name", "id", "character_id", "monster_id"),
+            (
+                "name",
+                "display_name",
+                "displayName",
+                "id",
+                "character_id",
+                "characterId",
+                "monster_id",
+                "monsterId",
+                "monster_name",
+                "monsterName",
+            ),
             fallback_name,
         ),
         "current_hp": current_hp,
-        "max_hp": _pick(entity, ("max_hp", "max_health", "health_max"), current_hp),
-        "block": _pick(entity, ("block", "current_block"), 0),
-        "intent": _pick(entity, ("intent", "next_move", "move_intent", "intent_damage")),
+        # Do not collapse a missing max HP to current HP here. The player DTO may
+        # expose Max HP outside the nested player object, so callers still need a
+        # chance to resolve that value before the final fallback.
+        "max_hp": _pick(
+            entity,
+            (
+                "max_hp",
+                "maxhp",
+                "maxHp",
+                "maxHP",
+                "max_health",
+                "maxHealth",
+                "health_max",
+            ),
+        ),
+        "block": _pick(entity, ("block", "current_block", "currentBlock"), 0),
+        "intent": _intent_label(intent),
         "statuses": [_status_label(status) for status in _sequence(statuses)],
         "powers": [_power_view(power) for power in _power_items(powers)],
     }
@@ -152,8 +220,11 @@ def _action_details(action: Mapping[str, Any]) -> list[dict[str, str]]:
         "name",
         "display_name",
         "card_name",
+        "card_id",
+        "cardId",
         "cost",
         "energy_cost",
+        "energyCost",
         "description",
         "text",
         "rules_text",
@@ -185,10 +256,76 @@ def _action_details(action: Mapping[str, Any]) -> list[dict[str, str]]:
     return details[:10]
 
 
-def _action_view(value: Any) -> dict[str, Any]:
+def _card_id(action: Mapping[str, Any]) -> Any:
+    return _pick(
+        action,
+        (
+            "card_id",
+            "cardId",
+            "parameters.card_id",
+            "parameters.cardId",
+            "parameters.card.id",
+            "parameters.card.card_id",
+            "parameters.card.cardId",
+        ),
+    )
+
+
+def _action_name(
+    action: Mapping[str, Any],
+    *,
+    action_id: Any,
+    action_type: Any,
+    prefer_card_id: bool,
+) -> Any:
+    card_id = _card_id(action)
+    if prefer_card_id and card_id is not None:
+        return card_id
+
+    explicit = _pick(
+        action,
+        ("name", "display_name", "displayName", "card_name", "label", "title"),
+    )
+    if explicit is not None:
+        return explicit
+
+    if card_id is not None:
+        return card_id
+
+    if isinstance(action_type, str) and action_type.lower() == "system":
+        system_content = _pick(
+            action,
+            (
+                "content",
+                "command",
+                "system_action",
+                "systemAction",
+                "parameters.content",
+                "parameters.command",
+                "parameters.system_action",
+                "parameters.systemAction",
+                "parameters.action",
+                "parameters.option_id",
+                "parameters.optionId",
+                "parameters.label",
+                "parameters.name",
+            ),
+        )
+        if system_content is not None:
+            formatted = _display_value(system_content)
+            if formatted:
+                return formatted
+
+    # Never use action_type (for example "system" or "card") as the visual label.
+    # The opaque action id is a more useful fallback and preserves the actual choice.
+    return action_id
+
+
+def _action_view(value: Any, *, prefer_card_id: bool = False) -> dict[str, Any]:
     action = _mapping(value)
-    action_id = _pick(action, ("action_id", "id", "card_id", "uuid"), "")
+    action_id = _pick(action, ("action_id", "id", "card_id", "cardId", "uuid"), "")
     action_type = _pick(action, ("action_type", "type"))
+    card_id = _card_id(action)
     details = _action_details(action)
     raw_description = _pick(action, ("description", "text", "rules_text", "effect"), "")
     description = _display_value(raw_description)
@@ -198,14 +335,24 @@ def _action_view(value: Any) -> dict[str, Any]:
     return {
         "action_id": action_id,
         "action_type": action_type,
-        "name": _pick(
+        "card_id": card_id,
+        "name": _action_name(
             action,
-            ("name", "display_name", "card_name", "action_type"),
-            action_id,
+            action_id=action_id,
+            action_type=action_type,
+            prefer_card_id=prefer_card_id,
         ),
         "cost": _pick(
             action,
-            ("cost", "energy_cost", "parameters.cost", "parameters.energy"),
+            (
+                "cost",
+                "energy_cost",
+                "energyCost",
+                "parameters.cost",
+                "parameters.energy",
+                "parameters.energy_cost",
+                "parameters.energyCost",
+            ),
             "",
         ),
         "description": description,
@@ -254,12 +401,25 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
 
     player = _entity_view(player_raw, fallback_name="Player")
     player["name"] = player_or_dto(
-        ("character_id", "character", "name"), player["name"]
+        ("character_id", "characterId", "character", "name"), player["name"]
     )
     if player["current_hp"] is None:
-        player["current_hp"] = player_or_dto(("current_hp", "hp", "health"))
+        player["current_hp"] = player_or_dto(
+            ("current_hp", "currentHp", "hp", "health", "current_health", "currentHealth")
+        )
     if player["max_hp"] is None:
-        player["max_hp"] = player_or_dto(("max_hp", "max_health"), player["current_hp"])
+        player["max_hp"] = player_or_dto(
+            (
+                "max_hp",
+                "maxhp",
+                "maxHp",
+                "maxHP",
+                "max_health",
+                "maxHealth",
+                "health_max",
+            ),
+            player["current_hp"],
+        )
 
     return {
         "boundary": _pick(dto, ("boundary", "room_context.type", "room.type")),
@@ -270,13 +430,15 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
             for index, enemy in enumerate(enemies_raw[:5])
         ],
         "hand": [_action_view(action) for action in hand_raw[:12]],
-        "choices": [_action_view(action) for action in legal_raw[:24]],
+        "choices": [
+            _action_view(action, prefer_card_id=True) for action in legal_raw[:24]
+        ],
         "resources": {
-            "character": player_or_dto(("character_id", "character", "name")),
+            "character": player_or_dto(("character_id", "characterId", "character", "name")),
             "gold": player_or_dto(("gold", "money", "coins")),
             "floor": _pick(dto, ("floor", "floor_number", "current_floor", "map.floor")),
-            "energy": player_or_dto(("energy", "current_energy")),
-            "max_energy": player_or_dto(("max_energy", "energy_max")),
+            "energy": player_or_dto(("energy", "current_energy", "currentEnergy")),
+            "max_energy": player_or_dto(("max_energy", "maxEnergy", "energy_max")),
         },
         "piles": {
             "draw": _pick(dto, ("draw_pile_count", "draw_count", "piles.draw", "deck.draw_count")),

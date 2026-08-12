@@ -66,13 +66,18 @@ class LiveRunController:
 
     def start(self) -> bool:
         with self._lock:
-            if self._state != "idle":
+            if self._state not in {"idle", "completed", "failed"}:
                 return False
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            # Remove stale replay data before handing the path to the runner. The
-            # runner's JSONL writer also opens with append=False.
+            # Every live run owns a fresh log. Recreate the incremental reader as well;
+            # otherwise its previous byte offset would interpret the truncation as an
+            # invalid replay log on the next run.
             self.log_path.write_bytes(b"")
             self.store.clear()
+            self._reader = JsonlLogReader(self.log_path)
+            self._process = None
+            self._error = None
+            self._result = None
             try:
                 self._process = self._process_factory(self.command)
             except BaseException as exc:  # noqa: BLE001 - surface launch failure in UI
