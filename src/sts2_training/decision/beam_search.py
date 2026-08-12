@@ -374,13 +374,9 @@ class BeamSearchEngine:
                 ]
 
                 if continuation_nodes:
-                    # Local continuation beam: policy/item order is the pruning signal;
-                    # ValueModel never sees the unresolved pending-choice DTOs.
                     waiting_stable.extend(stable_nodes)
                     beam = continuation_nodes[: cfg.beam_width]
                 else:
-                    # BeamSearchEngine owns waiting_stable lifecycle and merge order.
-                    # StableFrontierPruner receives only the ordered resolved frontier.
                     stable_nodes.extend(waiting_stable)
                     waiting_stable = []
                     beam = self._prune_stable_frontier(
@@ -657,18 +653,7 @@ class BeamSearchEngine:
         list[BeamNode],
         bool,
     ]:
-        """Fit a Whole Run frontier inside RL's shared active Branch budget.
-
-        For Whole Run, ``max_emulate_actions_items`` is the configured Branch capacity:
-        every live non-root parent and waiting stable sibling consumes one slot until it
-        is released, and every newly submitted child consumes another. Chunking cannot
-        make an oversized depth safe because children from earlier chunks remain active.
-
-        Keep the highest-priority beam parents in existing beam order, keep each selected
-        parent's policy candidates in policy order, then use any remaining capacity for
-        the highest-valued waiting stable siblings. Stable nodes pruned only for capacity
-        remain valid local finished candidates even after their RL Branch is released.
-        """
+        """Fit a Whole Run frontier inside RL's shared active Branch budget."""
         capacity = _server_active_branch_capacity(self._client)
         if capacity is None:
             return list(beam), list(waiting_stable), list(items), list(item_meta), [], False
@@ -779,7 +764,7 @@ class BeamSearchEngine:
 
     def _score_frontier(
         self,
-        item_meta: Sequence[tuple[BeamNode, CandidateProposal, str, int]],
+        item_meta: Sequence[tuple[BeamNode, Any, str, int]],
         branch_results: Mapping[str, Any],
         depth: int | None = None,
     ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool]:
@@ -788,7 +773,7 @@ class BeamSearchEngine:
         resolved: list[
             tuple[
                 BeamNode,
-                CandidateProposal,
+                Any,
                 str,
                 int,
                 Mapping[str, Any],
@@ -873,10 +858,10 @@ class BeamSearchEngine:
                 action_id=candidate.action_id,
                 action_type=action_type,
                 action=None if action is None else dict(action),
-                policy_rank=candidate.policy_rank,
-                policy_score=candidate.policy_score,
-                post_coverage_rank=candidate.post_coverage_rank,
-                candidate_source=candidate.candidate_source,
+                policy_rank=getattr(candidate, "policy_rank", None),
+                policy_score=getattr(candidate, "policy_score", None),
+                post_coverage_rank=getattr(candidate, "post_coverage_rank", None),
+                candidate_source=getattr(candidate, "candidate_source", None),
             )
             cannot_expand = not new_node.decision_point_id or (
                 status == "partial" and not cfg.expand_partial
@@ -1019,7 +1004,6 @@ def _server_batch_limit(client: Any) -> int | None:
 
 
 def _server_active_branch_capacity(client: Any) -> int | None:
-    """Whole Run's published branch capacity, shared by parents, waiters and children."""
     if getattr(client, "instance_type", None) != "whole_run":
         return None
     return _server_batch_limit(client)
@@ -1106,7 +1090,6 @@ def _client_unusable(client: Any) -> bool:
 
 
 def _is_macro_resolved(node: BeamNode) -> bool:
-    """Whether a node is safe to expose as a completed root-action candidate."""
     return node.terminal or not is_continuation_decision(node.masked_emulator_dto)
 
 
