@@ -36,6 +36,26 @@ _LAZY_EXPORTS = {
         "sts2_training.runner.oracle_collection",
         "OracleEpisodeRunner",
     ),
+    "StablePrunerABArmResult": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABArmResult",
+    ),
+    "StablePrunerABPairResult": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABPairResult",
+    ),
+    "StablePrunerABReport": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABReport",
+    ),
+    "StablePrunerABRunner": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABRunner",
+    ),
+    "StablePrunerABSummary": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABSummary",
+    ),
 }
 
 __all__ = [
@@ -50,6 +70,11 @@ __all__ = [
     "OracleEpisodeRunner",
     "SEARCH_MODES",
     "SelfPlayRunResult",
+    "StablePrunerABArmResult",
+    "StablePrunerABPairResult",
+    "StablePrunerABReport",
+    "StablePrunerABRunner",
+    "StablePrunerABSummary",
     "build_engine",
     "resolve_search_mode",
     "run_self_play_batch",
