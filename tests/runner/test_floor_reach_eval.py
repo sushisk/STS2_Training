@@ -1,4 +1,4 @@
-"""Coverage for the floor-reach evaluation harness (no live server required)."""
+"""Tests for floor-reach evaluation without a live server."""
 
 from __future__ import annotations
 
@@ -120,9 +120,7 @@ class RunFloorReachEvalTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(result.decisions_made, 1)
 
     async def test_concurrent_runs_do_not_cross_contaminate_floor_tracking(self) -> None:
-        # Exercises the ContextVar isolation: many concurrent runs, same fixed per-run
-        # trajectory (floor 1 -> 3) - if state leaked between concurrent Tasks, some
-        # results would show an inflated or zeroed max_total_floor.
+        # Run enough evaluations concurrently to catch accidental shared tracking state.
         results = await run_floor_reach_eval(
             character_id="IRONCLAD",
             num_runs=8,
@@ -157,7 +155,7 @@ class RunFloorReachEvalTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SummarizeFloorReachTest(unittest.TestCase):
-    def _result(self, floor: int, *, error: "str | None" = None) -> FloorReachResult:
+    def _result(self, floor: int, *, error: str | None = None) -> FloorReachResult:
         return FloorReachResult(
             run_id="r",
             seed=1,
