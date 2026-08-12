@@ -44,6 +44,12 @@ class ValueModel:
     Pending interactive continuation DTOs are outside this interface's semantic domain.
     Beam resolves those locally before invoking the model. Implement `evaluate` for
     scalar inference or override `evaluate_batch` for real batched learned inference.
+
+    ``exact_terminal_utility`` is a separate, opt-in contract for training labels. The
+    default deliberately returns ``None``: a generic ValueModel prediction at a terminal
+    DTO must not be treated as an uncensored terminal outcome merely because the state is
+    terminal. Implementations may override it only when they can provide an exact utility
+    in the same numeric scale as their value targets.
     """
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
@@ -51,6 +57,11 @@ class ValueModel:
 
     def evaluate_batch(self, dtos: Sequence[Mapping[str, Any]]) -> list[float]:
         return [self.evaluate(dto) for dto in dtos]
+
+    def exact_terminal_utility(
+        self, masked_emulator_dto: Mapping[str, Any]
+    ) -> float | None:
+        return None
 
 
 class HeuristicValueFunction(ValueModel):
@@ -83,15 +94,23 @@ class HeuristicValueFunction(ValueModel):
                 )
 
     def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float:
+        terminal_utility = self.exact_terminal_utility(masked_emulator_dto)
+        if terminal_utility is not None:
+            return terminal_utility
+        features = self._extract_features(masked_emulator_dto)
+        return sum(
+            self._weights.get(name, 0.0) * feature for name, feature in features.items()
+        )
+
+    def exact_terminal_utility(
+        self, masked_emulator_dto: Mapping[str, Any]
+    ) -> float | None:
         outcome = _terminal_outcome(masked_emulator_dto)
         if outcome == "victory":
             return self._weights["victory_bonus"]
         if outcome == "defeat":
             return self._weights["defeat_penalty"]
-        features = self._extract_features(masked_emulator_dto)
-        return sum(
-            self._weights.get(name, 0.0) * feature for name, feature in features.items()
-        )
+        return None
 
     def _extract_features(self, dto: Mapping[str, Any]) -> dict[str, float]:
         observation = CombatObservation.from_dto(dto, strict=True)
