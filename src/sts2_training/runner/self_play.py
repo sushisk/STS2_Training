@@ -44,7 +44,7 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
-from sts2_training.decision.search_modes import resolve_search_mode
+from sts2_training.decision.search_modes import resolve_search_mode, search_mode_uses_beam
 from sts2_training.runner._cli import _positive_int, add_common_arguments, configure_logging
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.start_new_run import start_new_run
@@ -115,14 +115,21 @@ def _run_result_event(
     character_id: str,
     ascension: int,
     episode: EpisodeResult,
+    god_mode: bool,
 ) -> dict[str, Any]:
-    """Build the terminal per-run record that labels a complete self-play log."""
+    """Build the terminal per-run record that labels a complete self-play log.
+
+    ``god_mode`` is stamped at the top level (not just buried in ``final_dto``, which
+    only carries it once the Emulator DTO exposure lands - STS2_Emulator#6) since
+    that's what most aggregation tooling reads first for run-level metadata.
+    """
     return {
         "event": "self_play_run_result",
         "run_id": run_id,
         "seed": seed,
         "character_id": character_id,
         "ascension": ascension,
+        "god_mode": god_mode,
         "instance_id": episode.instance_id,
         "decisions_made": episode.decisions_made,
         "elapsed_s": episode.elapsed_s,
@@ -172,6 +179,7 @@ async def _run_one(
     search_mode: str | BeamSearchConfig | None,
     beam_max_depth: int | None,
     output_dir: Path,
+    god_mode: bool,
 ) -> SelfPlayRunResult:
     log_path = output_dir / f"{run_id}.jsonl"
     logger: JsonlSelectionLogger | None = None
@@ -179,6 +187,13 @@ async def _run_one(
     client: AsyncTrainingApiClient | None = None
     episode: EpisodeResult | None = None
     error: str | None = None
+
+    # God Mode makes death irrelevant, so Beam Search's exploration has nothing
+    # meaningful to search around - always force it off, regardless of what the caller
+    # requested, rather than silently combining an invincible player with search budget
+    # spent evaluating outcomes that can no longer occur.
+    effective_search_mode: str | BeamSearchConfig | None = "none" if god_mode else search_mode
+    effective_beam_max_depth = None if god_mode else beam_max_depth
 
     try:
         logger = JsonlSelectionLogger(log_path)
@@ -188,7 +203,8 @@ async def _run_one(
         await connection.connect()
         engine = CombatDecisionEngine(
             client,
-            beam_config=resolve_search_mode(search_mode, max_depth=beam_max_depth),
+            beam_config=resolve_search_mode(effective_search_mode, max_depth=effective_beam_max_depth),
+            beam_search_enabled=search_mode_uses_beam(effective_search_mode),
             fallback_selector=HeuristicCombatSelector(random.Random(seed)),
         )
         episode = await start_new_run(
@@ -199,6 +215,7 @@ async def _run_one(
             decision_timeout_s=decision_timeout_s,
             max_decisions=max_decisions,
             engine=engine,
+            god_mode=god_mode,
         )
         # SelectionAudit deliberately swallows logger failures so gameplay can continue.
         # Do not append a terminal "complete" record to a log already known to have a
@@ -212,6 +229,7 @@ async def _run_one(
                         character_id=character_id,
                         ascension=ascension,
                         episode=episode,
+                        god_mode=god_mode,
                     )
                 )
             except Exception:  # noqa: BLE001 - tracked logger owns failure reporting
@@ -257,7 +275,8 @@ async def run_self_play_batch(
     max_decisions: int | None = None,
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
-    output_dir: Path = Path("data/self_play"),
+    output_dir: Path | None = None,
+    god_mode: bool = False,
 ) -> list[SelfPlayRunResult]:
     """Run `num_runs` independent `start_new_run` episodes with bounded workers.
 
@@ -267,6 +286,13 @@ async def run_self_play_batch(
     captured per run so one bad interaction does not discard the rest of the batch.
     One random batch seed is expanded to unique per-run game seeds, each embedded in
     its run ID and reused to seed the fallback selector for deterministic replay.
+
+    `god_mode=True` (default False - see STS2_RL#39/#40) makes every run's player
+    invincible for combat-data-diversity collection and forces Beam Search off (see
+    `_run_one`). `output_dir` defaults to `data/self_play/godmode` in that case,
+    `data/self_play` otherwise, so raw God Mode output is separated by construction
+    rather than by caller discipline; pass `output_dir` explicitly to override either
+    default.
     """
     _validate_positive_int("num_runs", num_runs)
     if num_runs > _MAX_GAME_SEED:
@@ -291,7 +317,10 @@ async def run_self_play_batch(
     else:
         factory = connection_factory
 
-    output_dir = Path(output_dir)
+    if output_dir is None:
+        output_dir = Path("data/self_play/godmode") if god_mode else Path("data/self_play")
+    else:
+        output_dir = Path(output_dir)
     batch_tag = f"{_filename_component(character_id)}-{int(time.time())}"
     batch_seed = random.randint(1, _MAX_GAME_SEED)
     results: list[SelfPlayRunResult | None] = [None] * num_runs
@@ -320,6 +349,7 @@ async def run_self_play_batch(
                 search_mode=search_mode,
                 beam_max_depth=beam_max_depth,
                 output_dir=output_dir,
+                god_mode=god_mode,
             )
 
     workers = [asyncio.create_task(_worker()) for _ in range(min(concurrency, num_runs))]
@@ -357,7 +387,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--num-runs", type=_positive_int, required=True)
     parser.add_argument("--concurrency", type=_positive_int, default=4)
-    parser.add_argument("--output-dir", type=Path, default=Path("data/self_play"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="defaults to data/self_play/godmode with --god-mode, data/self_play otherwise",
+    )
+    parser.add_argument(
+        "--god-mode",
+        action="store_true",
+        help=(
+            "invincible player for combat-data-diversity collection (see "
+            "STS2_RL#39/#40); forces Beam Search off and defaults --output-dir to a "
+            "distinct godmode/ subdirectory"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -375,6 +419,7 @@ async def _run(args: argparse.Namespace) -> list[SelfPlayRunResult]:
         search_mode=args.search_mode,
         beam_max_depth=args.beam_depth,
         output_dir=args.output_dir,
+        god_mode=args.god_mode,
     )
 
 

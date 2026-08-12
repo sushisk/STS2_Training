@@ -44,16 +44,19 @@ async def start_new_run(
     engine: CombatDecisionEngine | None = None,
     search_mode: str | BeamSearchConfig | None = None,
     beam_max_depth: int | None = None,
+    god_mode: bool = False,
 ) -> EpisodeResult:
     """`seed=None` (default) picks a fresh random seed via `rng` (or module-level
     `random`) so repeated calls produce different runs; pass `seed` to pin one.
     `search_mode`/`beam_max_depth` select the beam config; pass `engine` instead for
-    full manual control (mutually exclusive, see `episode.build_engine`).
+    full manual control (mutually exclusive, see `episode.build_engine`). `god_mode`
+    is the explicit, per-instance RL data-collection opt-in (see `NewRunConfig`);
+    default False, never silently enabled.
     """
     if seed is None:
         random_source = rng if rng is not None else random
         seed = random_source.randint(1, 2**31 - 1)
-    config = NewRunConfig(character_id=character_id, ascension=ascension, seed=seed)
+    config = NewRunConfig(character_id=character_id, ascension=ascension, seed=seed, god_mode=god_mode)
     return await start_and_run(
         client,
         config.to_instance_config(),
