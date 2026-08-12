@@ -4,10 +4,11 @@ Each seed is run as two independent Combat episodes with identical scenario, pol
 construction, BeamSearchConfig, and emulator seed. The only intended difference is the
 ``StableFrontierPruner`` implementation.
 
-Action IDs are comparable only while both arms have followed the same committed action
-prefix. After the first divergence the states may differ, so the report records the common
-prefix / first divergence and compares later behavior only through arm-level outcomes and
-search-cost metrics.
+``action_id`` is decision-local and therefore is never used to compare separate A/B
+instances. Common-prefix/divergence reporting uses a canonicalized legal-action payload
+with ``action_id``/``is_available`` removed. After the first semantic divergence the states
+may differ, so later behavior is compared only through arm-level outcomes and search-cost
+metrics.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ EngineFactory = Callable[[Any, StableFrontierPruner, BeamSearchConfig], Any]
 
 AB_REPORT_SCHEMA_VERSION = 1
 _ARM_ORDERS = ("alternate", "baseline-first", "learned-first")
+_VOLATILE_ACTION_FIELDS = frozenset({"action_id", "is_available"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,9 @@ class StablePrunerABDecision:
     index: int
     decision_point_id: str
     chosen_action_id: str
+    chosen_action_type: str | None
+    action_semantics: JsonObject
+    action_signature: str
     source: str
     beam_reason: str | None
     beam_best_value: float | None
@@ -217,8 +222,8 @@ class StablePrunerABRunner:
                 if _is_terminal(dto):
                     break
 
-                legal_action_ids = _available_action_ids(dto)
-                if not legal_action_ids:
+                legal_actions = _available_actions_by_id(dto)
+                if not legal_actions:
                     raise NoAvailableActionError(
                         "non-terminal A/B decision has no available legal action",
                         decision=decision,
@@ -232,7 +237,7 @@ class StablePrunerABRunner:
                     decision=decision,
                 )
                 chosen = outcome.chosen_action_id
-                if chosen is None or chosen not in legal_action_ids:
+                if chosen is None or chosen not in legal_actions:
                     raise NoAvailableActionError(
                         "A/B engine did not return an available action",
                         decision=decision,
@@ -242,6 +247,7 @@ class StablePrunerABRunner:
                         index=len(decisions),
                         decision_point_id=decision["decision_point_id"],
                         chosen_action_id=chosen,
+                        chosen_action=legal_actions[chosen],
                         outcome=outcome,
                     )
                 )
@@ -297,8 +303,8 @@ def compare_arm_results(
     baseline: StablePrunerABArmResult,
     learned: StablePrunerABArmResult,
 ) -> StablePrunerABPairResult:
-    baseline_actions = tuple(item.chosen_action_id for item in baseline.decisions)
-    learned_actions = tuple(item.chosen_action_id for item in learned.decisions)
+    baseline_actions = tuple(item.action_signature for item in baseline.decisions)
+    learned_actions = tuple(item.action_signature for item in learned.decisions)
     common_prefix = 0
     for baseline_action, learned_action in zip(baseline_actions, learned_actions, strict=False):
         if baseline_action != learned_action:
@@ -371,15 +377,25 @@ def _decision_metric(
     index: int,
     decision_point_id: str,
     chosen_action_id: str,
+    chosen_action: Mapping[str, Any],
     outcome: DecisionOutcome,
 ) -> StablePrunerABDecision:
+    semantics = _action_semantics(chosen_action)
+    action_type = chosen_action.get("action_type")
+    chosen_action_type = action_type if isinstance(action_type, str) and action_type else None
     result: BeamSearchResult | None = outcome.beam_result
+    common = {
+        "index": index,
+        "decision_point_id": decision_point_id,
+        "chosen_action_id": chosen_action_id,
+        "chosen_action_type": chosen_action_type,
+        "action_semantics": semantics,
+        "action_signature": _action_signature(semantics),
+        "source": outcome.source,
+    }
     if result is None:
         return StablePrunerABDecision(
-            index=index,
-            decision_point_id=decision_point_id,
-            chosen_action_id=chosen_action_id,
-            source=outcome.source,
+            **common,
             beam_reason=None,
             beam_best_value=None,
             nodes_expanded=0,
@@ -387,16 +403,40 @@ def _decision_metric(
             beam_total_ms=0.0,
         )
     return StablePrunerABDecision(
-        index=index,
-        decision_point_id=decision_point_id,
-        chosen_action_id=chosen_action_id,
-        source=outcome.source,
+        **common,
         beam_reason=result.reason,
         beam_best_value=result.best_value,
         nodes_expanded=result.stats.nodes_expanded,
         branches_created=result.stats.branches_created,
         beam_total_ms=result.stats.total_ms,
     )
+
+
+def _action_semantics(action: Mapping[str, Any]) -> JsonObject:
+    return {
+        str(key): _jsonable(value)
+        for key, value in action.items()
+        if key not in _VOLATILE_ACTION_FIELDS
+    }
+
+
+def _action_signature(semantics: Mapping[str, Any]) -> str:
+    return json.dumps(
+        semantics,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def _default_engine_factory(
@@ -450,17 +490,17 @@ def _validated_decision(value: Any) -> tuple[JsonObject, Mapping[str, Any]]:
     return dict(value), dto
 
 
-def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
+def _available_actions_by_id(dto: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     raw = dto.get("legal_actions")
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
-        return set()
-    result: set[str] = set()
+        return {}
+    result: dict[str, Mapping[str, Any]] = {}
     for action in raw:
         if not isinstance(action, Mapping) or action.get("is_available") is False:
             continue
         action_id = action.get("action_id")
         if isinstance(action_id, str) and action_id:
-            result.add(action_id)
+            result[action_id] = action
     return result
 
 
