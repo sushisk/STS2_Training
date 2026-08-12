@@ -72,6 +72,14 @@ _LAZY_EXPORTS = {
         "sts2_training.runner.stable_pruner_ab_suite",
         "StablePrunerABSuiteRunner",
     ),
+    "PairedOutcomeStatistics": (
+        "sts2_training.runner.stable_pruner_ab_stats",
+        "PairedOutcomeStatistics",
+    ),
+    "paired_outcome_statistics": (
+        "sts2_training.runner.stable_pruner_ab_stats",
+        "paired_outcome_statistics",
+    ),
 }
 
 __all__ = [
@@ -84,6 +92,7 @@ __all__ = [
     "NewRunConfig",
     "OracleEpisodeResult",
     "OracleEpisodeRunner",
+    "PairedOutcomeStatistics",
     "SEARCH_MODES",
     "SelfPlayRunResult",
     "StablePrunerABArmResult",
@@ -96,6 +105,7 @@ __all__ = [
     "StablePrunerABSuiteRunner",
     "StablePrunerABSummary",
     "build_engine",
+    "paired_outcome_statistics",
     "resolve_search_mode",
     "run_self_play_batch",
     "start_and_run",
