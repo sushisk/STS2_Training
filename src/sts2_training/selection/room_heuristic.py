@@ -1,18 +1,8 @@
-"""Shared heuristic preference for ``map_room`` (Whole Run map navigation) decisions.
-
-Deliberately separated from `choice_card_heuristic.py`/`heuristic_selector.py`'s combat
-scope, mirroring that module's structure: a pure `legal_actions + masked_emulator_dto ->
-per-action_id score` function, with no side effects and no dependency on any particular
-caller. This is a first pass - `_POINT_TYPE_SCORE` and the low-HP RestSite/Elite
-adjustments are an initial, easily-tunable baseline, not a final strategy.
-
-Missing/malformed room data (no ``point_type``, non-numeric hp/maxHp, etc.) degrades
-that single candidate/run to neutral rather than raising, matching this package's other
-heuristics' "stay neutral on uncertainty" convention.
-"""
+"""Heuristic preference scores for ``map_room`` navigation decisions."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -35,12 +25,7 @@ def room_preference_scores(
     legal_actions: Sequence[JsonObject],
     masked_emulator_dto: Mapping[str, Any],
 ) -> dict[str, float]:
-    """Per-action_id score for every available ``map_room`` candidate, highest-first.
-
-    Returns an empty dict (neutral - callers should fall back to their own default,
-    e.g. uniform random) when there are no ``map_room`` candidates at all.
-    """
-
+    """Return per-action preference scores for available ``map_room`` candidates."""
     room_actions = [
         action for action in legal_actions if action.get("action_type") == MAP_ROOM_ACTION_TYPE
     ]
@@ -48,19 +33,16 @@ def room_preference_scores(
         return {}
 
     hp_ratio = _hp_ratio(masked_emulator_dto)
-
     scores: dict[str, float] = {}
     for action in room_actions:
         action_id = action.get("action_id")
-        if not isinstance(action_id, str) or not action_id:
-            continue
-        scores[action_id] = room_quality_score(action, hp_ratio)
+        if isinstance(action_id, str) and action_id:
+            scores[action_id] = room_quality_score(action, hp_ratio)
     return scores
 
 
-def room_quality_score(room_action: Mapping[str, Any], hp_ratio: "float | None") -> float:
-    """Small metadata-only room quality prior for one ``map_room`` candidate."""
-
+def room_quality_score(room_action: Mapping[str, Any], hp_ratio: float | None) -> float:
+    """Return a metadata-only quality prior for one room candidate."""
     params = room_action.get("parameters")
     point_type = params.get("point_type") if isinstance(params, Mapping) else None
     score = _POINT_TYPE_SCORE.get(point_type, 0.0) if isinstance(point_type, str) else 0.0
@@ -75,7 +57,7 @@ def room_quality_score(room_action: Mapping[str, Any], hp_ratio: "float | None")
     return score
 
 
-def _hp_ratio(masked_emulator_dto: Mapping[str, Any]) -> "float | None":
+def _hp_ratio(masked_emulator_dto: Mapping[str, Any]) -> float | None:
     hp = _finite_number(masked_emulator_dto.get("hp"))
     max_hp = _finite_number(masked_emulator_dto.get("maxHp"))
     if hp is None or max_hp is None or max_hp <= 0:
@@ -83,8 +65,11 @@ def _hp_ratio(masked_emulator_dto: Mapping[str, Any]) -> "float | None":
     return max(0.0, hp) / max_hp
 
 
-def _finite_number(value: Any) -> "float | None":
+def _finite_number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
-    return number if number == number and abs(number) != float("inf") else None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
