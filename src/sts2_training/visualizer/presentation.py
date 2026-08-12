@@ -271,9 +271,15 @@ def _card_id(action: Mapping[str, Any]) -> Any:
     )
 
 
-def _action_name(action: Mapping[str, Any], *, action_id: Any, action_type: Any) -> Any:
+def _action_name(
+    action: Mapping[str, Any],
+    *,
+    action_id: Any,
+    action_type: Any,
+    prefer_card_id: bool,
+) -> Any:
     card_id = _card_id(action)
-    if card_id is not None:
+    if prefer_card_id and card_id is not None:
         return card_id
 
     explicit = _pick(
@@ -282,6 +288,9 @@ def _action_name(action: Mapping[str, Any], *, action_id: Any, action_type: Any)
     )
     if explicit is not None:
         return explicit
+
+    if card_id is not None:
+        return card_id
 
     if isinstance(action_type, str) and action_type.lower() == "system":
         system_content = _pick(
@@ -312,7 +321,7 @@ def _action_name(action: Mapping[str, Any], *, action_id: Any, action_type: Any)
     return action_id
 
 
-def _action_view(value: Any) -> dict[str, Any]:
+def _action_view(value: Any, *, prefer_card_id: bool = False) -> dict[str, Any]:
     action = _mapping(value)
     action_id = _pick(action, ("action_id", "id", "card_id", "cardId", "uuid"), "")
     action_type = _pick(action, ("action_type", "type"))
@@ -327,7 +336,12 @@ def _action_view(value: Any) -> dict[str, Any]:
         "action_id": action_id,
         "action_type": action_type,
         "card_id": card_id,
-        "name": _action_name(action, action_id=action_id, action_type=action_type),
+        "name": _action_name(
+            action,
+            action_id=action_id,
+            action_type=action_type,
+            prefer_card_id=prefer_card_id,
+        ),
         "cost": _pick(
             action,
             (
@@ -416,7 +430,9 @@ def _frame_view(dto: Mapping[str, Any]) -> dict[str, Any]:
             for index, enemy in enumerate(enemies_raw[:5])
         ],
         "hand": [_action_view(action) for action in hand_raw[:12]],
-        "choices": [_action_view(action) for action in legal_raw[:24]],
+        "choices": [
+            _action_view(action, prefer_card_id=True) for action in legal_raw[:24]
+        ],
         "resources": {
             "character": player_or_dto(("character_id", "characterId", "character", "name")),
             "gold": player_or_dto(("gold", "money", "coins")),
