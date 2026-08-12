@@ -19,6 +19,9 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from sts2_training.decision.learned_pruner import LEARNED_PRUNER_ARTIFACT_SCHEMA_VERSION
+from sts2_training.decision.oracle_teacher_provenance import (
+    inspect_oracle_teacher_provenance,
+)
 from sts2_training.decision.pruner_features import (
     PRUNER_FEATURE_NAMES,
     PRUNER_FEATURE_SCHEMA_VERSION,
@@ -28,9 +31,6 @@ from sts2_training.decision.pruner_training_data import (
     PrunerFrontierTrainingExample,
     build_pairwise_examples,
     load_pruner_frontiers,
-)
-from sts2_training.decision.oracle_teacher_provenance import (
-    inspect_oracle_teacher_provenance,
 )
 
 DEFAULT_OUTPUT = Path("tools/output/stable_pruner_weights.json")
@@ -159,8 +159,12 @@ def evaluate_ranker(
         learned_regret.append(best_target - max(node.target_value for node in learned))
         baseline_regret.append(best_target - max(node.target_value for node in baseline))
         teacher_mean = sum(node.target_value for node in teacher) / k
-        learned_mean_gap.append(teacher_mean - sum(node.target_value for node in learned) / k)
-        baseline_mean_gap.append(teacher_mean - sum(node.target_value for node in baseline) / k)
+        learned_mean_gap.append(
+            teacher_mean - sum(node.target_value for node in learned) / k
+        )
+        baseline_mean_gap.append(
+            teacher_mean - sum(node.target_value for node in baseline) / k
+        )
 
     return {
         "frontiers": len(frontiers),
@@ -225,11 +229,15 @@ def _load(
     *,
     terminal_weight: float,
     bootstrap_weight: float,
+    allow_mixed_teachers: bool,
 ) -> list[PrunerFrontierTrainingExample]:
+    if not paths:
+        return []
     return load_pruner_frontiers(
         paths,
         terminal_weight=terminal_weight,
         bootstrap_weight=bootstrap_weight,
+        allow_mixed_teachers=allow_mixed_teachers,
     )
 
 
@@ -297,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         split.train,
         terminal_weight=args.terminal_weight,
         bootstrap_weight=args.bootstrap_weight,
+        allow_mixed_teachers=args.allow_mixed_teachers,
     )
     train_pairs = build_pairwise_examples(
         train_frontiers,
@@ -317,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
                 split.val,
                 terminal_weight=args.terminal_weight,
                 bootstrap_weight=args.bootstrap_weight,
+                allow_mixed_teachers=args.allow_mixed_teachers,
             ),
             min_target_gap=args.min_target_gap,
         ),
@@ -326,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
                 split.test,
                 terminal_weight=args.terminal_weight,
                 bootstrap_weight=args.bootstrap_weight,
+                allow_mixed_teachers=args.allow_mixed_teachers,
             ),
             min_target_gap=args.min_target_gap,
         ),
