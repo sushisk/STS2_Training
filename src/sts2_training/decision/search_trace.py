@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeAlias
 
+from sts2_training.decision.stable_pruner import StablePruneContext, StablePruneNodeView
+
 JsonObject = Mapping[str, Any]
 
 
@@ -111,6 +113,23 @@ class StablePruneNodeTrace:
     post_coverage_rank: int | None
     candidate_source: str | None
 
+    def to_prune_view(self) -> StablePruneNodeView:
+        """Reconstruct exactly the public pruning view for this trace node."""
+
+        return StablePruneNodeView(
+            value=self.value,
+            root_action_id=self.root_action_id,
+            depth=self.depth,
+            combat_depth=self.combat_depth,
+            continuation_steps=self.continuation_steps,
+            terminal=self.terminal,
+            action_type=self.action_type,
+            policy_rank=self.policy_rank,
+            policy_score=self.policy_score,
+            post_coverage_rank=self.post_coverage_rank,
+            candidate_source=self.candidate_source,
+        )
+
 
 @dataclass(frozen=True)
 class StablePruneTrace:
@@ -126,6 +145,41 @@ class StablePruneTrace:
     remaining_time_ms: float | None
     nodes: tuple[StablePruneNodeTrace, ...]
     event_type: str = field(default="stable_prune", init=False)
+
+    def node_views(self) -> tuple[StablePruneNodeView, ...]:
+        """Return runtime-equivalent public views in authoritative frontier order."""
+
+        if len(self.nodes) != self.frontier_size:
+            raise ValueError("StablePruneTrace frontier_size must equal len(nodes)")
+        views: list[StablePruneNodeView] = []
+        for index, node in enumerate(self.nodes):
+            if node.frontier_index_before_prune != index:
+                raise ValueError(
+                    "StablePruneTrace nodes must be stored in authoritative frontier order"
+                )
+            views.append(node.to_prune_view())
+        return tuple(views)
+
+    def to_prune_context(
+        self,
+        *,
+        beam_width: int | None = None,
+    ) -> StablePruneContext:
+        """Reconstruct pruning context, optionally overriding the target beam width.
+
+        The default uses trace ``k``. Offline counterfactual replay can pass a narrower
+        target beam width while keeping every other runtime context field unchanged.
+        """
+
+        return StablePruneContext(
+            search_id=self.search_id,
+            prune_step_id=self.prune_step_id,
+            phase=self.phase,
+            beam_width=self.k if beam_width is None else beam_width,
+            max_depth=self.max_depth,
+            depths_completed=self.depths_completed,
+            remaining_time_ms=self.remaining_time_ms,
+        )
 
 
 @dataclass(frozen=True)
