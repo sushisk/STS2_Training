@@ -120,6 +120,39 @@ class CorrectJsonlFileTest(unittest.TestCase):
                         correct_jsonl_file(input_path, output_path)
                     self.assertFalse(output_path.exists())
 
+    def test_refuses_verified_run_result_when_later_data_was_appended(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "in.jsonl"
+            output_path = Path(tmp) / "out.jsonl"
+            _write_jsonl(
+                input_path,
+                [
+                    _verified_run_result(),
+                    {"event": "selection", "received": {"masked_emulator_dto": {}}},
+                ],
+            )
+
+            with self.assertRaises(GodModeFlagMissingError):
+                correct_jsonl_file(input_path, output_path)
+            self.assertFalse(output_path.exists())
+
+    def test_refuses_multiple_run_results_even_when_the_last_is_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "in.jsonl"
+            output_path = Path(tmp) / "out.jsonl"
+            _write_jsonl(
+                input_path,
+                [
+                    _verified_run_result(),
+                    {"event": "selection", "received": {"masked_emulator_dto": {}}},
+                    _verified_run_result(),
+                ],
+            )
+
+            with self.assertRaises(GodModeFlagMissingError):
+                correct_jsonl_file(input_path, output_path)
+            self.assertFalse(output_path.exists())
+
     def test_corrects_every_record_and_preserves_record_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "in.jsonl"
