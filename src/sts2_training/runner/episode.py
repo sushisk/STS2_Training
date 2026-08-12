@@ -5,7 +5,8 @@ The two entry points differ only in how an instance gets created (see
 `scenario.py`); once `start_instance` returns an `instance_id`, driving it to
 completion is identical regardless of `instance_type`. `CombatDecisionEngine`
 owns decision semantics; this module adds only lifecycle/loop management and
-adapts named performance presets to the runner's full Combat Beam scope.
+adapts named performance presets to the runner's full Combat Beam scope. The
+default ``none`` mode skips Beam Search entirely.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Any
 from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
-from sts2_training.decision.search_modes import resolve_search_mode
+from sts2_training.decision.search_modes import resolve_search_mode, search_mode_uses_beam
 from sts2_training.selection.heuristic_selector import NoAvailableActionError
 
 JsonObject = dict[str, Any]
@@ -77,6 +78,7 @@ def _runner_mode_config(config: BeamSearchConfig) -> BeamSearchConfig:
     whose low-level action-type field stays conservative. The runner is a Combat domain
     adapter, so named/default modes get the full Combat scope here. User-supplied
     BeamSearchConfig objects bypass this helper and keep their explicit semantic scope.
+    Whether Beam actually executes is controlled separately by ``search_mode_uses_beam``.
     """
     return replace(
         config,
@@ -96,9 +98,11 @@ def build_engine(
 ) -> CombatDecisionEngine:
     """Build or validate the engine used by runner entry points.
 
-    Named/default `search_mode` values are performance presets and therefore receive the
-    runner's full Combat semantic scope. A caller-supplied `BeamSearchConfig` is treated as
-    an explicit config and its `beam_searchable_action_types` is preserved.
+    The default ``none`` mode keeps a valid Beam config for introspection but does not
+    execute Beam Search. Explicit named Beam modes (``shallow``, ``standard``, ``deep``,
+    ``wide``) receive the runner's full Combat semantic scope. A caller-supplied
+    `BeamSearchConfig` is treated as an explicit Beam-enabled config and its
+    `beam_searchable_action_types` is preserved.
     """
     if engine is not None:
         if search_mode is not None or beam_max_depth is not None:
@@ -109,10 +113,15 @@ def build_engine(
         _validate_engine_client(client, engine)
         return engine
 
+    beam_search_enabled = search_mode_uses_beam(search_mode)
     beam_config = resolve_search_mode(search_mode, max_depth=beam_max_depth)
     if not isinstance(search_mode, BeamSearchConfig):
         beam_config = _runner_mode_config(beam_config)
-    return CombatDecisionEngine(client, beam_config=beam_config)
+    return CombatDecisionEngine(
+        client,
+        beam_config=beam_config,
+        beam_search_enabled=beam_search_enabled,
+    )
 
 
 class EpisodeLimitExceeded(RuntimeError):
@@ -148,7 +157,7 @@ class EpisodeRunner:
             _validate_engine_client(client, engine)
             self._engine = engine
         else:
-            self._engine = CombatDecisionEngine(client)
+            self._engine = build_engine(client)
 
     async def run(
         self,
