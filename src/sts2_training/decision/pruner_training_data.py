@@ -78,6 +78,7 @@ def load_pruner_frontiers(
         for record in _iter_records(path):
             targets = _stable_target_index(record)
             decision_point_id = _string(record.get("decision_point_id"), "decision_point_id")
+            trace_target_keys: set[tuple[str, str]] = set()
             for event in _sequence(record.get("search_trace")):
                 if not isinstance(event, Mapping) or event.get("event_type") != "stable_prune":
                     continue
@@ -86,18 +87,32 @@ def load_pruner_frontiers(
                 # for learned feature input. This keeps runtime and offline featurization on
                 # exactly StablePruneNodeView + StablePruneContext.
                 trace = _stable_prune_trace(event)
-                step_targets = {
-                    node.node_id: target
+                trace_keys = {
+                    (trace.prune_step_id, node.node_id)
                     for node in trace.nodes
-                    for target in [targets.get((trace.prune_step_id, node.node_id))]
-                    if target is not None
                 }
+                step_target_keys = {
+                    key for key in targets if key[0] == trace.prune_step_id
+                }
+                missing = trace_keys - step_target_keys
+                extra = step_target_keys - trace_keys
+                if missing or extra:
+                    raise ValueError(
+                        f"{path}: stable prune target mismatch for "
+                        f"prune_step_id={trace.prune_step_id!r}: "
+                        f"missing={sorted(missing)!r}, extra={sorted(extra)!r}"
+                    )
+                trace_target_keys.update(trace_keys)
+                step_targets = {
+                    node.node_id: targets[(trace.prune_step_id, node.node_id)]
+                    for node in trace.nodes
+                }
+                if not step_targets:
+                    continue
                 target_widths = {
                     _positive_int(target.get("target_beam_width"), "oracle target_beam_width")
                     for target in step_targets.values()
                 }
-                if not target_widths:
-                    continue
                 if len(target_widths) != 1:
                     raise ValueError(
                         f"mixed target_beam_width values in prune_step_id={trace.prune_step_id!r}"
@@ -113,17 +128,13 @@ def load_pruner_frontiers(
 
                 examples: list[PrunerNodeTrainingExample] = []
                 for node, features in zip(trace.nodes, rows, strict=True):
-                    target = step_targets.get(node.node_id)
-                    raw_target_value = None if target is None else target.get("target_value")
+                    target = step_targets[node.node_id]
+                    raw_target_value = target.get("target_value")
                     numeric_target = (
                         not isinstance(raw_target_value, bool)
                         and isinstance(raw_target_value, (int, float))
                     )
-                    target_source = (
-                        "no_target"
-                        if target is None
-                        else str(target.get("target_source") or "no_target")
-                    )
+                    target_source = str(target.get("target_source") or "no_target")
                     weight = (
                         _target_source_weight(
                             target_source,
@@ -149,16 +160,10 @@ def load_pruner_frontiers(
                             target_source=target_source,
                             target_weight=weight,
                             target_beam_width=target_beam_width,
-                            baseline_would_keep=(
-                                False if target is None else bool(target.get("baseline_would_keep"))
-                            ),
-                            oracle_kept=False if target is None else bool(target.get("oracle_kept")),
-                            censored=True if target is None else bool(target.get("censored")),
-                            censor_reason=(
-                                "missing_oracle_target"
-                                if target is None
-                                else _optional_string(target.get("censor_reason"))
-                            ),
+                            baseline_would_keep=bool(target.get("baseline_would_keep")),
+                            oracle_kept=bool(target.get("oracle_kept")),
+                            censored=bool(target.get("censored")),
+                            censor_reason=_optional_string(target.get("censor_reason")),
                         )
                     )
                 if examples:
@@ -172,6 +177,13 @@ def load_pruner_frontiers(
                             nodes=tuple(examples),
                         )
                     )
+
+            unmatched_targets = set(targets) - trace_target_keys
+            if unmatched_targets:
+                raise ValueError(
+                    f"{path}: Oracle stable targets have no matching stable_prune trace nodes: "
+                    f"{sorted(unmatched_targets)!r}"
+                )
     return frontiers
 
 
@@ -377,15 +389,29 @@ def _iter_records(path: Path) -> Iterable[Mapping[str, Any]]:
 def _stable_target_index(record: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
     oracle_targets = record.get("oracle_targets")
     if not isinstance(oracle_targets, Mapping):
-        return {}
+        raise ValueError("oracle_targets must be an object")
+    raw_targets = oracle_targets.get("stable_nodes")
+    if not isinstance(raw_targets, Sequence) or isinstance(
+        raw_targets, (str, bytes, bytearray)
+    ):
+        raise ValueError("oracle_targets.stable_nodes must be a sequence")
+
     result: dict[tuple[str, str], Mapping[str, Any]] = {}
-    for target in _sequence(oracle_targets.get("stable_nodes")):
+    for index, target in enumerate(raw_targets):
         if not isinstance(target, Mapping):
-            continue
-        prune_step_id = target.get("prune_step_id")
-        node_id = target.get("node_id")
-        if isinstance(prune_step_id, str) and isinstance(node_id, str):
-            result[(prune_step_id, node_id)] = target
+            raise ValueError(f"oracle_targets.stable_nodes[{index}] must be an object")
+        prune_step_id = _string(
+            target.get("prune_step_id"),
+            f"oracle_targets.stable_nodes[{index}].prune_step_id",
+        )
+        node_id = _string(
+            target.get("node_id"),
+            f"oracle_targets.stable_nodes[{index}].node_id",
+        )
+        key = (prune_step_id, node_id)
+        if key in result:
+            raise ValueError(f"duplicate Oracle stable target for key={key!r}")
+        result[key] = target
     return result
 
 
