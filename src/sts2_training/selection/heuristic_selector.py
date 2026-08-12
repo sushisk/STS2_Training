@@ -1,15 +1,10 @@
-"""Placeholder decision logic for the initial data-collection stage.
-
-Picks uniformly at random within a priority-ordered `action_type` category, with one
-canonical-semantics-aware rule for `choice_card` decisions. See `how_to_use.md` for the
-expected input shape and where this plugs into the API client.
-"""
+"""Heuristic action selection for the initial data-collection stage."""
 
 from __future__ import annotations
 
 import random
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sts2_training.selection.action_classification import (
     CARD_ACTION_TYPE,
@@ -19,11 +14,17 @@ from sts2_training.selection.action_classification import (
     CHOICE_REWARD_POTION_TAKE_ACTION_TYPE,
     CHOICE_REWARD_SKIP_ACTION_TYPE,
     CHOICE_SKIP_ACTION_TYPE,
+    MAP_ROOM_ACTION_TYPE,
     JsonObject,
     available_actions,
     group_by_action_type,
 )
 from sts2_training.selection.choice_card_heuristic import choice_card_preference_scores
+from sts2_training.selection.room_heuristic import room_preference_scores
+
+if TYPE_CHECKING:
+    # Keep this import type-only to avoid the decision package's circular import path.
+    from sts2_training.decision.policy import PolicyModel
 
 _CATEGORY_PRIORITY = (
     CARD_ACTION_TYPE,
@@ -34,11 +35,7 @@ _CATEGORY_PRIORITY = (
 
 
 class NoAvailableActionError(RuntimeError):
-    """Raised when a decision has no action Training is willing to select.
-
-    `decision` is optional context for callers that need to distinguish a genuine
-    terminal decision from a malformed/non-terminal decision with no selectable action.
-    """
+    """Raised when a decision has no action Training is willing to select."""
 
     def __init__(
         self,
@@ -51,20 +48,25 @@ class NoAvailableActionError(RuntimeError):
 
 
 class HeuristicCombatSelector:
-    """Classifies `legal_actions` by `action_type` and chooses one candidate.
+    """Choose an available action using category-specific heuristics where defined."""
 
-    Categories are tried in `_CATEGORY_PRIORITY` order; the first non-empty category
-    is chosen from. Canonical v1 `choice_card` semantics use the same card-quality
-    preference as the Beam prior, while missing/malformed/future semantics remain
-    random. Reward decisions receive one conservative potion-specific rule: take a
-    potion when an empty-slot TAKE is explicitly published, otherwise prefer skipping a
-    full-belt PotionReward over randomly discarding an existing potion; if skipping is
-    disallowed, choose among the available replacement slots. Other unknown action types
-    continue to fall back to a single random pool.
-    """
-
-    def __init__(self, rng: random.Random | None = None) -> None:
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        *,
+        epsilon: float = 0.1,
+        policy: PolicyModel | None = None,
+    ) -> None:
+        if not 0.0 <= epsilon <= 1.0:
+            raise ValueError("epsilon must be between 0.0 and 1.0")
         self._rng = rng or random.Random()
+        self._epsilon = epsilon
+        if policy is not None:
+            self._policy = policy
+        else:
+            from sts2_training.decision.policy import PriorHeuristicPolicy
+
+            self._policy = PriorHeuristicPolicy()
 
     def select(
         self,
@@ -88,12 +90,19 @@ class HeuristicCombatSelector:
             return self._choose(potion_replacements)
 
         dto = masked_emulator_dto if masked_emulator_dto is not None else {}
+
+        map_rooms = by_type.get(MAP_ROOM_ACTION_TYPE)
+        if map_rooms:
+            return self._choose_room(map_rooms, dto)
+
         for action_type in _CATEGORY_PRIORITY:
             candidates = by_type.get(action_type)
             if not candidates:
                 continue
             if action_type == CHOICE_CARD_ACTION_TYPE:
                 return self._choose_choice_card(candidates, dto)
+            if action_type == CARD_ACTION_TYPE:
+                return self._choose_card(candidates, dto)
             return self._choose(candidates)
 
         return self._choose(actions)
@@ -104,14 +113,50 @@ class HeuristicCombatSelector:
         masked_emulator_dto: Mapping[str, Any],
     ) -> JsonObject:
         scores = choice_card_preference_scores(candidates, masked_emulator_dto)
+        return self._choose_best_scored(candidates, scores)
+
+    def _choose_card(
+        self,
+        candidates: Sequence[JsonObject],
+        masked_emulator_dto: Mapping[str, Any],
+    ) -> JsonObject:
+        """Use epsilon-greedy selection over the policy's top proposal."""
+        if self._rng.random() < self._epsilon:
+            return self._choose(candidates)
+
+        proposals = self._policy.propose(candidates, masked_emulator_dto, top_k=1)
+        if not proposals:
+            return self._choose(candidates)
+        best_action_id = proposals[0].action_id
+        best_match = next(
+            (action for action in candidates if action.get("action_id") == best_action_id),
+            None,
+        )
+        return best_match if best_match is not None else self._choose(candidates)
+
+    def _choose_room(
+        self,
+        candidates: Sequence[JsonObject],
+        masked_emulator_dto: Mapping[str, Any],
+    ) -> JsonObject:
+        """Use epsilon-greedy selection over room preference scores."""
+        if self._rng.random() < self._epsilon:
+            return self._choose(candidates)
+
+        scores = room_preference_scores(candidates, masked_emulator_dto)
+        return self._choose_best_scored(candidates, scores)
+
+    def _choose_best_scored(
+        self,
+        candidates: Sequence[JsonObject],
+        scores: Mapping[str, float],
+    ) -> JsonObject:
         if not scores:
             return self._choose(candidates)
 
         best_score = max(scores.values())
         preferred = [
-            action
-            for action in candidates
-            if scores.get(action.get("action_id")) == best_score
+            action for action in candidates if scores.get(action.get("action_id")) == best_score
         ]
         return self._choose(preferred or candidates)
 

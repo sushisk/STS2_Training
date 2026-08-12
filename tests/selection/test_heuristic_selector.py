@@ -103,3 +103,86 @@ def test_select_replaces_when_reward_cannot_be_skipped() -> None:
     chosen = selector.select(legal_actions)
 
     assert chosen["action_type"] == "choice_reward_potion_replace"
+
+
+def _card_action(action_id: str, card_id: str) -> dict:
+    action = _action(action_id, "card")
+    action["parameters"] = {"cardId": card_id}
+    return action
+
+
+def _dto_with_hand(*cards: dict) -> dict:
+    return {"hp": 50, "energy": 3, "enemies": [], "hand": list(cards)}
+
+
+def test_select_card_is_greedy_over_policy_score_when_epsilon_is_zero() -> None:
+    legal_actions = [
+        _card_action("a-curse", "ASCENDERS_BANE"),
+        _card_action("a-attack", "STRIKE_IRONCLAD"),
+    ]
+    dto = _dto_with_hand(
+        {"id": "ASCENDERS_BANE", "type": "Curse", "rarity": "Curse"},
+        {"id": "STRIKE_IRONCLAD", "type": "Attack", "rarity": "Basic"},
+    )
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=0.0)
+
+    chosen = selector.select(legal_actions, dto)
+
+    assert chosen["action_id"] == "a-attack"
+
+
+def test_select_card_explores_randomly_when_epsilon_is_one() -> None:
+    legal_actions = [
+        _card_action("a-curse", "ASCENDERS_BANE"),
+        _card_action("a-attack", "STRIKE_IRONCLAD"),
+    ]
+    dto = _dto_with_hand(
+        {"id": "ASCENDERS_BANE", "type": "Curse", "rarity": "Curse"},
+        {"id": "STRIKE_IRONCLAD", "type": "Attack", "rarity": "Basic"},
+    )
+    selector = HeuristicCombatSelector(rng=random.Random(2), epsilon=1.0)
+
+    chosen_ids = {selector.select(legal_actions, dto)["action_id"] for _ in range(20)}
+
+    assert chosen_ids == {"a-curse", "a-attack"}
+
+
+def _room_action(action_id: str, point_type: str) -> dict:
+    action = _action(action_id, "map_room")
+    action["parameters"] = {"column": 0, "row": 0, "point_type": point_type}
+    return action
+
+
+def test_select_room_is_greedy_over_room_score_when_epsilon_is_zero() -> None:
+    legal_actions = [
+        _room_action("a-elite", "Elite"),
+        _room_action("a-treasure", "Treasure"),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=0.0)
+
+    chosen = selector.select(legal_actions, {"hp": 80, "maxHp": 80})
+
+    assert chosen["action_id"] == "a-treasure"
+
+
+def test_select_room_prefers_rest_site_at_low_hp() -> None:
+    legal_actions = [
+        _room_action("a-monster", "Monster"),
+        _room_action("a-rest", "RestSite"),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=0.0)
+
+    chosen = selector.select(legal_actions, {"hp": 5, "maxHp": 80})
+
+    assert chosen["action_id"] == "a-rest"
+
+
+def test_select_room_explores_randomly_when_epsilon_is_one() -> None:
+    legal_actions = [_room_action("a-elite", "Elite"), _room_action("a-treasure", "Treasure")]
+    selector = HeuristicCombatSelector(rng=random.Random(3), epsilon=1.0)
+
+    chosen_ids = {
+        selector.select(legal_actions, {"hp": 80, "maxHp": 80})["action_id"] for _ in range(20)
+    }
+
+    assert chosen_ids == {"a-elite", "a-treasure"}
