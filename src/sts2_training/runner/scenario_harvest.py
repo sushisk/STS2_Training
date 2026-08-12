@@ -41,8 +41,31 @@ JsonObject = dict[str, Any]
 # Mirrors god_mode_correction.GOD_MODE_POWER_IDS - kept separate rather than
 # imported so this module has no dependency on that tool's presence/API shape.
 _GOD_MODE_POWER_IDS = frozenset({"STRENGTH_POWER", "BUFFER_POWER", "REGEN_POWER"})
+_MIN_MASK_VERSION = (1, 2)
 
 __all__ = ["dto_to_scenario_spec", "harvest_scenarios_from_jsonl", "main"]
+
+
+def _parse_mask_version(value: Any) -> tuple[int, ...] | None:
+    """Parse dotted numeric mask versions without treating e.g. 1.10 as float 1.1."""
+    if not isinstance(value, (str, int, float)):
+        return None
+    parts = str(value).split(".")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def _require_supported_mask_version(dto: JsonObject) -> None:
+    """Reject DTOs whose pile shape predates the full-card-identity multiset contract."""
+    raw_version = dto.get("mask_version")
+    version = _parse_mask_version(raw_version)
+    if version is None or version < _MIN_MASK_VERSION:
+        raise ValueError(
+            "scenario_harvest requires masked_emulator_dto mask_version >= 1.2; "
+            f"got {raw_version!r}. Older/missing versions use a different pile multiset "
+            "shape and cannot be restored without losing card state."
+        )
 
 
 def _card_instance(card: JsonObject) -> JsonObject:
@@ -123,10 +146,13 @@ def _enemy_scenario(enemy: JsonObject) -> JsonObject | None:
 def dto_to_scenario_spec(dto: JsonObject, *, seed: int) -> JsonObject | None:
     """Convert one combat-start `masked_emulator_dto` into an on-disk scenario spec.
 
-    Returns `None` when the snapshot isn't safe/complete to harvest (a live
-    `pendingChoice`, or no living enemies - a state that should already be
-    terminal/transitioning rather than a real starting point).
+    Requires `mask_version >= 1.2`, the first masked-pile representation that carries
+    full per-card identity instead of the legacy `{card_id: count}` shape. Returns
+    `None` when the snapshot isn't safe/complete to harvest (a live `pendingChoice`,
+    or no living enemies - a state that should already be terminal/transitioning rather
+    than a real starting point).
     """
+    _require_supported_mask_version(dto)
     if dto.get("pendingChoice"):
         return None
     enemies = [
