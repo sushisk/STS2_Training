@@ -36,6 +36,50 @@ _LAZY_EXPORTS = {
         "sts2_training.runner.oracle_collection",
         "OracleEpisodeRunner",
     ),
+    "StablePrunerABArmResult": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABArmResult",
+    ),
+    "StablePrunerABPairResult": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABPairResult",
+    ),
+    "StablePrunerABReport": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABReport",
+    ),
+    "StablePrunerABRunner": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABRunner",
+    ),
+    "StablePrunerABSummary": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABSummary",
+    ),
+    "StablePrunerABCaseResult": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABCaseResult",
+    ),
+    "StablePrunerABCaseSpec": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABCaseSpec",
+    ),
+    "StablePrunerABSuiteReport": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABSuiteReport",
+    ),
+    "StablePrunerABSuiteRunner": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABSuiteRunner",
+    ),
+    "PairedOutcomeStatistics": (
+        "sts2_training.runner.stable_pruner_ab_stats",
+        "PairedOutcomeStatistics",
+    ),
+    "paired_outcome_statistics": (
+        "sts2_training.runner.stable_pruner_ab_stats",
+        "paired_outcome_statistics",
+    ),
 }
 
 __all__ = [
@@ -48,9 +92,20 @@ __all__ = [
     "NewRunConfig",
     "OracleEpisodeResult",
     "OracleEpisodeRunner",
+    "PairedOutcomeStatistics",
     "SEARCH_MODES",
     "SelfPlayRunResult",
+    "StablePrunerABArmResult",
+    "StablePrunerABCaseResult",
+    "StablePrunerABCaseSpec",
+    "StablePrunerABPairResult",
+    "StablePrunerABReport",
+    "StablePrunerABRunner",
+    "StablePrunerABSuiteReport",
+    "StablePrunerABSuiteRunner",
+    "StablePrunerABSummary",
     "build_engine",
+    "paired_outcome_statistics",
     "resolve_search_mode",
     "run_self_play_batch",
     "start_and_run",
