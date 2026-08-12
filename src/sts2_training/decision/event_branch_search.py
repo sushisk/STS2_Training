@@ -1,10 +1,15 @@
 """Evaluate ``choice_event_option`` candidates by simulating each option on a Branch.
 
-Every candidate uses the same positive ``rng_id`` so the alternatives are compared under
-one RNG hypothesis for the same root decision. The single-item ``emulate_action`` calls
-are scheduled together with ``asyncio.gather``; when this runs through
-``AsyncTrainingApiClient`` the wire requests are still serialized by that client's
-operation lock. Actual parallel Branch evaluation is intentionally outside this module.
+Each candidate is assigned a distinct positive ``rng_id``. Root uses ``rng_id=0``;
+event-evaluation Branches deliberately use non-root RNG hypotheses rather than treating
+the game as deterministic. This is provisional: ideally each option would be sampled
+across multiple RNG hypotheses, but that larger parallel/multi-sample change belongs in a
+separate PR.
+
+The single-item ``emulate_action`` calls are scheduled together with ``asyncio.gather``;
+when this runs through ``AsyncTrainingApiClient`` the wire requests are still serialized
+by that client's operation lock. Actual parallel Branch evaluation is intentionally
+outside this module.
 
 This is an HP-preservation heuristic, not a general Whole Run value function. Candidates
 that fail to resolve, produce a non-finite HP value, or resolve to ``hp <= 0`` are ignored.
@@ -26,8 +31,6 @@ from sts2_training.selection.action_classification import (
 
 __all__ = ["best_event_option"]
 
-_EVENT_EVAL_RNG_ID = 1
-
 
 async def best_event_option(
     client: Any,
@@ -39,9 +42,9 @@ async def best_event_option(
 ) -> str | None:
     """Return the event option that leaves the player with the most HP.
 
-    All candidates are evaluated under the same RNG hypothesis. Returns ``None`` when
-    there are fewer than two usable candidates or every candidate fails, faults, or
-    resolves to death.
+    Each candidate is evaluated once under its own positive RNG hypothesis. Returns
+    ``None`` when there are fewer than two usable candidates or every candidate fails,
+    faults, or resolves to death.
     """
 
     event_actions = choice_event_option_actions(legal_actions)
@@ -67,12 +70,12 @@ async def best_event_option(
                     client,
                     instance_id=instance_id,
                     branch_id=branch_id,
-                    rng_id=_EVENT_EVAL_RNG_ID,
+                    rng_id=index + 1,
                     decision_point_id=decision_point_id,
                     action_id=branch_by_action[branch_id],
                     timeout_s=timeout_s,
                 )
-                for branch_id in branch_ids
+                for index, branch_id in enumerate(branch_ids)
             )
         )
 
