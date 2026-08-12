@@ -648,6 +648,7 @@ class BeamSearchEngine:
                         )
                         for index, (node, view) in enumerate(zip(frontier, frontier_views))
                     ),
+                    selected_indices=tuple(selected_indices),
                 )
             )
         return selected
