@@ -26,6 +26,7 @@ from sts2_training.decision.beam_search import (
     BeamSearchConfig,
     BeamSearchEngine,
     BeamSearchResult,
+    BranchIdAllocator,
 )
 from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.combat_decision import is_continuation_decision
@@ -165,15 +166,23 @@ class OracleCollectionResult:
 
 
 class _OracleTraceCollector(InMemorySearchTraceCollector):
-    def __init__(self, *, descendant_top_k: int, exhaustive_root_actions: bool) -> None:
+    def __init__(
+        self,
+        *,
+        descendant_top_k: int,
+        exhaustive_root_actions: bool,
+        effective_time_budget_ms: float,
+    ) -> None:
         super().__init__()
         self._descendant_top_k = descendant_top_k
         self._exhaustive_root_actions = exhaustive_root_actions
+        self._effective_time_budget_ms = effective_time_budget_ms
 
     def record(self, event: SearchTraceEvent) -> None:
         if isinstance(event, SearchTraceStart):
             event = replace(
                 event,
+                time_budget_ms=self._effective_time_budget_ms,
                 exhaustive_root_actions=self._exhaustive_root_actions,
             )
         elif isinstance(event, PolicyProposalTrace):
@@ -326,12 +335,14 @@ class BudgetedOracleCollector:
         value_fn: ValueModel,
         config: OracleCollectionConfig | None = None,
         stable_pruner: StableFrontierPruner | None = None,
+        branch_allocator: BranchIdAllocator | None = None,
     ) -> None:
         self._client = client
         self._policy = policy
         self._value_fn = value_fn
         self.config = config or OracleCollectionConfig()
         self._stable_pruner = stable_pruner or ValueTopKPruner()
+        self._branch_allocator = branch_allocator or BranchIdAllocator()
 
     @classmethod
     def from_beam_engine(
@@ -349,6 +360,7 @@ class BudgetedOracleCollector:
             value_fn=value_fn,
             config=config,
             stable_pruner=stable_pruner,
+            branch_allocator=engine._allocator,  # noqa: SLF001 - shared per-instance namespace
         )
 
     async def collect(
@@ -369,6 +381,10 @@ class BudgetedOracleCollector:
         trace_collector = _OracleTraceCollector(
             descendant_top_k=beam_config.top_k_actions,
             exhaustive_root_actions=self.config.exhaustive_root_actions,
+            effective_time_budget_ms=_effective_time_budget_ms(
+                timeout_s,
+                beam_config.time_budget_ms,
+            ),
         )
         provenance = _oracle_provenance(self._policy, self._value_fn)
         engine = _OracleBeamSearchEngine(
@@ -380,6 +396,10 @@ class BudgetedOracleCollector:
             trace_collector=trace_collector,
             exhaustive_root_actions=self.config.exhaustive_root_actions,
         )
+        # One allocator namespace is shared across Oracle passes and, when constructed
+        # from the runtime BeamSearchEngine, across teacher/runtime searches as well.
+        # This prevents RL-side RNG hypothesis identity from being accidentally reused.
+        engine._allocator = self._branch_allocator  # noqa: SLF001
         result = await engine.search(
             instance_id,
             root_decision,
@@ -748,6 +768,23 @@ def _available_dto_actions(dto: Mapping[str, Any]) -> list[JsonObject]:
         and isinstance(action.get("action_id"), str)
         and bool(action.get("action_id"))
     ]
+
+
+def _effective_time_budget_ms(
+    timeout_s: float,
+    configured_time_budget_ms: float | None,
+) -> float:
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or timeout_s <= 0
+    ):
+        raise ValueError("timeout_s must be a finite positive number")
+    timeout_ms = float(timeout_s) * 1000.0
+    if configured_time_budget_ms is None:
+        return timeout_ms
+    return min(timeout_ms, float(configured_time_budget_ms))
 
 
 def _independent_policy_copy(policy: PolicyModel) -> PolicyModel:
