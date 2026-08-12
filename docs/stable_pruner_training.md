@@ -217,6 +217,12 @@ metrics. `manifest_sha256` fingerprints the canonical case/name/path/seed defini
 each case's `scenario_template_sha256` fingerprints the actual seed-independent board
 configuration.
 
+The suite additionally reports `outcome_statistics` over discordant terminal-outcome
+pairs: learned wins, baseline wins, learned share among discordant pairs, and a dependency-
+free exact two-sided sign-test p-value under a 50/50 null. Ties and unknown outcomes are
+excluded from that test. This statistic is diagnostic only; the code intentionally does
+not convert it into an automatic promotion threshold or ignore search-cost regressions.
+
 Real-emulator A/B is intentionally separate from the repo-local hosted unit/contract gate.
 The current CI proves deterministic code/contract behavior but does not attest an exact
 Training/RL runtime pair or gameplay quality.
