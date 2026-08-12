@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchResult, BeamSearchStats
@@ -45,8 +46,18 @@ class _FakeClient:
             "decision_point_id": f"{instance_id}-root",
             "masked_emulator_dto": {
                 "legal_actions": [
-                    {"action_id": "baseline_action", "action_type": "card", "is_available": True},
-                    {"action_id": "learned_action", "action_type": "card", "is_available": True},
+                    {
+                        "action_id": "baseline_action",
+                        "action_type": "card",
+                        "card_id": "STRIKE",
+                        "is_available": True,
+                    },
+                    {
+                        "action_id": "learned_action",
+                        "action_type": "card",
+                        "card_id": "BASH",
+                        "is_available": True,
+                    },
                 ]
             },
         }
@@ -141,6 +152,8 @@ class StablePrunerABRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.summary.learned_mean_nodes_expanded, 2.0)
         self.assertEqual(report.pairs[0].baseline.pruner_name, "value_top_k")
         self.assertEqual(report.pairs[0].learned.pruner_name, "learned_test")
+        self.assertEqual(report.pairs[0].baseline.decisions[0].action_semantics["card_id"], "STRIKE")
+        self.assertEqual(report.pairs[0].learned.decisions[0].action_semantics["card_id"], "BASH")
         self.assertEqual(len(configs), 4)
         for arm_config in configs:
             self.assertIsNot(arm_config, config)
@@ -151,7 +164,7 @@ class StablePrunerABRunnerTest(unittest.IsolatedAsyncioTestCase):
 
 
 class StablePrunerABComparisonTest(unittest.TestCase):
-    def test_action_comparison_stops_at_first_divergence(self) -> None:
+    def test_action_comparison_stops_at_first_semantic_divergence(self) -> None:
         baseline = _arm("baseline", "victory", ("same", "baseline-only"))
         learned = _arm("learned", "victory", ("same", "learned-only"))
 
@@ -160,6 +173,18 @@ class StablePrunerABComparisonTest(unittest.TestCase):
         self.assertEqual(pair.common_action_prefix, 1)
         self.assertEqual(pair.first_divergence_index, 1)
         self.assertEqual(pair.winner, "tie")
+
+    def test_decision_local_action_ids_do_not_create_false_divergence(self) -> None:
+        baseline = _arm("baseline", "victory", ("same",))
+        learned = _arm("learned", "victory", ("same",))
+
+        self.assertNotEqual(
+            baseline.decisions[0].chosen_action_id,
+            learned.decisions[0].chosen_action_id,
+        )
+        pair = compare_arm_results(seed=11, baseline=baseline, learned=learned)
+        self.assertEqual(pair.common_action_prefix, 1)
+        self.assertIsNone(pair.first_divergence_index)
 
     def test_unknown_terminal_outcome_is_not_scored_as_a_win_or_loss(self) -> None:
         pair = compare_arm_results(
@@ -178,34 +203,44 @@ class StablePrunerABComparisonTest(unittest.TestCase):
 
 
 def _arm(arm: str, outcome: str | None, actions: tuple[str, ...]) -> StablePrunerABArmResult:
-    decisions = tuple(
-        StablePrunerABDecision(
-            index=index,
-            decision_point_id=f"d-{index}",
-            chosen_action_id=action,
-            source="beam_search",
-            beam_reason="max_depth",
-            beam_best_value=1.0,
-            nodes_expanded=1,
-            branches_created=1,
-            beam_total_ms=2.0,
+    decisions = []
+    for index, action in enumerate(actions):
+        semantics = {"action_type": "card", "card_id": action}
+        decisions.append(
+            StablePrunerABDecision(
+                index=index,
+                decision_point_id=f"d-{arm}-{index}",
+                chosen_action_id=f"opaque-{arm}-{index}",
+                chosen_action_type="card",
+                action_semantics=semantics,
+                action_signature=json.dumps(
+                    semantics,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                source="beam_search",
+                beam_reason="max_depth",
+                beam_best_value=1.0,
+                nodes_expanded=1,
+                branches_created=1,
+                beam_total_ms=2.0,
+            )
         )
-        for index, action in enumerate(actions)
-    )
+    decision_tuple = tuple(decisions)
     return StablePrunerABArmResult(
         arm=arm,
         seed=1,
         pruner_name=arm,
         pruner_version="1",
         outcome=outcome,
-        decisions_made=len(decisions),
+        decisions_made=len(decision_tuple),
         elapsed_s=0.5,
-        beam_decisions=len(decisions),
-        nodes_expanded=len(decisions),
-        branches_created=len(decisions),
-        beam_total_ms=2.0 * len(decisions),
+        beam_decisions=len(decision_tuple),
+        nodes_expanded=len(decision_tuple),
+        branches_created=len(decision_tuple),
+        beam_total_ms=2.0 * len(decision_tuple),
         heuristic_fallbacks=0,
-        decisions=decisions,
+        decisions=decision_tuple,
     )
 
 
