@@ -152,16 +152,18 @@ favoring one arm through server warm-up or ordering effects.
 The report records, per arm:
 
 - final terminal outcome
-- committed action sequence
+- committed action IDs for diagnostics plus canonicalized action semantics
 - number of decisions and heuristic fallbacks
 - Beam reason / best value per decision
 - nodes expanded and branches created
 - measured Beam search milliseconds and episode elapsed time
 - pruner name/version (the learned artifact version contains its hash prefix)
 
-Action IDs are compared only while the two arms have committed the same action prefix.
-Once a pruner changes a committed action, later states can differ, so subsequent action IDs
-are not treated as paired counterfactuals. The pair report therefore exposes
+`action_id` is valid only inside one decision and is never compared across the two A/B
+instances. For common-prefix/divergence detection the runner canonicalizes the chosen legal
+action payload after removing `action_id` and `is_available`, then compares that semantic
+signature. Once the signatures diverge, later states can differ, so subsequent choices are
+not treated as paired counterfactuals. The pair report therefore exposes
 `common_action_prefix` and `first_divergence_index`; after divergence, compare terminal
 outcomes and arm-level search cost instead.
 
