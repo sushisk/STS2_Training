@@ -1,25 +1,8 @@
-"""One-line learning entrypoint for stable-pruner logs.
+"""One-line learning/validation entrypoint for stable-pruner logs.
 
-Inputs are the log files/directories emitted by the current Training code. The command
-extracts current Oracle v3 and RL trajectory v2 records, performs any temporary JSONL
-normalization internally, and starts the requested learning stage.
-
-Examples::
-
-    # Supervised learning from zero.
-    python -m sts2_training.runner.stable_pruner_learn data/logs \
-        --learn supervised --start fresh
-
-    # Continue supervised learning from an existing artifact.
-    python -m sts2_training.runner.stable_pruner_learn data/new_oracle_logs \
-        --learn supervised --start resume --weights tools/output/stable_pruner_weights.json
-
-    # Continue on-policy RL from the exact behavior artifact.
-    python -m sts2_training.runner.stable_pruner_learn data/rl_logs \
-        --learn rl --start resume --weights tools/output/stable_pruner_weights.json
-
-Both selectors default to ``auto``. With no weights, auto resolves to supervised/fresh.
-With weights and only one learnable record type, auto resolves to that type/resume.
+Inputs are log files/directories emitted by the current Training code. The command extracts
+current Oracle v3 and RL trajectory v2 records, performs temporary JSONL normalization, and
+runs the requested stable-pruner operation.
 """
 
 from __future__ import annotations
@@ -42,10 +25,11 @@ from sts2_training.runner.stable_pruner_rl import RL_TRAJECTORY_SCHEMA_VERSION
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TRAIN_TOOL = _REPO_ROOT / "tools" / "train_stable_pruner.py"
+_EVAL_TOOL = _REPO_ROOT / "tools" / "eval_stable_pruner.py"
 _SUPERVISED_RESUME_TOOL = _REPO_ROOT / "tools" / "update_stable_pruner_supervised.py"
 _RL_UPDATE_TOOL = _REPO_ROOT / "tools" / "update_stable_pruner_rl.py"
 _SUPPORTED_DISCOVERY_SUFFIXES = frozenset({".jsonl", ".json", ".log", ".txt"})
-_INGEST_SCHEMA_VERSION = 2
+_INGEST_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -87,19 +71,18 @@ class LearningRunSummary:
     deferred_records: int
     other_json_records: int
     malformed_nonempty_lines: int
+    data_mode: str = "auto-split"
+    output_kind: str = "artifact"
 
 
 def discover_log_files(inputs: Sequence[str]) -> tuple[Path, ...]:
     """Resolve files, directories, and shell-style glob patterns deterministically."""
-
     if not inputs:
         raise ValueError("at least one log input is required")
     discovered: list[Path] = []
     seen: set[Path] = set()
-
     for raw in inputs:
         path = Path(raw).expanduser()
-        matches: list[Path]
         if path.exists():
             if path.is_file():
                 matches = [path]
@@ -119,17 +102,14 @@ def discover_log_files(inputs: Sequence[str]) -> tuple[Path, ...]:
             raise ValueError(f"log input did not resolve to any files: {raw}")
         for candidate in matches:
             resolved = candidate.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            discovered.append(resolved)
-
+            if resolved not in seen:
+                seen.add(resolved)
+                discovered.append(resolved)
     return tuple(sorted(discovered, key=lambda value: str(value)))
 
 
 def prepare_logs(inputs: Sequence[str], *, staging_root: Path) -> PreparedLogs:
     """Extract current Oracle/RL records while retaining one staged file per source log."""
-
     files = discover_log_files(inputs)
     oracle_dir = staging_root / "oracle"
     rl_dir = staging_root / "rl"
@@ -138,19 +118,14 @@ def prepare_logs(inputs: Sequence[str], *, staging_root: Path) -> PreparedLogs:
 
     staged_to_source: dict[str, str] = {}
     summaries: list[SourceLogSummary] = []
-    total_oracle = 0
-    total_rl = 0
-    total_other = 0
-    total_malformed = 0
+    total_oracle = total_rl = total_other = total_malformed = 0
     rl_files: list[Path] = []
 
     for index, source in enumerate(files):
         source_display = _display_path(source)
         oracle_records: list[Mapping[str, Any]] = []
         rl_records: list[Mapping[str, Any]] = []
-        other_json = 0
-        malformed = 0
-
+        other_json = malformed = 0
         with source.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 if not line.strip():
@@ -257,6 +232,43 @@ def resolve_learning_plan(
     return LearningPlan(learn=learn, start=start)
 
 
+def resolve_data_mode(
+    requested: str,
+    *,
+    plan: LearningPlan,
+    weights: Path | None,
+    oracle_records: int,
+) -> str:
+    """Resolve data role independently from objective/start semantics.
+
+    Explicit modes are:
+    - ``train``: all selected records update the model; no internal validation split.
+    - ``validate``: no update; evaluate an existing supervised artifact on all Oracle records.
+    - ``auto-split``: fresh supervised fit with source-file train/val/test splitting.
+
+    ``auto`` preserves the one-line defaults: fresh supervised -> auto-split, otherwise train.
+    """
+    if requested not in {"auto", "train", "validate", "auto-split"}:
+        raise ValueError(f"unsupported data mode: {requested}")
+    if requested == "auto":
+        return "auto-split" if plan.learn == "supervised" and plan.start == "fresh" else "train"
+    if requested == "validate":
+        if plan.learn != "supervised":
+            raise ValueError("--data-mode validate currently supports supervised Oracle evaluation only")
+        if weights is None:
+            raise ValueError("--data-mode validate requires --weights pointing to the artifact to evaluate")
+        if plan.start != "resume":
+            raise ValueError("--data-mode validate evaluates an existing artifact and requires resume semantics")
+        if oracle_records <= 0:
+            raise ValueError("--data-mode validate requires combat_oracle_decision records")
+        return requested
+    if requested == "auto-split" and not (
+        plan.learn == "supervised" and plan.start == "fresh"
+    ):
+        raise ValueError("--data-mode auto-split is only valid for fresh supervised learning")
+    return requested
+
+
 def resolve_learning_mode(
     requested: str,
     *,
@@ -265,7 +277,6 @@ def resolve_learning_mode(
     rl_records: int,
 ) -> str:
     """Backward-compatible helper for the initial one-line API tests/callers."""
-
     return resolve_learning_plan(
         requested,
         "auto",
@@ -278,32 +289,62 @@ def resolve_learning_mode(
 def run_learning(args: argparse.Namespace) -> LearningRunSummary:
     with tempfile.TemporaryDirectory(prefix="sts2-stable-pruner-learn-") as temp_dir:
         prepared = prepare_logs(args.inputs, staging_root=Path(temp_dir))
+        requested_data_mode = getattr(args, "data_mode", "auto")
+        requested_learn = args.learn
+        plan_rl_records = prepared.rl_records
+        if requested_data_mode == "validate":
+            if requested_learn == "auto":
+                requested_learn = "supervised"
+            # Validation consumes only Oracle records; unrelated RL lines are deferred.
+            plan_rl_records = 0
         plan = resolve_learning_plan(
-            args.learn,
+            requested_learn,
             args.start,
             weights=args.weights,
             oracle_records=prepared.oracle_records,
-            rl_records=prepared.rl_records,
+            rl_records=plan_rl_records,
         )
-        output = Path(args.output or _default_output(plan))
+        data_mode = resolve_data_mode(
+            requested_data_mode,
+            plan=plan,
+            weights=args.weights,
+            oracle_records=prepared.oracle_records,
+        )
+        output = Path(args.output or _default_output(plan, data_mode=data_mode))
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        if plan.learn == "supervised" and plan.start == "fresh":
-            command = _supervised_fresh_command(args, prepared=prepared, output=output)
+        if data_mode == "validate":
+            command = _supervised_validation_command(args, prepared=prepared)
+            _run_validation_command(command, output=output)
             deferred = prepared.rl_records
+            output_kind = "validation_report"
+        elif plan.learn == "supervised" and plan.start == "fresh":
+            command = _supervised_fresh_command(
+                args, prepared=prepared, output=output, data_mode=data_mode
+            )
+            _run_command(command)
+            deferred = prepared.rl_records
+            output_kind = "artifact"
         elif plan.learn == "supervised":
             command = _supervised_resume_command(args, prepared=prepared, output=output)
+            _run_command(command)
             deferred = prepared.rl_records
+            output_kind = "artifact"
         else:
+            if data_mode != "train":
+                raise ValueError("RL trajectory updates require --data-mode train")
             command = _rl_resume_command(args, prepared=prepared, output=output)
+            _run_command(command)
             deferred = prepared.oracle_records
+            output_kind = "artifact"
 
-        _run_command(command)
         if not output.exists():
-            raise RuntimeError(f"learning command completed without creating artifact: {output}")
-        _rewrite_artifact_provenance(
+            raise RuntimeError(f"stable-pruner command completed without creating output: {output}")
+        _rewrite_output_provenance(
             output,
             plan=plan,
+            data_mode=data_mode,
+            output_kind=output_kind,
             prepared=prepared,
             base_weights=args.weights,
         )
@@ -317,6 +358,8 @@ def run_learning(args: argparse.Namespace) -> LearningRunSummary:
             deferred_records=deferred,
             other_json_records=prepared.other_json_records,
             malformed_nonempty_lines=prepared.malformed_nonempty_lines,
+            data_mode=data_mode,
+            output_kind=output_kind,
         )
 
 
@@ -325,11 +368,16 @@ def _supervised_fresh_command(
     *,
     prepared: PreparedLogs,
     output: Path,
+    data_mode: str = "auto-split",
 ) -> list[str]:
     _require_tool(_TRAIN_TOOL)
+    if data_mode not in {"auto-split", "train"}:
+        raise ValueError("fresh supervised command requires auto-split or train data mode")
     min_target_gap = 1e-6 if args.min_target_gap is None else args.min_target_gap
     terminal_weight = 1.0 if args.terminal_weight is None else args.terminal_weight
     bootstrap_weight = 0.5 if args.bootstrap_weight is None else args.bootstrap_weight
+    val_fraction = 0.0 if data_mode == "train" else args.val_fraction
+    test_fraction = 0.0 if data_mode == "train" else args.test_fraction
     command = [
         sys.executable,
         str(_TRAIN_TOOL),
@@ -338,9 +386,9 @@ def _supervised_fresh_command(
         "--output",
         str(output),
         "--val-fraction",
-        str(args.val_fraction),
+        str(val_fraction),
         "--test-fraction",
-        str(args.test_fraction),
+        str(test_fraction),
         "--seed",
         str(args.seed),
         "--inverse-regularization",
@@ -354,6 +402,33 @@ def _supervised_fresh_command(
     ]
     if args.allow_mixed_teachers:
         command.append("--allow-mixed-teachers")
+    return command
+
+
+def _supervised_validation_command(
+    args: argparse.Namespace, *, prepared: PreparedLogs
+) -> list[str]:
+    _require_tool(_EVAL_TOOL)
+    if args.weights is None:
+        raise ValueError("validation requires --weights")
+    command = [
+        sys.executable,
+        str(_EVAL_TOOL),
+        "--weights",
+        str(args.weights),
+        "--log-dir",
+        str(prepared.oracle_dir),
+    ]
+    if args.min_target_gap is not None:
+        command.extend(["--min-target-gap", str(args.min_target_gap)])
+    if args.terminal_weight is not None:
+        command.extend(["--terminal-weight", str(args.terminal_weight)])
+    if args.bootstrap_weight is not None:
+        command.extend(["--bootstrap-weight", str(args.bootstrap_weight)])
+    if args.allow_mixed_teachers:
+        command.append("--allow-mixed-teachers")
+    if args.allow_teacher_mismatch:
+        command.append("--allow-teacher-mismatch")
     return command
 
 
@@ -424,33 +499,61 @@ def _run_command(command: Sequence[str]) -> None:
         subprocess.run(list(command), cwd=_REPO_ROOT, check=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            f"learning command failed with exit status {exc.returncode}: "
-            + " ".join(command)
+            f"learning command failed with exit status {exc.returncode}: " + " ".join(command)
         ) from exc
 
 
-def _rewrite_artifact_provenance(
+def _run_validation_command(command: Sequence[str], *, output: Path) -> None:
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(
+            f"validation command failed with exit status {exc.returncode}: "
+            + " ".join(command)
+            + suffix
+        ) from exc
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("validation command did not emit a JSON report") from exc
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("validation command JSON report must be an object")
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _rewrite_output_provenance(
     output: Path,
     *,
     plan: LearningPlan,
+    data_mode: str,
+    output_kind: str,
     prepared: PreparedLogs,
     base_weights: Path | None,
 ) -> None:
     raw = json.loads(output.read_text(encoding="utf-8"))
     if not isinstance(raw, Mapping):
-        raise ValueError("learning artifact must be a JSON object")
+        raise ValueError("stable-pruner output must be a JSON object")
     payload = _replace_staged_paths(dict(raw), prepared.staged_to_source)
     payload["one_line_learning_ingest"] = {
         "schema_version": _INGEST_SCHEMA_VERSION,
         "learn": plan.learn,
         "start": plan.start,
+        "data_mode": data_mode,
+        "output_kind": output_kind,
+        "updates_model": output_kind == "artifact",
         "oracle_record_schema_version": ORACLE_RECORD_SCHEMA_VERSION,
         "rl_trajectory_schema_version": RL_TRAJECTORY_SCHEMA_VERSION,
         "stable_prune_node_view_schema_version": STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION,
         "feature_schema_version": PRUNER_FEATURE_SCHEMA_VERSION,
-        "base_artifact_sha256": (
-            None if base_weights is None else _file_sha256(base_weights)
-        ),
+        "base_artifact_sha256": None if base_weights is None else _file_sha256(base_weights),
         "source_logs": [asdict(summary) for summary in prepared.sources],
         "record_counts": {
             "combat_oracle_decision": prepared.oracle_records,
@@ -461,8 +564,25 @@ def _rewrite_artifact_provenance(
         "normalization": "extract-json-object-per-line-v1",
     }
     output.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
+def _rewrite_artifact_provenance(
+    output: Path,
+    *,
+    plan: LearningPlan,
+    prepared: PreparedLogs,
+    base_weights: Path | None,
+) -> None:
+    """Backward-compatible helper retained for tests/callers created before data modes."""
+    _rewrite_output_provenance(
+        output,
+        plan=plan,
+        data_mode="auto-split" if plan.start == "fresh" else "train",
+        output_kind="artifact",
+        prepared=prepared,
+        base_weights=base_weights,
     )
 
 
@@ -470,10 +590,7 @@ def _replace_staged_paths(value: Any, mapping: Mapping[str, str]) -> Any:
     if isinstance(value, str):
         return mapping.get(value, value)
     if isinstance(value, Mapping):
-        return {
-            str(key): _replace_staged_paths(item, mapping)
-            for key, item in value.items()
-        }
+        return {str(key): _replace_staged_paths(item, mapping) for key, item in value.items()}
     if isinstance(value, list):
         return [_replace_staged_paths(item, mapping) for item in value]
     return value
@@ -527,7 +644,9 @@ def _display_path(path: Path) -> str:
         return str(resolved)
 
 
-def _default_output(plan: LearningPlan) -> Path:
+def _default_output(plan: LearningPlan, *, data_mode: str = "auto-split") -> Path:
+    if data_mode == "validate":
+        return Path("tools/output/stable_pruner_validation.json")
     if plan.learn == "supervised" and plan.start == "fresh":
         return Path("tools/output/stable_pruner_weights.json")
     if plan.learn == "supervised":
@@ -556,7 +675,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="learn",
         choices=("auto", "supervised", "rl"),
         default="auto",
-        help="what to learn; auto infers from start mode and available record types",
+        help="what objective to optimize; auto infers from start mode and record types",
     )
     parser.add_argument(
         "--start",
@@ -565,15 +684,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="fresh starts from zero; resume requires --weights; auto uses --weights presence",
     )
     parser.add_argument(
-        "--weights",
-        type=Path,
-        default=None,
-        help="existing artifact for supervised/RL resume",
+        "--data-mode",
+        choices=("auto", "train", "validate", "auto-split"),
+        default="auto",
+        help=(
+            "data role: train uses all selected data for updates; validate performs no update; "
+            "auto-split performs fresh supervised train/val/test splitting; auto preserves "
+            "one-line defaults"
+        ),
+    )
+    parser.add_argument(
+        "--weights", type=Path, default=None, help="existing artifact for resume or validation"
     )
     parser.add_argument("--output", type=Path, default=None)
 
-    # Fresh supervised trainer options. Resume defaults to the artifact's saved values when
-    # the corresponding CLI value is omitted.
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--test-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
@@ -584,8 +708,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-mixed-teachers", action="store_true")
     parser.add_argument("--allow-teacher-mismatch", action="store_true")
 
-    # Resume update options. RL is intentionally one batch; epochs only affects supervised
-    # resume because repeating stale on-policy trajectories would violate the RL contract.
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--gradient-clip-norm", type=float, default=5.0)
@@ -597,19 +719,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         summary = run_learning(args)
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"stable-pruner learning failed: {exc}", file=sys.stderr)
+        print(f"stable-pruner operation failed: {exc}", file=sys.stderr)
         return 2
 
     print(json.dumps(asdict(summary), ensure_ascii=False, sort_keys=True))
     if summary.deferred_records:
         deferred_type = (
-            "stable_pruner_rl_episode"
-            if summary.learn == "supervised"
-            else "combat_oracle_decision"
+            "stable_pruner_rl_episode" if summary.learn == "supervised" else "combat_oracle_decision"
         )
         print(
             f"note: {summary.deferred_records} {deferred_type} records were detected but are "
-            "not part of the selected learning stage",
+            "not part of the selected stable-pruner operation",
             file=sys.stderr,
         )
     return 0
