@@ -1,0 +1,66 @@
+# STS2 RL / Training wire contract v0.8
+
+This document is the canonical compatibility delta for the `0.8` RL/Training API wire format.
+The transport, session sequencing, request identity, operation set, branch lifecycle, retry,
+and at-most-once rules remain those documented for v0.7 unless overridden below.
+
+## Deployment model
+
+DTO v0.8 is a deliberate **hard cutover** from v0.7. RL and Training must be deployed or
+activated as one lockstep compatibility unit. A v0.8 Training client must not be routed to
+a v0.7 RL endpoint, and a v0.7 Training client must not be routed to a v0.8-only endpoint.
+Both sides therefore advertise/accept only `schema_version = "0.8"` after this cutover.
+
+This version axis is the **Training↔RL wire DTO version**. It is separate from the
+CombatStateSnapshot/Restore contract version used inside RL/Emulator integration, even when
+both happen to use the number `0.8`.
+
+## Breaking change: masked pile multiset representation
+
+Wire DTO v0.8 pairs with `masked_emulator_dto.mask_version = "1.2"`.
+
+In v0.7-era masking, `drawPile`, `discardPile`, and `exhaustPile` were represented as a
+`{card_id: count}` JSON object. That representation collapsed distinct card instances that
+shared an id but differed in upgrade level, Tinker Time state, or Enchantment.
+
+In v0.8 the three masked piles are arrays of per-distinct-card-identity records. Each record
+contains the public card fields plus `count`, including:
+
+- `id`
+- `type`, `rarity`, `cost`, `targetType`
+- `upgraded`, `upgradeLevel`
+- `tinkerTimeType`, `tinkerTimeRider`
+- `enchantment` (`id`, `amount`, `status`) when present
+- `count`
+
+The identity grouping key is `(id, upgradeLevel, tinkerTimeType, tinkerTimeRider,
+enchantment.id, enchantment.amount, enchantment.status)`. Pile order remains hidden; card
+instance state does not.
+
+Because the JSON type changes from object to array, this is a breaking wire change and is
+the reason the outer wire `schema_version` advances from 0.7 to 0.8 rather than relying on
+`mask_version` alone.
+
+## Card-instance fidelity
+
+The paired v0.8 rollout also preserves `upgradeLevel` and `enchantment` when reconstructing
+CombatScenario card instances from masked state, including pending-choice card options.
+Scenario schema validation requires an Enchantment `id` whenever an enchantment object is
+present.
+
+For the currently supported game build, negative `upgrade_level` values are rejected because
+scenario restoration only exposes forward upgrades through repeated `CardCmd.Upgrade` calls.
+This is a current-build capability constraint, not a claim that future game versions can never
+give negative levels a meaning; revisit the bound if the game contract changes.
+
+## Compatibility gate
+
+The three paired PRs are intended to merge and deploy together:
+
+- STS2_Emulator #7: card upgrade/enchantment scenario fidelity and public card DTO fields.
+- STS2_RL #41: mask_version 1.2 pile records and lossless scenario reconstruction.
+- STS2_Training #57: scenario harvesting from mask_version 1.2 logs and wire DTO v0.8 client.
+
+Acceptance requires the paired Training client and RL endpoint to exchange
+`schema_version = "0.8"`, and harvested v0.8 masked states to reconstruct card upgrade and
+enchantment state without silently collapsing pile entries.
