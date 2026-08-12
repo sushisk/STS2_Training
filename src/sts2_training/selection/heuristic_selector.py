@@ -1,13 +1,4 @@
-"""Decision logic for the initial data-collection stage.
-
-Picks uniformly at random within a priority-ordered `action_type` category, with two
-scored exceptions: `choice_card` decisions use the canonical-semantics card-quality
-preference, and `card` (which card to play) decisions use an epsilon-greedy wrapper
-around `PriorHeuristicPolicy` - the same action-quality prior Beam search ranks nodes
-with - instead of a uniform-random pick, so card play stops being pure noise while
-still retaining `epsilon` exploration for data diversity. See `how_to_use.md` for the
-expected input shape and where this plugs into the API client.
-"""
+"""Heuristic action selection for the initial data-collection stage."""
 
 from __future__ import annotations
 
@@ -32,9 +23,7 @@ from sts2_training.selection.choice_card_heuristic import choice_card_preference
 from sts2_training.selection.room_heuristic import room_preference_scores
 
 if TYPE_CHECKING:
-    # Deferred to a lazy import in HeuristicCombatSelector.__init__ - decision.policy's
-    # package sits behind decision/__init__.py, which imports this module's own
-    # CombatDecisionEngine dependency, so a module-level import here would be circular.
+    # Keep this import type-only to avoid the decision package's circular import path.
     from sts2_training.decision.policy import PolicyModel
 
 _CATEGORY_PRIORITY = (
@@ -46,11 +35,7 @@ _CATEGORY_PRIORITY = (
 
 
 class NoAvailableActionError(RuntimeError):
-    """Raised when a decision has no action Training is willing to select.
-
-    `decision` is optional context for callers that need to distinguish a genuine
-    terminal decision from a malformed/non-terminal decision with no selectable action.
-    """
+    """Raised when a decision has no action Training is willing to select."""
 
     def __init__(
         self,
@@ -63,29 +48,14 @@ class NoAvailableActionError(RuntimeError):
 
 
 class HeuristicCombatSelector:
-    """Classifies `legal_actions` by `action_type` and chooses one candidate.
-
-    Categories are tried in `_CATEGORY_PRIORITY` order; the first non-empty category
-    is chosen from. Canonical v1 `choice_card` semantics use the same card-quality
-    preference as the Beam prior, while missing/malformed/future semantics remain
-    random. `card` decisions are epsilon-greedy over `PriorHeuristicPolicy`'s score (see
-    `_choose_card`). `map_room` (Whole Run map navigation) decisions are epsilon-greedy
-    over `room_heuristic.room_preference_scores` (see `_choose_room`), checked before
-    `_CATEGORY_PRIORITY` since it never co-occurs with combat/choice categories - both
-    live at mutually exclusive decision boundaries. Reward decisions receive one
-    conservative potion-specific rule: take a potion when an empty-slot TAKE is
-    explicitly published, otherwise prefer skipping a full-belt PotionReward over
-    randomly discarding an existing potion; if skipping is disallowed, choose among the
-    available replacement slots. Other unknown action types continue to fall back to a
-    single random pool.
-    """
+    """Choose an available action using category-specific heuristics where defined."""
 
     def __init__(
         self,
         rng: random.Random | None = None,
         *,
         epsilon: float = 0.1,
-        policy: "PolicyModel | None" = None,
+        policy: PolicyModel | None = None,
     ) -> None:
         if not 0.0 <= epsilon <= 1.0:
             raise ValueError("epsilon must be between 0.0 and 1.0")
@@ -143,26 +113,14 @@ class HeuristicCombatSelector:
         masked_emulator_dto: Mapping[str, Any],
     ) -> JsonObject:
         scores = choice_card_preference_scores(candidates, masked_emulator_dto)
-        if not scores:
-            return self._choose(candidates)
-
-        best_score = max(scores.values())
-        preferred = [
-            action
-            for action in candidates
-            if scores.get(action.get("action_id")) == best_score
-        ]
-        return self._choose(preferred or candidates)
+        return self._choose_best_scored(candidates, scores)
 
     def _choose_card(
         self,
         candidates: Sequence[JsonObject],
         masked_emulator_dto: Mapping[str, Any],
     ) -> JsonObject:
-        """Epsilon-greedy over `PriorHeuristicPolicy`'s score - `epsilon` of the time
-        (data-diversity exploration, matching this class's random baseline elsewhere),
-        picks uniformly at random; otherwise plays `_policy`'s top-ranked card instead
-        of ignoring card quality/targeting/danger entirely."""
+        """Use epsilon-greedy selection over the policy's top proposal."""
         if self._rng.random() < self._epsilon:
             return self._choose(candidates)
 
@@ -181,20 +139,24 @@ class HeuristicCombatSelector:
         candidates: Sequence[JsonObject],
         masked_emulator_dto: Mapping[str, Any],
     ) -> JsonObject:
-        """Epsilon-greedy over `room_heuristic.room_preference_scores` - same
-        exploration/exploit split as `_choose_card`, see its docstring."""
+        """Use epsilon-greedy selection over room preference scores."""
         if self._rng.random() < self._epsilon:
             return self._choose(candidates)
 
         scores = room_preference_scores(candidates, masked_emulator_dto)
+        return self._choose_best_scored(candidates, scores)
+
+    def _choose_best_scored(
+        self,
+        candidates: Sequence[JsonObject],
+        scores: Mapping[str, float],
+    ) -> JsonObject:
         if not scores:
             return self._choose(candidates)
 
         best_score = max(scores.values())
         preferred = [
-            action
-            for action in candidates
-            if scores.get(action.get("action_id")) == best_score
+            action for action in candidates if scores.get(action.get("action_id")) == best_score
         ]
         return self._choose(preferred or candidates)
 
