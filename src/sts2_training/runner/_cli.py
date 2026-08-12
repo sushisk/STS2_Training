@@ -56,7 +56,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--search-mode",
         choices=sorted(SEARCH_MODES),
         default=None,
-        help="beam search preset (see decision.search_modes); default: standard",
+        help="search preset (see decision.search_modes); default: none (Beam Search disabled)",
     )
     parser.add_argument(
         "--beam-depth",
