@@ -163,7 +163,35 @@ def weights_payload(
     bootstrap_weight: float,
     oracle_teacher_provenance: dict[str, Any] | None = None,
     oracle_dataset_provenance: dict[str, Any] | None = None,
+    dataset_files: list[Path] | None = None,
+    source_split: SourceSplit | None = None,
+    split_seed: int | None = None,
+    val_fraction: float | None = None,
+    test_fraction: float | None = None,
+    inverse_regularization: float | None = None,
 ) -> dict[str, Any]:
+    training_metadata: dict[str, Any] = {
+        "source_files": [str(path) for path in training_files],
+        "min_target_gap": min_target_gap,
+        "terminal_weight": terminal_weight,
+        "bootstrap_weight": bootstrap_weight,
+        "objective": "pairwise_logistic_ranking",
+    }
+    manifest_files = list(training_files if dataset_files is None else dataset_files)
+    if manifest_files:
+        training_metadata["input_manifest"] = _training_input_manifest(
+            manifest_files,
+            source_split=source_split,
+        )
+    if split_seed is not None or val_fraction is not None or test_fraction is not None:
+        training_metadata["split"] = {
+            "seed": split_seed,
+            "val_fraction": val_fraction,
+            "test_fraction": test_fraction,
+        }
+    if inverse_regularization is not None:
+        training_metadata["inverse_regularization"] = float(inverse_regularization)
+
     payload = {
         "model_type": "pairwise_logistic_linear_pruner",
         "artifact_schema_version": LEARNED_PRUNER_ARTIFACT_SCHEMA_VERSION,
@@ -180,13 +208,7 @@ def weights_payload(
         # Pairwise features are scaled without centering. This makes runtime node
         # scores exactly compatible with pairwise score differences.
         "scale": fitted.scaler.scale_.tolist(),
-        "training": {
-            "source_files": [str(path) for path in training_files],
-            "min_target_gap": min_target_gap,
-            "terminal_weight": terminal_weight,
-            "bootstrap_weight": bootstrap_weight,
-            "objective": "pairwise_logistic_ranking",
-        },
+        "training": training_metadata,
         "metrics": metrics,
     }
     if oracle_teacher_provenance is not None:
@@ -194,6 +216,37 @@ def weights_payload(
     if oracle_dataset_provenance is not None:
         payload["oracle_dataset_provenance"] = oracle_dataset_provenance
     return payload
+
+
+def _training_input_manifest(
+    paths: list[Path],
+    *,
+    source_split: SourceSplit | None,
+) -> list[dict[str, Any]]:
+    split_by_path: dict[Path, str] = {}
+    if source_split is not None:
+        split_by_path.update((path, "train") for path in source_split.train)
+        split_by_path.update((path, "val") for path in source_split.val)
+        split_by_path.update((path, "test") for path in source_split.test)
+    return [
+        {
+            "source_path": str(path),
+            # This is intentionally the exact byte stream consumed by this trainer.
+            # #54 may rewrite a staged path to the original log path, while preserving
+            # the original source-log hash separately in one_line_learning_ingest.
+            "trainer_input_sha256": _file_sha256(path),
+            "split": split_by_path.get(path, "train"),
+        }
+        for path in sorted(paths, key=lambda value: str(value))
+    ]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load(
@@ -318,6 +371,12 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap_weight=args.bootstrap_weight,
         oracle_teacher_provenance=training_provenance.to_json(),
         oracle_dataset_provenance=dataset_provenance.to_json(),
+        dataset_files=paths,
+        source_split=split,
+        split_seed=args.seed,
+        val_fraction=args.val_fraction,
+        test_fraction=args.test_fraction,
+        inverse_regularization=args.inverse_regularization,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")

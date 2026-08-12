@@ -33,14 +33,16 @@ and the symmetric negative example. Near-ties below `--min-target-gap` are ignor
 This directly matches runtime use: the learned model produces one scalar score per node,
 then keeps the top-K scores.
 
-`no_target` nodes are excluded rather than treated as negative labels. Terminal targets
-receive full weight by default. `value_bootstrap` targets remain usable but are downweighted
-(default `0.5`) because they are censored by the Oracle search horizon / ValueModel.
+`no_target` nodes are excluded from pairwise labels rather than treated as negative labels,
+but remain present in the runtime-equivalent frontier used by selection evaluation.
+Terminal targets receive full weight by default. `value_bootstrap` targets remain usable
+but are downweighted (default `0.5`) because they are censored by the Oracle search horizon /
+ValueModel.
 
 ## Feature contract
 
 `PRUNER_FEATURE_NAMES` is shared by offline training and dependency-free runtime inference.
-The first schema deliberately uses only information already present in stable-prune traces:
+Feature schema v2 uses only information with matching student/runtime semantics:
 
 - current ValueModel score and frontier-relative value statistics/rank
 - root-action group size, group-relative value statistics, and within-group rank
@@ -48,14 +50,29 @@ The first schema deliberately uses only information already present in stable-pr
 - policy rank/score availability and post-coverage rank
 - structural-coverage provenance
 - coarse action type
-- target beam width, frontier size, remaining depth, and remaining time
+- target/runtime beam width and frontier size
 
 Opaque `action_id` values are never used as learned identities. `root_action_id` is used
 only to form within-frontier groups.
 
 For Oracle training records, the feature named `beam_width` is populated from
-`target_beam_width`, not the wider teacher search's prune K. This keeps the feature meaning
-aligned with the student decision being learned.
+`target_beam_width`, not the wider teacher search's prune K. Feature schema v2 deliberately
+excludes remaining-depth and remaining-time features: Oracle v3 records the wider teacher
+budget, so those values cannot be reconstructed with identical student/runtime semantics.
+
+### Linear pairwise baseline limitation
+
+Several feature columns are constant for every node in one frontier:
+`frontier_value_max`, `frontier_value_min`, `frontier_value_mean`,
+`frontier_value_std`, `beam_width`, and `frontier_size`. In the current pairwise objective,
+`x_better - x_worse` makes each of those columns exactly zero. At runtime the same linear
+term is also added to every node score, so it cannot change the ordering.
+
+Therefore feature schema v2 does **not** make this independent linear baseline adapt its
+ranking rule to K/frontier size or other purely global context. Those columns are retained
+in the shared schema for observability and forward compatibility. A context-adaptive model
+needs node-by-context interactions, a nonlinear scorer, or a listwise/set-selection model;
+that is a later model change rather than an implicit capability of the v2 linear artifact.
 
 ## Train
 
@@ -72,6 +89,7 @@ Useful options:
 ```text
 --val-fraction 0.1
 --test-fraction 0.1
+--seed 0
 --inverse-regularization 1.0
 --min-target-gap 1e-6
 --terminal-weight 1.0
@@ -84,17 +102,23 @@ one episode/run per JSONL file (or otherwise preserve an episode-level file boun
 
 The training-only implementation uses `numpy`/`scikit-learn`. The emitted JSON artifact
 contains feature schema/version, coefficients, scaler values, training settings,
-provenance, and metrics.
+provenance, and metrics. Its `training` metadata also records split seed/fractions,
+inverse regularization, split membership, and a `trainer_input_sha256` for every JSONL file.
+The hash is always the exact byte stream consumed by `train_stable_pruner.py`. When #54's
+one-line ingestion stages normalized Oracle records, the staged path is later rewritten to
+the original source-log path while this hash continues to identify the normalized bytes the
+trainer actually saw; #54 separately records the original source-log SHA-256 under
+`one_line_learning_ingest.source_logs`.
 
 ## Offline metrics
 
 Each training split reports:
 
 - pairwise accuracy / weighted pairwise accuracy
+- label coverage and selected-`no_target` rates on the full runtime-equivalent frontier
 - learned Recall@K against downstream `target_value` top-K
-- `ValueTopKPruner` Recall@K on the same labeled slice
-- best reachable target-value regret for learned and ValueTopK selection
-- mean selected target-value gap versus teacher top-K
+- `ValueTopKPruner` Recall@K on the same known-target population while ranking all nodes
+- conditional target-value regret/gap where the selected K and teacher top-K are fully labeled
 
 For a completely separate held-out Oracle collection, evaluate an artifact without
 retraining:
@@ -106,8 +130,9 @@ python tools/eval_stable_pruner.py \
 ```
 
 The evaluator reports the same learned-vs-`ValueTopKPruner` ranking/selection metrics and
-includes the artifact hash-derived version. This makes repeated evaluations of different
-artifacts unambiguous.
+includes the artifact hash-derived version. Held-out `min_target_gap` and target-source
+weights default to the artifact's training metadata; explicit CLI overrides are reported as
+such. This makes repeated evaluations of different artifacts unambiguous.
 
 These are teacher-distillation metrics, not final gameplay quality. A model should not be
 promoted solely because it improves pairwise accuracy.
