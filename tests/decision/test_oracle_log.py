@@ -82,6 +82,47 @@ class OracleJsonlWriterTest(unittest.TestCase):
         )
         self.assertEqual(parsed["provenance"]["teacher_value_class"], "example.Value")
 
+    def test_writer_preserves_card_upgrade_level_and_enchantment(self) -> None:
+        """oracle_collection_record() keeps the raw masked_emulator_dto verbatim so
+        future feature extractors can be rebuilt without replaying the emulator (see
+        its docstring) - confirm that guarantee actually covers the per-card
+        upgradeLevel/enchantment fields (STS2_Emulator#7 / STS2_RL#41), not just
+        scalar top-level fields like hp."""
+        decision = {
+            "decision_point_id": "d-root",
+            "masked_emulator_dto": {
+                "hand": [
+                    {
+                        "id": "WITHER",
+                        "type": "Status",
+                        "upgraded": True,
+                        "upgradeLevel": 2,
+                        "enchantment": None,
+                    },
+                    {
+                        "id": "STRIKE_IRONCLAD",
+                        "type": "Attack",
+                        "upgraded": False,
+                        "upgradeLevel": 0,
+                        "enchantment": {"id": "SHARP", "amount": 3, "status": "Normal"},
+                    },
+                ],
+                "legal_actions": [],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            OracleJsonlWriter(path).write(decision, self._result(), training_commit="abc123")
+            parsed = json.loads(path.read_text(encoding="utf-8").strip())
+
+        hand = parsed["masked_emulator_dto"]["hand"]
+        wither = next(c for c in hand if c["id"] == "WITHER")
+        self.assertTrue(wither["upgraded"])
+        self.assertEqual(wither["upgradeLevel"], 2)
+
+        strike = next(c for c in hand if c["id"] == "STRIKE_IRONCLAD")
+        self.assertEqual(strike["enchantment"], {"id": "SHARP", "amount": 3, "status": "Normal"})
+
     def test_writer_appends_one_record_per_decision(self) -> None:
         decision = {
             "decision_point_id": "d-root",
