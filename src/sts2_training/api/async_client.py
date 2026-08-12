@@ -65,6 +65,10 @@ class AsyncTrainingApiClient(ApiContract):
         self._next_request_seq = 1
         self._pending_retry: RetryRequest | None = None
         self._session_invalid = False
+        self._emulate_actions_boundaries: frozenset[str] = frozenset()
+        self._pending_retry_cleanup: (
+            tuple[RetryRequest, str, tuple[str, ...]] | None
+        ) = None
 
     @property
     def next_request_seq(self) -> int:
@@ -86,6 +90,78 @@ class AsyncTrainingApiClient(ApiContract):
     def session_invalid(self) -> bool:
         return self._session_invalid
 
+    @property
+    def emulate_actions_boundaries(self) -> frozenset[str]:
+        """Semantic boundaries the active RL instance accepts via ``emulate_actions``.
+
+        Older v0.7 servers omit this optional capability; an empty set therefore means
+        callers must not infer semantic batch support merely from the numeric batch size.
+        """
+
+        return self._emulate_actions_boundaries
+
+    def defer_branch_cleanup_after_retry(
+        self,
+        retry_request: RetryRequest,
+        instance_id: str,
+        branch_ids: Sequence[str],
+    ) -> None:
+        """Attach owned Branch cleanup to an unresolved exact-replay request.
+
+        A caller that created speculative Branches must not send ``release_branches``
+        while an earlier request is completion-uncertain. Registering the ownership here
+        keeps cleanup in the same serialized lifecycle: once the exact replay succeeds,
+        the client sends the release as the immediately following sequence before
+        returning the recovered result. If that release itself becomes uncertain, its
+        exact request becomes ``pending_retry`` and remains recoverable in the same way.
+        """
+
+        if self._session_invalid:
+            raise RuntimeError("RL session is invalid; cannot defer Branch cleanup")
+        if self._pending_retry is None or retry_request != self._pending_retry:
+            raise ValueError("cleanup must be attached to the current pending_retry")
+
+        request = retry_request.to_message()
+        if request.get("instance_id") != instance_id:
+            raise ValueError("deferred cleanup instance_id does not match pending request")
+        if retry_request.operation not in {"emulate_action", "emulate_actions"}:
+            raise ValueError("deferred Branch cleanup requires an emulate request")
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for branch_id in branch_ids:
+            if not isinstance(branch_id, str) or not branch_id or branch_id == ROOT_BRANCH_ID:
+                raise ValueError("deferred cleanup branch_ids must be non-root strings")
+            if branch_id not in seen:
+                seen.add(branch_id)
+                normalized.append(branch_id)
+        if not normalized:
+            raise ValueError("deferred cleanup branch_ids must not be empty")
+
+        expected: set[str] = set()
+        if retry_request.operation == "emulate_action":
+            branch_id = request.get("branch_id")
+            if isinstance(branch_id, str) and branch_id:
+                expected.add(branch_id)
+        else:
+            items = request.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, Mapping):
+                        branch_id = item.get("branch_id")
+                        if isinstance(branch_id, str) and branch_id:
+                            expected.add(branch_id)
+        if not expected or not expected <= seen:
+            raise ValueError(
+                "deferred cleanup must include every Branch that the pending emulate "
+                "request may have created"
+            )
+
+        record = (retry_request, instance_id, tuple(normalized))
+        if self._pending_retry_cleanup is not None and self._pending_retry_cleanup != record:
+            raise RuntimeError("a different deferred Branch cleanup is already pending")
+        self._pending_retry_cleanup = record
+
     def _accept_start_instance_for_request(
         self,
         request: Mapping[str, object],
@@ -100,7 +176,24 @@ class AsyncTrainingApiClient(ApiContract):
             raise ApiProtocolError(
                 "combat start_instance response must include max_emulate_actions_items"
             )
-        return self._accept_start_instance(response)
+
+        raw_boundaries = response.get("emulate_actions_boundaries", [])
+        if raw_boundaries is None:
+            raw_boundaries = []
+        if not isinstance(raw_boundaries, list) or any(
+            not isinstance(boundary, str) or not boundary
+            for boundary in raw_boundaries
+        ):
+            raise ApiProtocolError(
+                "emulate_actions_boundaries must be an array of non-empty strings"
+            )
+        if len(set(raw_boundaries)) != len(raw_boundaries):
+            raise ApiProtocolError("emulate_actions_boundaries must not contain duplicates")
+
+        instance_id = self._accept_start_instance(response)
+        self._emulate_actions_boundaries = frozenset(raw_boundaries)
+        self._pending_retry_cleanup = None
+        return instance_id
 
     async def retry_request(
         self,
@@ -150,19 +243,34 @@ class AsyncTrainingApiClient(ApiContract):
                 parent = request.get("parent_branch_id")
                 if not isinstance(parent, str) or not parent:
                     raise ApiProtocolError("retry emulate_action is missing parent_branch_id")
-                return await self._execute_selected_action(
+                result = await self._execute_selected_action(
                     request, source_branch_id=parent, deadline=deadline
                 )
+                await self._complete_deferred_branch_cleanup(
+                    retry_request,
+                    deadline=deadline,
+                )
+                return result
 
             if operation == "emulate_actions":
                 items = request.get("items")
                 if not isinstance(items, list) or not items:
                     raise ApiProtocolError("retry emulate_actions is missing items")
-                return await self._execute_emulate_actions(request, deadline=deadline)
+                result = await self._execute_emulate_actions(request, deadline=deadline)
+                await self._complete_deferred_branch_cleanup(
+                    retry_request,
+                    deadline=deadline,
+                )
+                return result
 
             if operation in {"cancel_branches", "release_branches", "get_branch_status"}:
                 response = await self._execute(request, deadline=deadline)
                 self._consume_sequence(retry_request)
+                if (
+                    self._pending_retry_cleanup is not None
+                    and self._pending_retry_cleanup[0] == retry_request
+                ):
+                    self._pending_retry_cleanup = None
                 return response
 
             if operation == "close_instance":
@@ -173,6 +281,7 @@ class AsyncTrainingApiClient(ApiContract):
                     await self._mark_protocol_uncertain(request)
                     raise
                 self._consume_sequence(retry_request)
+                self._clear_instance_extensions()
                 return result
 
             raise ValueError(f"unsupported pending operation {operation!r}")
@@ -409,6 +518,7 @@ class AsyncTrainingApiClient(ApiContract):
                 await self._mark_protocol_uncertain(request)
                 raise
             self._consume_sequence(RetryRequest.from_message(request))
+            self._clear_instance_extensions()
             return result
 
     async def close(self) -> None:
@@ -439,6 +549,40 @@ class AsyncTrainingApiClient(ApiContract):
             self._consume_sequence(RetryRequest.from_message(request))
             return response
 
+    async def _complete_deferred_branch_cleanup(
+        self,
+        source_retry: RetryRequest,
+        *,
+        deadline: float,
+    ) -> None:
+        record = self._pending_retry_cleanup
+        if record is None or record[0] != source_retry:
+            return
+
+        _, instance_id, branch_ids = record
+        cleanup_request = self._build_branch_batch_operation(
+            self._next_request_seq,
+            "release_branches",
+            instance_id,
+            branch_ids,
+        )
+        cleanup_token = RetryRequest.from_message(cleanup_request)
+        self._pending_retry_cleanup = (cleanup_token, instance_id, branch_ids)
+
+        # Claim the cleanup sequence before the first cancellation point. This is safe
+        # even if the frame has not yet left the process: exact replaying an idempotent
+        # release with the same next sequence is valid in either case, while forgetting
+        # the cleanup token could leak Branch ownership after a cancellation.
+        self._remember_pending(cleanup_token)
+        try:
+            await self._execute(cleanup_request, deadline=deadline)
+            self._consume_sequence(cleanup_token)
+        except BaseException:
+            if self._pending_retry != cleanup_token:
+                self._pending_retry_cleanup = None
+            raise
+        self._pending_retry_cleanup = None
+
     async def _execute(self, request: JsonObject, *, deadline: float) -> JsonObject:
         token = RetryRequest.from_message(request)
         if token.request_seq != self._next_request_seq:
@@ -453,6 +597,7 @@ class AsyncTrainingApiClient(ApiContract):
         except ServerEpochChangedError:
             self._session_invalid = True
             self._pending_retry = None
+            self._pending_retry_cleanup = None
             raise
         except asyncio.CancelledError as exc:
             if getattr(exc, "completion_uncertain", False):
@@ -479,6 +624,7 @@ class AsyncTrainingApiClient(ApiContract):
                 # state machine, so this logical client is permanently failed closed.
                 self._session_invalid = True
                 self._pending_retry = None
+                self._pending_retry_cleanup = None
                 raise
 
             self._consume_sequence(token)
@@ -487,9 +633,11 @@ class AsyncTrainingApiClient(ApiContract):
                 self._instance_type = None
                 self._pending_start_instance_type = None
                 self._max_emulate_actions_items = None
+                self._clear_instance_extensions()
                 self._audit.clear()
             if fault_kind in _FATAL_CONSUMING_SESSION_REJECTIONS:
                 self._session_invalid = True
+                self._pending_retry_cleanup = None
             raise
         except ApiProtocolError:
             await self._mark_protocol_uncertain(request)
@@ -570,6 +718,10 @@ class AsyncTrainingApiClient(ApiContract):
             raise RuntimeError("cannot consume an unexpected request sequence")
         self._pending_retry = None
         self._next_request_seq += 1
+
+    def _clear_instance_extensions(self) -> None:
+        self._emulate_actions_boundaries = frozenset()
+        self._pending_retry_cleanup = None
 
     @asynccontextmanager
     async def _operation_deadline(self, timeout_s: float) -> AsyncIterator[float]:
