@@ -6,6 +6,10 @@ without passing those intermediate states through the global ValueModel. Stable/
 states are value-scored only after the continuation resolves. This keeps ValueModel's
 meaning centered on resolved Combat states while still bounding continuation work with
 `max_continuation_steps` and `beam_width`.
+
+Stable/resolved frontier selection is delegated to ``StableFrontierPruner``. Policy
+candidate limits, continuation ordering, and Whole Run active-branch capacity remain
+separate mechanisms owned by this engine.
 """
 
 from __future__ import annotations
@@ -20,13 +24,33 @@ from typing import Any
 
 from sts2_training.api.contract import ROOT_BRANCH_ID, RequestRejectedError
 from sts2_training.api.transport import TransportError
+from sts2_training.decision.candidate_coverage import (
+    CandidateProposal,
+    propose_batch_with_provenance,
+)
 from sts2_training.decision.combat_decision import (
     CONTINUATION_ACTION_TYPES,
     action_type_for_id,
     available_action_types,
     is_continuation_decision,
 )
-from sts2_training.decision.policy import ActionCandidate, PolicyModel
+from sts2_training.decision.policy import PolicyModel
+from sts2_training.decision.search_trace import (
+    PolicyCandidateTrace,
+    PolicyProposalTrace,
+    SearchTraceCollector,
+    SearchTraceEnd,
+    SearchTraceEvent,
+    SearchTraceStart,
+    StablePruneNodeTrace,
+    StablePruneTrace,
+)
+from sts2_training.decision.stable_pruner import (
+    StableFrontierPruner,
+    StablePruneContext,
+    StablePruneNodeView,
+    ValueTopKPruner,
+)
 from sts2_training.decision.value import ValueModel
 
 JsonObject = dict[str, Any]
@@ -45,7 +69,6 @@ class BeamSearchConfig:
     max_batch_size: int = 64
     expand_partial: bool = True
     release_branches_on_finish: bool = True
-    # Action-type scope is independent from transport capability and Whole Run boundary.
     beam_searchable_action_types: frozenset[str] = field(
         default_factory=lambda: frozenset({"system", "card", "potion"})
     )
@@ -87,6 +110,13 @@ class BeamNode:
     continuation_steps: int = 0
     branch_log: tuple[Any, ...] = ()
     terminal: bool = False
+    action_id: str | None = None
+    action_type: str | None = None
+    action: Mapping[str, Any] | None = None
+    policy_rank: int | None = None
+    policy_score: float | None = None
+    post_coverage_rank: int | None = None
+    candidate_source: str | None = None
 
 
 @dataclass
@@ -135,12 +165,34 @@ class BeamSearchEngine:
         policy: PolicyModel,
         value_fn: ValueModel,
         config: BeamSearchConfig | None = None,
+        stable_pruner: StableFrontierPruner | None = None,
+        trace_collector: SearchTraceCollector | None = None,
     ) -> None:
         self._client = client
         self._policy = policy
         self._value_fn = value_fn
         self.config = config or BeamSearchConfig()
+        self._stable_pruner = stable_pruner or ValueTopKPruner()
+        self._trace_collector = trace_collector
         self._allocator = BranchIdAllocator()
+
+    @property
+    def stable_pruner(self) -> StableFrontierPruner:
+        return self._stable_pruner
+
+    @stable_pruner.setter
+    def stable_pruner(self, pruner: StableFrontierPruner) -> None:
+        if not isinstance(pruner, StableFrontierPruner):
+            raise TypeError("stable_pruner must be a StableFrontierPruner")
+        self._stable_pruner = pruner
+
+    @property
+    def trace_collector(self) -> SearchTraceCollector | None:
+        return self._trace_collector
+
+    @trace_collector.setter
+    def trace_collector(self, collector: SearchTraceCollector | None) -> None:
+        self._trace_collector = collector
 
     async def search(
         self,
@@ -183,6 +235,24 @@ class BeamSearchEngine:
         ):
             return BeamSearchResult(None, None, None, "not_beam_searchable", stats)
 
+        search_id = uuid.uuid4().hex
+        self._record_trace(
+            SearchTraceStart(
+                search_id=search_id,
+                instance_id=instance_id,
+                root_decision_point_id=root_decision_point_id,
+                beam_width=cfg.beam_width,
+                top_k_actions=cfg.top_k_actions,
+                max_depth=cfg.max_depth,
+                max_continuation_steps=cfg.max_continuation_steps,
+                time_budget_ms=(
+                    None if cfg.time_budget_ms is None else float(cfg.time_budget_ms)
+                ),
+                pruner_name=self._stable_pruner.name,
+                pruner_version=self._stable_pruner.version,
+            )
+        )
+
         beam: list[BeamNode] = [
             BeamNode(
                 branch_id=ROOT_BRANCH_ID,
@@ -195,14 +265,14 @@ class BeamSearchEngine:
                 root_action_id=None,
             )
         ]
-        # Stable nodes wait here while sibling macro-actions finish their interactive
-        # continuation. They rejoin only when no unresolved continuation remains.
         waiting_stable: list[BeamNode] = []
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
         released_branch_ids: set[str] = set()
         reason = "max_depth"
         search_error: BaseException | None = None
+        proposal_step_index = 0
+        prune_step_index = 0
 
         try:
             while beam:
@@ -225,7 +295,12 @@ class BeamSearchEngine:
                     reason = "not_beam_searchable"
                     break
 
-                items, item_meta, policy_ms = self._propose_frontier(beam)
+                items, item_meta, policy_ms = self._propose_frontier(
+                    beam,
+                    search_id=search_id,
+                    proposal_step_index=proposal_step_index,
+                )
+                proposal_step_index += 1
                 stats.policy_ms += policy_ms
                 if not items:
                     reason = "no_candidates"
@@ -290,22 +365,31 @@ class BeamSearchEngine:
                 finished.extend(newly_finished)
 
                 continuation_nodes = [
-                    node for node in next_beam if is_continuation_decision(node.masked_emulator_dto)
+                    node
+                    for node in next_beam
+                    if is_continuation_decision(node.masked_emulator_dto)
                 ]
                 stable_nodes = [
-                    node for node in next_beam if not is_continuation_decision(node.masked_emulator_dto)
+                    node
+                    for node in next_beam
+                    if not is_continuation_decision(node.masked_emulator_dto)
                 ]
 
                 if continuation_nodes:
-                    # Local continuation beam: policy/item order is the pruning signal;
-                    # ValueModel never sees the unresolved pending-choice DTOs.
                     waiting_stable.extend(stable_nodes)
                     beam = continuation_nodes[: cfg.beam_width]
                 else:
                     stable_nodes.extend(waiting_stable)
                     waiting_stable = []
-                    stable_nodes.sort(key=lambda node: node.value, reverse=True)
-                    beam = stable_nodes[: cfg.beam_width]
+                    beam = self._prune_stable_frontier(
+                        stable_nodes,
+                        search_id=search_id,
+                        prune_step_index=prune_step_index,
+                        phase="stable_frontier",
+                        search_deadline=search_deadline,
+                        depths_completed=stats.depths_completed,
+                    )
+                    prune_step_index += 1
 
                 if fatal_reason is not None:
                     reason = fatal_reason
@@ -314,8 +398,15 @@ class BeamSearchEngine:
 
                 if not beam:
                     if waiting_stable:
-                        waiting_stable.sort(key=lambda node: node.value, reverse=True)
-                        beam = waiting_stable[: cfg.beam_width]
+                        beam = self._prune_stable_frontier(
+                            waiting_stable,
+                            search_id=search_id,
+                            prune_step_index=prune_step_index,
+                            phase="waiting_stable_fallback",
+                            search_deadline=search_deadline,
+                            depths_completed=stats.depths_completed,
+                        )
+                        prune_step_index += 1
                         waiting_stable = []
                     elif hit_continuation_limit:
                         reason = "max_continuation_steps"
@@ -327,12 +418,6 @@ class BeamSearchEngine:
                         reason = "beam_exhausted"
                         break
 
-                # Whole Run uses the published max_emulate_actions_items value as both
-                # the per-request item ceiling and the total active Branch capacity. Once
-                # a depth is materialized, release every Branch that can no longer become
-                # a parent. Waiting stable siblings remain live only until the next
-                # iteration's capacity planner decides how many can be retained while
-                # reserving room for the next child frontier.
                 released = await self._release_unneeded_whole_run_branches(
                     instance_id,
                     all_branch_ids,
@@ -345,10 +430,6 @@ class BeamSearchEngine:
                     reason = "active_branch_cleanup_failed"
                     break
 
-            # A continuation is a local macro-action implementation detail until it
-            # resolves to a stable/terminal Combat state. Search termination (including
-            # time_budget) must never promote an unresolved continuation just because it
-            # still occupies the live beam with an inherited parent value.
             finished.extend(waiting_stable)
             finished.extend(node for node in beam if _is_macro_resolved(node))
         except BaseException as exc:
@@ -380,36 +461,62 @@ class BeamSearchEngine:
             if node.root_action_id is not None and _is_macro_resolved(node)
         ]
         if not actionable:
-            return BeamSearchResult(None, None, None, reason, stats)
-        best_node = max(actionable, key=lambda node: node.value)
-        return BeamSearchResult(
-            best_node.root_action_id, best_node.value, best_node, reason, stats
+            result = BeamSearchResult(None, None, None, reason, stats)
+        else:
+            best_node = max(actionable, key=lambda node: node.value)
+            result = BeamSearchResult(
+                best_node.root_action_id, best_node.value, best_node, reason, stats
+            )
+        self._record_trace(
+            SearchTraceEnd(
+                search_id=search_id,
+                reason=result.reason,
+                best_root_action_id=result.best_root_action_id,
+                best_value=result.best_value,
+                depths_completed=result.stats.depths_completed,
+                nodes_expanded=result.stats.nodes_expanded,
+                branches_created=result.stats.branches_created,
+            )
         )
+        return result
 
     def _propose_frontier(
-        self, beam: Sequence[BeamNode]
-    ) -> tuple[list[JsonObject], list[tuple[BeamNode, ActionCandidate, str, int]], float]:
+        self,
+        beam: Sequence[BeamNode],
+        *,
+        search_id: str,
+        proposal_step_index: int,
+    ) -> tuple[
+        list[JsonObject],
+        list[tuple[BeamNode, CandidateProposal, str, int]],
+        float,
+    ]:
         t0 = time.monotonic()
         requests = [
             (node.masked_emulator_dto.get("legal_actions") or [], node.masked_emulator_dto)
             for node in beam
         ]
-        proposals = self._policy.propose_batch(requests, top_k=self.config.top_k_actions)
+        proposals = propose_batch_with_provenance(
+            self._policy,
+            requests,
+            top_k=self.config.top_k_actions,
+        )
         policy_ms = (time.monotonic() - t0) * 1000.0
         if len(proposals) != len(beam):
             raise RuntimeError("PolicyModel.propose_batch must return exactly one entry per request")
 
         items: list[JsonObject] = []
-        item_meta: list[tuple[BeamNode, ActionCandidate, str, int]] = []
-        for node, candidates in zip(beam, proposals):
+        item_meta: list[tuple[BeamNode, CandidateProposal, str, int]] = []
+        for parent_index, (node, candidates) in enumerate(zip(beam, proposals)):
             if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
                 raise RuntimeError("PolicyModel.propose_batch entries must be candidate sequences")
             if len(candidates) > self.config.top_k_actions:
                 raise RuntimeError("PolicyModel.propose_batch returned more than top_k candidates")
             available_ids = _available_action_ids(node.masked_emulator_dto)
+            trace_candidates: list[PolicyCandidateTrace] = []
             for candidate in candidates:
-                if not isinstance(candidate, ActionCandidate):
-                    raise RuntimeError("PolicyModel.propose_batch must return ActionCandidate objects")
+                if not isinstance(candidate, CandidateProposal):
+                    raise RuntimeError("policy provenance adapter returned an invalid candidate")
                 if candidate.action_id not in available_ids:
                     raise RuntimeError(
                         "PolicyModel proposed an action_id that is not currently available: "
@@ -417,7 +524,9 @@ class BeamSearchEngine:
                     )
                 branch_id = self._allocator.next_branch_id()
                 rng_id = (
-                    node.rng_id if node.branch_id != ROOT_BRANCH_ID else self._allocator.next_rng_id()
+                    node.rng_id
+                    if node.branch_id != ROOT_BRANCH_ID
+                    else self._allocator.next_rng_id()
                 )
                 items.append(
                     {
@@ -429,34 +538,140 @@ class BeamSearchEngine:
                     }
                 )
                 item_meta.append((node, candidate, branch_id, rng_id))
+                if self._trace_collector is not None:
+                    action = _action_for_id(node.masked_emulator_dto, candidate.action_id)
+                    trace_candidates.append(
+                        PolicyCandidateTrace(
+                            action_id=candidate.action_id,
+                            action={} if action is None else dict(action),
+                            branch_id=branch_id,
+                            rng_id=rng_id,
+                            policy_rank=candidate.policy_rank,
+                            policy_score=candidate.policy_score,
+                            post_coverage_rank=candidate.post_coverage_rank,
+                            candidate_source=candidate.candidate_source,
+                        )
+                    )
+
+            if self._trace_collector is not None:
+                self._record_trace(
+                    PolicyProposalTrace(
+                        search_id=search_id,
+                        proposal_step_id=(
+                            f"{search_id}:proposal:{proposal_step_index}:{parent_index}"
+                        ),
+                        parent_node_id=_trace_node_id(search_id, node.branch_id),
+                        parent_branch_id=node.branch_id,
+                        decision_point_id=node.decision_point_id,
+                        legal_actions=tuple(
+                            dict(action)
+                            for action in _legal_action_mappings(node.masked_emulator_dto)
+                        ),
+                        candidates=tuple(trace_candidates),
+                    )
+                )
         return items, item_meta, policy_ms
+
+    def _prune_stable_frontier(
+        self,
+        frontier: Sequence[BeamNode],
+        *,
+        search_id: str,
+        prune_step_index: int,
+        phase: str,
+        search_deadline: float,
+        depths_completed: int,
+    ) -> list[BeamNode]:
+        prune_step_id = f"{search_id}:prune:{prune_step_index}"
+        remaining_time_ms = max(0.0, (search_deadline - time.monotonic()) * 1000.0)
+        context = StablePruneContext(
+            search_id=search_id,
+            prune_step_id=prune_step_id,
+            phase=phase,
+            beam_width=self.config.beam_width,
+            max_depth=self.config.max_depth,
+            depths_completed=depths_completed,
+            remaining_time_ms=remaining_time_ms,
+        )
+        frontier_views = tuple(_stable_prune_node_view(node) for node in frontier)
+        selected_indices = self._stable_pruner.select(
+            frontier_views,
+            k=self.config.beam_width,
+            context=context,
+        )
+        selected_indices = _validated_pruner_indices(
+            selected_indices,
+            frontier_size=len(frontier),
+            k=self.config.beam_width,
+        )
+        selected = [frontier[index] for index in selected_indices]
+
+        if self._trace_collector is not None:
+            selected_index_set = set(selected_indices)
+            self._record_trace(
+                StablePruneTrace(
+                    search_id=search_id,
+                    prune_step_id=prune_step_id,
+                    phase=phase,
+                    k=self.config.beam_width,
+                    frontier_size=len(frontier),
+                    pruner_name=self._stable_pruner.name,
+                    pruner_version=self._stable_pruner.version,
+                    max_depth=self.config.max_depth,
+                    depths_completed=depths_completed,
+                    remaining_time_ms=remaining_time_ms,
+                    nodes=tuple(
+                        StablePruneNodeTrace(
+                            node_id=_trace_node_id(search_id, node.branch_id),
+                            parent_node_id=_trace_node_id(
+                                search_id, node.parent_branch_id
+                            ),
+                            branch_id=node.branch_id,
+                            parent_branch_id=node.parent_branch_id,
+                            frontier_index_before_prune=index,
+                            kept=index in selected_index_set,
+                            value=view.value,
+                            root_action_id=view.root_action_id,
+                            rng_id=node.rng_id,
+                            decision_point_id=node.decision_point_id,
+                            depth=view.depth,
+                            combat_depth=view.combat_depth,
+                            continuation_steps=view.continuation_steps,
+                            terminal=view.terminal,
+                            action_id=node.action_id,
+                            action_type=view.action_type,
+                            action=None if node.action is None else dict(node.action),
+                            policy_rank=view.policy_rank,
+                            policy_score=view.policy_score,
+                            post_coverage_rank=view.post_coverage_rank,
+                            candidate_source=view.candidate_source,
+                        )
+                        for index, (node, view) in enumerate(zip(frontier, frontier_views))
+                    ),
+                    selected_indices=tuple(selected_indices),
+                )
+            )
+        return selected
+
+    def _record_trace(self, event: SearchTraceEvent) -> None:
+        if self._trace_collector is not None:
+            self._trace_collector.record(event)
 
     def _fit_whole_run_frontier_to_active_capacity(
         self,
         beam: Sequence[BeamNode],
         waiting_stable: Sequence[BeamNode],
         items: Sequence[JsonObject],
-        item_meta: Sequence[tuple[BeamNode, ActionCandidate, str, int]],
+        item_meta: Sequence[tuple[BeamNode, CandidateProposal, str, int]],
     ) -> tuple[
         list[BeamNode],
         list[BeamNode],
         list[JsonObject],
-        list[tuple[BeamNode, ActionCandidate, str, int]],
+        list[tuple[BeamNode, CandidateProposal, str, int]],
         list[BeamNode],
         bool,
     ]:
-        """Fit a Whole Run frontier inside RL's shared active Branch budget.
-
-        For Whole Run, ``max_emulate_actions_items`` is the configured Branch capacity:
-        every live non-root parent and waiting stable sibling consumes one slot until it
-        is released, and every newly submitted child consumes another. Chunking cannot
-        make an oversized depth safe because children from earlier chunks remain active.
-
-        Keep the highest-priority beam parents in existing beam order, keep each selected
-        parent's policy candidates in policy order, then use any remaining capacity for
-        the highest-valued waiting stable siblings. Stable nodes pruned only for capacity
-        remain valid local finished candidates even after their RL Branch is released.
-        """
+        """Fit a Whole Run frontier inside RL's shared active Branch budget."""
         capacity = _server_active_branch_capacity(self._client)
         if capacity is None:
             return list(beam), list(waiting_stable), list(items), list(item_meta), [], False
@@ -500,8 +715,6 @@ class BeamSearchEngine:
         if pruned_waiting:
             limited = True
 
-        # Capacity-pruned resolved nodes remain usable local candidates. Unresolved
-        # continuation nodes must never be promoted with their inherited stale value.
         capacity_finished = [
             node for node in (*pruned_beam, *pruned_waiting) if _is_macro_resolved(node)
         ]
@@ -524,7 +737,7 @@ class BeamSearchEngine:
         self,
         instance_id: str,
         items: Sequence[JsonObject],
-        item_meta: Sequence[tuple[BeamNode, ActionCandidate, str, int]],
+        item_meta: Sequence[tuple[BeamNode, CandidateProposal, str, int]],
         all_branch_ids: list[str],
         stats: BeamSearchStats,
         deadline: float,
@@ -569,15 +782,16 @@ class BeamSearchEngine:
 
     def _score_frontier(
         self,
-        item_meta: Sequence[tuple[BeamNode, ActionCandidate, str, int]],
+        item_meta: Sequence[tuple[BeamNode, Any, str, int]],
         branch_results: Mapping[str, Any],
         depth: int | None = None,
     ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool]:
+        del depth
         cfg = self.config
         resolved: list[
             tuple[
                 BeamNode,
-                ActionCandidate,
+                Any,
                 str,
                 int,
                 Mapping[str, Any],
@@ -591,12 +805,10 @@ class BeamSearchEngine:
                 continue
             dto = result.get("masked_emulator_dto")
             if isinstance(dto, Mapping):
-                resolved.append((node, candidate, branch_id, rng_id, result, dto, result.get("status")))
+                resolved.append(
+                    (node, candidate, branch_id, rng_id, result, dto, result.get("status"))
+                )
 
-        # Preserve the historical Combat-client behavior of value-scoring a resolved
-        # non-continuation child even when that child will not be expanded further. Whole
-        # Run is stricter: a Reward/Map/Event boundary without combat_completed is outside
-        # the Combat ValueModel domain and must not be scored or promoted with stale value.
         value_entries = [
             entry
             for entry in resolved
@@ -633,6 +845,7 @@ class BeamSearchEngine:
                 raise RuntimeError(
                     f"selected action_id {candidate.action_id!r} has no valid action_type"
                 )
+            action = _action_for_id(node.masked_emulator_dto, candidate.action_id)
             is_continuation_action = action_type in CONTINUATION_ACTION_TYPES
             combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
             continuation_steps = node.continuation_steps + 1 if is_continuation_action else 0
@@ -649,7 +862,9 @@ class BeamSearchEngine:
                 branch_id=branch_id,
                 parent_branch_id=node.branch_id,
                 rng_id=rng_id,
-                decision_point_id=decision_point_id if isinstance(decision_point_id, str) else "",
+                decision_point_id=(
+                    decision_point_id if isinstance(decision_point_id, str) else ""
+                ),
                 masked_emulator_dto=dto,
                 depth=node.depth + 1,
                 value=value,
@@ -658,6 +873,13 @@ class BeamSearchEngine:
                 continuation_steps=continuation_steps,
                 branch_log=tuple(result.get("branch_log") or ()),
                 terminal=terminal,
+                action_id=candidate.action_id,
+                action_type=action_type,
+                action=None if action is None else dict(action),
+                policy_rank=getattr(candidate, "policy_rank", None),
+                policy_score=getattr(candidate, "policy_score", None),
+                post_coverage_rank=getattr(candidate, "post_coverage_rank", None),
+                candidate_source=getattr(candidate, "candidate_source", None),
             )
             cannot_expand = not new_node.decision_point_id or (
                 status == "partial" and not cfg.expand_partial
@@ -668,8 +890,6 @@ class BeamSearchEngine:
             if is_continuation_decision(dto):
                 if continuation_steps >= cfg.max_continuation_steps:
                     hit_continuation_limit = True
-                    # Do not rank an unresolved continuation using a stale parent value.
-                    # It is intentionally excluded from actionable finished results.
                     continue
                 next_beam.append(new_node)
                 continue
@@ -731,16 +951,20 @@ class BeamSearchEngine:
                 instance_id,
             )
             return
-        cancelled = await self._cleanup_call("cancel_branches", instance_id, branch_ids, deadline)
+        cancelled = await self._cleanup_call(
+            "cancel_branches", instance_id, branch_ids, deadline
+        )
         if not cancelled:
             _LOG.warning(
-                "skipping beam search branch release for instance_id=%s because cancellation did not complete",
+                "skipping beam search branch release for instance_id=%s because "
+                "cancellation did not complete",
                 instance_id,
             )
             return
         if _client_unusable(self._client):
             _LOG.warning(
-                "skipping beam search branch release for instance_id=%s after cancellation failure",
+                "skipping beam search branch release for instance_id=%s after "
+                "cancellation failure",
                 instance_id,
             )
             return
@@ -798,23 +1022,83 @@ def _server_batch_limit(client: Any) -> int | None:
 
 
 def _server_active_branch_capacity(client: Any) -> int | None:
-    """Whole Run's published branch capacity, shared by parents, waiters and children."""
     if getattr(client, "instance_type", None) != "whole_run":
         return None
     return _server_batch_limit(client)
 
 
-def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
+def _legal_action_mappings(dto: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     legal_actions = dto.get("legal_actions")
     if not isinstance(legal_actions, Sequence) or isinstance(legal_actions, (str, bytes)):
-        return set()
+        return []
+    return [action for action in legal_actions if isinstance(action, Mapping)]
+
+
+def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
     return {
         action_id
-        for action in legal_actions
-        if isinstance(action, Mapping) and action.get("is_available") is not False
+        for action in _legal_action_mappings(dto)
+        if action.get("is_available") is not False
         for action_id in [action.get("action_id")]
         if isinstance(action_id, str) and action_id
     }
+
+
+def _action_for_id(
+    dto: Mapping[str, Any], action_id: str
+) -> Mapping[str, Any] | None:
+    for action in _legal_action_mappings(dto):
+        if action.get("action_id") == action_id:
+            return action
+    return None
+
+
+def _stable_prune_node_view(node: BeamNode) -> StablePruneNodeView:
+    if is_continuation_decision(node.masked_emulator_dto):
+        raise RuntimeError(
+            "StableFrontierPruner cannot receive continuation nodes with inherited/stale values"
+        )
+    return StablePruneNodeView(
+        value=node.value,
+        root_action_id=node.root_action_id,
+        depth=node.depth,
+        combat_depth=node.combat_depth,
+        continuation_steps=node.continuation_steps,
+        terminal=node.terminal,
+        action_type=node.action_type,
+        policy_rank=node.policy_rank,
+        policy_score=node.policy_score,
+        post_coverage_rank=node.post_coverage_rank,
+        candidate_source=node.candidate_source,
+    )
+
+
+def _validated_pruner_indices(
+    selected: object,
+    *,
+    frontier_size: int,
+    k: int,
+) -> list[int]:
+    if not isinstance(selected, list):
+        raise RuntimeError("StableFrontierPruner.select must return list[int]")
+    if len(selected) > k:
+        raise RuntimeError("StableFrontierPruner.select returned more than k indices")
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for index in selected:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise RuntimeError("StableFrontierPruner.select indices must be integers, not bool")
+        if index < 0 or index >= frontier_size:
+            raise RuntimeError("StableFrontierPruner.select returned an out-of-range index")
+        if index in seen:
+            raise RuntimeError("StableFrontierPruner.select returned a duplicate index")
+        seen.add(index)
+        normalized.append(index)
+    return normalized
+
+
+def _trace_node_id(search_id: str, branch_id: str) -> str:
+    return f"{search_id}:{branch_id}"
 
 
 def _validated_values(values: Sequence[Any], *, expected: int) -> list[float]:
@@ -827,7 +1111,9 @@ def _validated_values(values: Sequence[Any], *, expected: int) -> list[float]:
         try:
             value = float(raw_value)
         except (TypeError, ValueError, OverflowError) as exc:
-            raise RuntimeError("ValueModel.evaluate_batch must return finite numeric values") from exc
+            raise RuntimeError(
+                "ValueModel.evaluate_batch must return finite numeric values"
+            ) from exc
         if not math.isfinite(value):
             raise RuntimeError("ValueModel.evaluate_batch must return finite numeric values")
         normalized.append(value)
@@ -841,12 +1127,6 @@ def _client_unusable(client: Any) -> bool:
 
 
 def _is_macro_resolved(node: BeamNode) -> bool:
-    """Whether a node is safe to expose as a completed root-action candidate.
-
-    Continuation DTOs inherit their parent's last stable Value while the local macro
-    action is unresolved. They must therefore never enter the global actionable set,
-    regardless of whether search stopped because of depth, rejection, or time budget.
-    """
     return node.terminal or not is_continuation_decision(node.masked_emulator_dto)
 
 
@@ -895,7 +1175,9 @@ def _has_unresolved_out_of_scope_result(
     return False
 
 
-def _is_beam_searchable(dto: Mapping[str, Any], allowed_action_types: frozenset[str]) -> bool:
+def _is_beam_searchable(
+    dto: Mapping[str, Any], allowed_action_types: frozenset[str]
+) -> bool:
     action_types = available_action_types(dto)
     return action_types is not None and bool(action_types) and action_types <= allowed_action_types
 

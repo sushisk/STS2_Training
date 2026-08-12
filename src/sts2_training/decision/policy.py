@@ -10,6 +10,7 @@ Beam topology.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 from collections.abc import Mapping, Sequence
@@ -76,6 +77,10 @@ class PolicyModel:
     Structural coverage is deliberately not part of this contract. The candidate layer
     may add required branch types after ranking so learned policies remain drop-in
     replacements for the heuristic prior.
+
+    ``oracle_provenance`` is the optional configuration-lineage seam used by budgeted
+    teacher collection. Implementations should return JSON-serializable metadata that
+    distinguishes materially different model/checkpoint/configuration states.
     """
 
     def propose(
@@ -97,6 +102,9 @@ class PolicyModel:
             self.propose(legal_actions, dto, top_k=top_k) for legal_actions, dto in requests
         ]
 
+    def oracle_provenance(self) -> Mapping[str, Any]:
+        return {}
+
 
 class PriorHeuristicPolicy(PolicyModel):
     """Cheap, state-aware action prior used before a learned policy exists.
@@ -111,6 +119,17 @@ class PriorHeuristicPolicy(PolicyModel):
 
     def __init__(self, rng: random.Random | None = None) -> None:
         self._rng = rng
+
+    def oracle_provenance(self) -> Mapping[str, Any]:
+        if self._rng is None:
+            return {"tie_break_rng": "disabled"}
+        state_digest = hashlib.sha256(
+            repr(self._rng.getstate()).encode("utf-8")
+        ).hexdigest()
+        return {
+            "tie_break_rng": "python_random",
+            "rng_state_sha256": state_digest,
+        }
 
     def propose(
         self,

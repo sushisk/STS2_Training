@@ -1,18 +1,8 @@
-"""Top-level entry points for starting an instance and driving it to completion,
-layered on `sts2_training.decision.CombatDecisionEngine`. See `how_to_use.md`.
+"""Top-level entry points for starting and collecting Training instances.
 
-Two entry points sharing one loop (`EpisodeRunner`):
-
-- `start_combat_from_state`: Combat from a fully-specified board (`CombatScenario`).
-- `start_new_run`: a normal, from-scratch Whole Run (`NewRunConfig`).
-
-Both accept `search_mode`/`beam_max_depth` to pick the beam config (see
-`decision.search_modes`) without hand-constructing a `BeamSearchConfig`.
-
-The executable `start_*` modules are lazy exports. Importing them eagerly here would
-preload the target before `python -m sts2_training.runner.start_*` executes it, causing
-runpy's "found in sys.modules" RuntimeWarning and executing the module in a second
-namespace.
+Ordinary episode runners and training-only oracle collection share the same Combat
+decision stack. Executable modules remain lazy exports so ``python -m`` does not preload
+the target module and trigger runpy's duplicate-module warning.
 """
 
 from __future__ import annotations
@@ -38,6 +28,58 @@ _LAZY_EXPORTS = {
     "start_new_run": ("sts2_training.runner.start_new_run", "start_new_run"),
     "SelfPlayRunResult": ("sts2_training.runner.self_play", "SelfPlayRunResult"),
     "run_self_play_batch": ("sts2_training.runner.self_play", "run_self_play_batch"),
+    "OracleEpisodeResult": (
+        "sts2_training.runner.oracle_collection",
+        "OracleEpisodeResult",
+    ),
+    "OracleEpisodeRunner": (
+        "sts2_training.runner.oracle_collection",
+        "OracleEpisodeRunner",
+    ),
+    "StablePrunerABArmResult": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABArmResult",
+    ),
+    "StablePrunerABPairResult": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABPairResult",
+    ),
+    "StablePrunerABReport": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABReport",
+    ),
+    "StablePrunerABRunner": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABRunner",
+    ),
+    "StablePrunerABSummary": (
+        "sts2_training.runner.stable_pruner_ab",
+        "StablePrunerABSummary",
+    ),
+    "StablePrunerABCaseResult": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABCaseResult",
+    ),
+    "StablePrunerABCaseSpec": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABCaseSpec",
+    ),
+    "StablePrunerABSuiteReport": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABSuiteReport",
+    ),
+    "StablePrunerABSuiteRunner": (
+        "sts2_training.runner.stable_pruner_ab_suite",
+        "StablePrunerABSuiteRunner",
+    ),
+    "PairedOutcomeStatistics": (
+        "sts2_training.runner.stable_pruner_ab_stats",
+        "PairedOutcomeStatistics",
+    ),
+    "paired_outcome_statistics": (
+        "sts2_training.runner.stable_pruner_ab_stats",
+        "paired_outcome_statistics",
+    ),
 }
 
 __all__ = [
@@ -48,9 +90,22 @@ __all__ = [
     "EpisodeResult",
     "EpisodeRunner",
     "NewRunConfig",
+    "OracleEpisodeResult",
+    "OracleEpisodeRunner",
+    "PairedOutcomeStatistics",
     "SEARCH_MODES",
     "SelfPlayRunResult",
+    "StablePrunerABArmResult",
+    "StablePrunerABCaseResult",
+    "StablePrunerABCaseSpec",
+    "StablePrunerABPairResult",
+    "StablePrunerABReport",
+    "StablePrunerABRunner",
+    "StablePrunerABSuiteReport",
+    "StablePrunerABSuiteRunner",
+    "StablePrunerABSummary",
     "build_engine",
+    "paired_outcome_statistics",
     "resolve_search_mode",
     "run_self_play_batch",
     "start_and_run",
