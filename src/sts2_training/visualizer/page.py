@@ -22,10 +22,10 @@ def build_index_html() -> str:
     .enemies .portrait { width:86px; height:98px; color:rgba(211,125,96,.72); }
 """,
         """    .enemies { position:relative; z-index:2; display:flex; gap:16px; align-items:stretch; justify-content:flex-end; min-width:0; overflow-x:auto; padding:18px 2px 0; scrollbar-width:thin; }
-    .enemies .entity { width:clamp(230px,22vw,300px); flex:0 0 clamp(230px,22vw,300px); text-align:left; }
+    .enemies .entity { width:clamp(250px,24vw,330px); flex:0 0 clamp(250px,24vw,330px); text-align:left; }
     .enemies .entity-card { max-width:none; min-height:154px; padding:14px 16px; }
     .enemy-card .entity-name { margin-bottom:12px; color:#f1e5bd; font-size:16px; font-weight:700; white-space:normal; overflow-wrap:anywhere; }
-    .enemy-facts { display:grid; grid-template-columns:minmax(0,1fr) minmax(72px,auto); gap:8px; margin-bottom:10px; }
+    .enemy-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-bottom:10px; }
     .enemy-fact { padding:7px 9px; border:1px solid rgba(174,199,190,.18); background:rgba(0,0,0,.22); min-width:0; }
     .enemy-fact span,.enemy-section-label { display:block; margin-bottom:3px; color:#7f918e; font:8px var(--mono); letter-spacing:.11em; }
     .enemy-fact strong { display:block; color:#f0d6c6; font:700 12px/1.35 var(--mono); overflow-wrap:anywhere; }
@@ -44,7 +44,7 @@ def build_index_html() -> str:
       const intentMove = value.intent === undefined || value.intent === null || value.intent === '' ? '—' : compact(value.intent,40);
       const block = value.block === undefined || value.block === null || value.block === '' ? '0' : value.block;
       const powers = renderPowers(value.powers) || '<div class=\"enemy-none\">—</div>';
-      target.innerHTML = `<div class=\"entity-card enemy-card\"><div class=\"entity-name\">${esc(value.name || `Enemy ${index+1}`)}</div><div class=\"enemy-facts\"><div class=\"enemy-fact\"><span>INTENT MOVE</span><strong>${esc(intentMove)}</strong></div><div class=\"enemy-fact\"><span>BLOCK</span><strong>${esc(block)}</strong></div></div><span class=\"enemy-section-label\">POWER</span>${powers}</div>`;
+      target.innerHTML = `<div class=\"entity-card enemy-card\"><div class=\"entity-name\">${esc(value.name || 'Enemy')}</div><div class=\"enemy-facts\"><div class=\"enemy-fact\"><span>HP</span><strong>${esc(hpText(value))}</strong></div><div class=\"enemy-fact\"><span>INTENT MOVE</span><strong>${esc(intentMove)}</strong></div><div class=\"enemy-fact\"><span>BLOCK</span><strong>${esc(block)}</strong></div></div><span class=\"enemy-section-label\">POWER</span>${powers}</div>`;
       return;
     }
     target.innerHTML = `${intent}<div class=\"entity-card\"><div class=\"portrait\">${icon}</div><div class=\"entity-name\">${esc(value.name || 'Player')}</div><div class=\"hpbar\"><div class=\"hpfill\" style=\"width:${pct(hp,maxHp)}%\"></div></div><div class=\"hptext\">${esc(hpText(value))}</div><div class=\"combat-tags\">${tags}</div>${renderPowers(value.powers)}</div>`;
