@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from sts2_training.api.contract import ApiOperationError
+from sts2_training.api.contract import RequestFaultedError, RequestRejectedError
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.event_branch_search import best_event_option
 
@@ -18,15 +19,21 @@ class _FakeClient:
         self,
         hp_by_action: dict[str, float | None],
         *,
-        fail_action_id: str | None = None,
+        fault_action_id: str | None = None,
+        reject_action_id: str | None = None,
         transport_fail_action_id: str | None = None,
+        invalidate_on_fault: bool = False,
+        release_error: Exception | None = None,
     ) -> None:
         self.hp_by_action = hp_by_action
-        self.fail_action_id = fail_action_id
+        self.fault_action_id = fault_action_id
+        self.reject_action_id = reject_action_id
         self.transport_fail_action_id = transport_fail_action_id
+        self.invalidate_on_fault = invalidate_on_fault
+        self.release_error = release_error
         self.session_invalid = False
+        self.pending_retry = None
         self.emulate_calls: list[dict[str, object]] = []
-        self.cancelled: list[list[str]] = []
         self.released: list[list[str]] = []
         self.release_timeouts: list[float] = []
 
@@ -50,9 +57,20 @@ class _FakeClient:
             }
         )
         if action_id == self.transport_fail_action_id:
+            self.pending_retry = object()
             raise TransportError("candidate transport failed", completion_uncertain=True)
-        if action_id == self.fail_action_id:
-            raise ApiOperationError(
+        if action_id == self.reject_action_id:
+            raise RequestRejectedError(
+                {
+                    "operation": "emulate_action",
+                    "status": "rejected",
+                    "fault_kind": "invalid_action",
+                    "error": "candidate request rejected",
+                }
+            )
+        if action_id == self.fault_action_id:
+            self.session_invalid = self.invalidate_on_fault
+            raise RequestFaultedError(
                 {
                     "operation": "emulate_action",
                     "status": "faulted",
@@ -67,13 +85,16 @@ class _FakeClient:
             "masked_emulator_dto": {"hp": hp, "boundary": "map_select"},
         }
 
-    async def cancel_branches(self, instance_id, branch_ids, *, timeout_s):
-        self.cancelled.append(list(branch_ids))
-        return {}
-
     async def release_branches(self, instance_id, branch_ids, *, timeout_s):
         self.released.append(list(branch_ids))
         self.release_timeouts.append(timeout_s)
+        if self.release_error is not None:
+            if (
+                isinstance(self.release_error, TransportError)
+                and self.release_error.completion_uncertain
+            ):
+                self.pending_retry = object()
+            raise self.release_error
         return {}
 
 
@@ -93,7 +114,6 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.emulate_calls), 2)
         branch_ids = {call["branch_id"] for call in client.emulate_calls}
         self.assertEqual(set(client.released[0]), branch_ids)
-        self.assertEqual(client.cancelled, [])
         self.assertLess(client.release_timeouts[0], 5.0)
 
     async def test_uses_distinct_non_root_rng_hypotheses(self) -> None:
@@ -175,7 +195,7 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
     async def test_one_candidate_fault_does_not_sink_the_others(self) -> None:
         client = _FakeClient(
             {"a-overcome": 60.0, "a-hold-on": 53.0},
-            fail_action_id="a-hold-on",
+            fault_action_id="a-hold-on",
         )
 
         result = await best_event_option(
@@ -188,6 +208,41 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "a-overcome")
         self.assertEqual(len(client.released[0]), 2)
+
+    async def test_rejected_candidate_request_propagates(self) -> None:
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            reject_action_id="a-hold-on",
+        )
+
+        with self.assertRaises(RequestRejectedError):
+            await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
+
+        self.assertEqual(len(client.released[0]), 1)
+
+    async def test_session_invalid_fault_propagates(self) -> None:
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            fault_action_id="a-hold-on",
+            invalidate_on_fault=True,
+        )
+
+        with self.assertRaises(RequestFaultedError):
+            await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
+
+        self.assertEqual(client.released, [])
 
     async def test_transport_failure_propagates_instead_of_becoming_a_bad_sample(self) -> None:
         client = _FakeClient(
@@ -204,7 +259,68 @@ class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
                 timeout_s=5.0,
             )
 
+        self.assertEqual(client.released, [])
+
+    async def test_cleanup_completion_uncertain_transport_failure_propagates(self) -> None:
+        client = _FakeClient(
+            {"a-overcome": 60.0, "a-hold-on": 53.0},
+            release_error=TransportError("cleanup failed", completion_uncertain=True),
+        )
+
+        with self.assertRaises(TransportError):
+            await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
+
+        self.assertIsNotNone(client.pending_retry)
+
+    async def test_reserves_deadline_for_cleanup_when_evaluation_budget_expires(self) -> None:
+        clock = [0.0]
+        client = _FakeClient({"a-overcome": 60.0, "a-hold-on": 53.0})
+        original_emulate = client.emulate_action
+
+        async def consume_evaluation_budget(*args, **kwargs):
+            result = await original_emulate(*args, **kwargs)
+            clock[0] += kwargs["timeout_s"]
+            return result
+
+        client.emulate_action = consume_evaluation_budget  # type: ignore[method-assign]
+
+        with patch(
+            "sts2_training.decision.event_branch_search.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            result = await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(client.emulate_calls), 1)
+        self.assertEqual(len(client.released), 1)
         self.assertEqual(len(client.released[0]), 1)
+        self.assertGreater(client.release_timeouts[0], 0.0)
+
+    async def test_rejects_invalid_timeout(self) -> None:
+        client = _FakeClient({})
+
+        for timeout_s in (0.0, -1.0, float("inf"), float("nan"), True):
+            with self.subTest(timeout_s=timeout_s):
+                with self.assertRaises(ValueError):
+                    await best_event_option(
+                        client,
+                        instance_id="i",
+                        decision_point_id="d",
+                        legal_actions=[_OVERCOME, _HOLD_ON],
+                        timeout_s=timeout_s,
+                    )
 
 
 if __name__ == "__main__":
