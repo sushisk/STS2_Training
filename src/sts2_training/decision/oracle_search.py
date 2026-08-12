@@ -445,11 +445,18 @@ def build_oracle_targets(
     children: dict[str, list[str]] = defaultdict(list)
     for node in resolved:
         children[node.parent_node_id].append(node.node_id)
+    oracle_pruned_node_ids = {
+        node.node_id
+        for prune in prune_events
+        for node in prune.nodes
+        if not node.kept
+    }
 
     root_targets = _root_action_targets(
         root_proposal,
         resolved,
         children=children,
+        oracle_pruned_node_ids=oracle_pruned_node_ids,
         exhaustive_root_actions=exhaustive_root_actions,
         search_reason=end.reason,
     )
@@ -462,7 +469,12 @@ def build_oracle_targets(
                 children=children,
                 resolved_by_id=resolved_by_id,
             )
-            leaf_descendants = _leaf_fresh_nodes(descendants, children=children)
+            raw_leaf_descendants = _leaf_fresh_nodes(descendants, children=children)
+            leaf_descendants = [
+                candidate
+                for candidate in raw_leaf_descendants
+                if candidate.node_id not in oracle_pruned_node_ids
+            ]
             best = max(leaf_descendants, key=lambda candidate: candidate.value, default=None)
             if best is None:
                 target_value = None
@@ -472,7 +484,14 @@ def build_oracle_targets(
                 censor_reason = (
                     "oracle_pruned_before_followup"
                     if not node.kept
-                    else f"search_ended_before_followup:{end.reason}"
+                    else (
+                        "oracle_descendant_pruned_before_followup"
+                        if any(
+                            candidate.node_id in oracle_pruned_node_ids
+                            for candidate in raw_leaf_descendants
+                        )
+                        else f"search_ended_before_followup:{end.reason}"
+                    )
                 )
                 best_node_id = None
             else:
@@ -525,6 +544,7 @@ def _root_action_targets(
     resolved: Sequence[ResolvedNodeTrace],
     *,
     children: Mapping[str, Sequence[str]],
+    oracle_pruned_node_ids: set[str],
     exhaustive_root_actions: bool,
     search_reason: str,
 ) -> list[RootActionOracleTarget]:
@@ -561,21 +581,52 @@ def _root_action_targets(
             continue
 
         rng_ids = sorted(
-            {
-                rng_id
-                for root_action_id, rng_id in nodes_by_key
-                if root_action_id == action_id
-            }
-            or {candidate.rng_id}
+            rng_id
+            for root_action_id, rng_id in nodes_by_key
+            if root_action_id == action_id
         )
+        if not rng_ids:
+            if exhaustive_root_actions:
+                raise RuntimeError(
+                    "exhaustive root collection requires every proposed available action "
+                    "to materialize at least one resolved outcome; "
+                    f"action_id={action_id!r}, search_reason={search_reason!r}"
+                )
+            targets.append(
+                RootActionOracleTarget(
+                    action_id=action_id,
+                    action=dict(action),
+                    evaluated=False,
+                    estimated_q=None,
+                    rng_outcomes=(),
+                    target_source="no_target",
+                    terminal_reached=False,
+                    censored=True,
+                    censor_reason=f"candidate_not_materialized:{search_reason}",
+                )
+            )
+            continue
+
         outcomes: list[OracleRngOutcome] = []
         for rng_id in rng_ids:
             nodes = nodes_by_key.get((action_id, rng_id), [])
-            leaves = _leaf_fresh_nodes(nodes, children=children)
+            raw_leaves = _leaf_fresh_nodes(nodes, children=children)
+            leaves = [
+                node
+                for node in raw_leaves
+                if node.node_id not in oracle_pruned_node_ids
+            ]
             best = max(leaves, key=lambda node: node.value, default=None)
             deepest = max((node.combat_depth for node in nodes), default=0)
             terminal_reached = any(node.terminal for node in leaves)
             if best is None:
+                censor_reason = (
+                    "oracle_pruned_before_followup"
+                    if any(
+                        node.node_id in oracle_pruned_node_ids for node in raw_leaves
+                    )
+                    else f"no_fresh_leaf_outcome:{search_reason}"
+                )
                 outcomes.append(
                     OracleRngOutcome(
                         rng_id=rng_id,
@@ -584,7 +635,7 @@ def _root_action_targets(
                         terminal_reached=False,
                         deepest_combat_depth=deepest,
                         censored=True,
-                        censor_reason=f"no_fresh_leaf_outcome:{search_reason}",
+                        censor_reason=censor_reason,
                         best_node_id=None,
                     )
                 )
