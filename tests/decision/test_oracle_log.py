@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
+from sts2_training.decision.beam_search import BeamNode, BeamSearchResult, BeamSearchStats
 from sts2_training.decision.oracle_log import (
     ORACLE_RECORD_SCHEMA_VERSION,
     ORACLE_VALUE_MASK_VERSION,
@@ -38,11 +38,26 @@ class OracleJsonlWriterTest(unittest.TestCase):
             pruner_name="value_top_k",
             pruner_version="1",
         )
+        best_node = BeamNode(
+            branch_id="oracle-deep",
+            parent_branch_id="oracle-parent",
+            rng_id=11,
+            decision_point_id="oracle-deep-d",
+            masked_emulator_dto={"deep_oracle_payload": "must-not-be-logged"},
+            depth=4,
+            value=12.5,
+            root_action_id="play",
+            combat_depth=4,
+            branch_log=("deep", "branch", "log"),
+            action_id="deep-action",
+            action_type="card",
+            action={"action_id": "deep-action", "action_type": "card"},
+        )
         return OracleCollectionResult(
             search_result=BeamSearchResult(
                 best_root_action_id="play",
                 best_value=12.5,
-                best_node=None,
+                best_node=best_node,
                 reason="max_depth",
                 stats=BeamSearchStats(depths_completed=4, nodes_expanded=10),
             ),
@@ -111,6 +126,15 @@ class OracleJsonlWriterTest(unittest.TestCase):
             _DTO_VERSION,
         )
         self.assertEqual(parsed["oracle_targets"]["metadata"]["oracle_beam_width"], 16)
+        oracle_best = parsed["oracle_search_result"]["best_node"]
+        self.assertEqual(oracle_best["branch_id"], "oracle-deep")
+        self.assertEqual(oracle_best["value"], 12.5)
+        self.assertNotIn("masked_emulator_dto", oracle_best)
+        self.assertNotIn("branch_log", oracle_best)
+        self.assertEqual(
+            oracle_best["omitted_large_fields"],
+            ["masked_emulator_dto", "branch_log"],
+        )
         self.assertEqual(parsed["provenance"]["training_commit"], "abc123")
 
     def test_writer_preserves_upgrade_and_enchantment_card_identity(self) -> None:
