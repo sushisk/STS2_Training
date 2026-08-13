@@ -70,6 +70,18 @@ class ActionCandidate:
 
         return None
 
+    @property
+    def post_coverage_rank(self) -> int | None:
+        """Raw policy candidates have no structural-coverage rank yet."""
+
+        return None
+
+    @property
+    def candidate_source(self) -> str | None:
+        """Raw policy candidates have no structural-coverage provenance yet."""
+
+        return None
+
 
 @dataclass(frozen=True)
 class _CombatContext:
