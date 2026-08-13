@@ -101,7 +101,7 @@ class _RootValueCapturingOracleEngine(_OracleBeamSearchEngine):
 
     def _score_frontier(self, item_meta, branch_results, depth=None):  # type: ignore[override]
         result = super()._score_frontier(item_meta, branch_results, depth)
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit = result
+        next_beam, newly_finished, _state_score_ms, _hit_depth, _hit_limit = result
         search_id = self._current_search_id()
         if search_id is None:
             return result
@@ -226,7 +226,7 @@ def build_root_action_value_samples(
             if dto is None:
                 continue
 
-            target_node_score = outcome.value
+            target_node_score = outcome.node_score
             target_source = outcome.target_source
             terminal_reached = outcome.terminal_reached
             censored = outcome.censored
