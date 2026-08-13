@@ -194,6 +194,31 @@ class OracleEpisodeRunner:
                 if max_decisions is not None and decisions_collected >= max_decisions:
                     termination_reason = "max_decisions"
                     break
+
+            # The episode-result record is part of the same atomic append as its decision
+            # records. If constructing or appending it fails (including a partial-line I/O
+            # failure), the outer rollback below truncates everything written by this
+            # episode back to the exact pre-episode byte size.
+            elapsed_s = time.monotonic() - t0
+            self._writer.write_episode_result(
+                instance_id=instance_id,
+                decisions_collected=decisions_collected,
+                final_dto=final_dto,
+                final_decision_metadata=final_decision_metadata,
+                completed=completed,
+                termination_reason=termination_reason,
+                elapsed_s=elapsed_s,
+            )
+            return OracleEpisodeResult(
+                instance_id=instance_id,
+                decisions_collected=decisions_collected,
+                final_dto=final_dto,
+                combat_result=combat_result_from_dto(final_dto),
+                completed=completed,
+                termination_reason=termination_reason,
+                elapsed_s=elapsed_s,
+                output_path=str(self._writer.path),
+            )
         except Exception as exc:
             try:
                 self._rollback_output(output_start_size)
@@ -205,27 +230,6 @@ class OracleEpisodeRunner:
             raise
         finally:
             await self._close_best_effort(instance_id, close_timeout_s)
-
-        elapsed_s = time.monotonic() - t0
-        self._writer.write_episode_result(
-            instance_id=instance_id,
-            decisions_collected=decisions_collected,
-            final_dto=final_dto,
-            final_decision_metadata=final_decision_metadata,
-            completed=completed,
-            termination_reason=termination_reason,
-            elapsed_s=elapsed_s,
-        )
-        return OracleEpisodeResult(
-            instance_id=instance_id,
-            decisions_collected=decisions_collected,
-            final_dto=final_dto,
-            combat_result=combat_result_from_dto(final_dto),
-            completed=completed,
-            termination_reason=termination_reason,
-            elapsed_s=elapsed_s,
-            output_path=str(self._writer.path),
-        )
 
     def _output_size(self) -> int:
         try:
