@@ -6,10 +6,15 @@ stable/terminal states at combat depth 1 (the states that ValueModel can actuall
 for a root action) and joins one such raw RL DTO to each root-action RNG outcome's deeper
 Oracle target.
 
+Canonical score terminology distinguishes the isolated ValueModel ``state_score`` from
+the attributed search-tree ``node_score`` used as a training target. The v6 JSON field
+``target_value`` is retained for #59/data compatibility, but Python code exposes it as
+``target_node_score`` and uses that name internally.
+
 The raw ``masked_emulator_dto`` is copied without feature normalization. Deeper branch
 DTOs remain transient and are never persisted by this contract. A non-terminal root
-state's own teacher bootstrap is not a deeper target and is therefore persisted as
-``no_target`` rather than becoming a self-imitation label.
+state's own teacher bootstrap is not a deeper node-score target and is therefore
+persisted as ``no_target`` rather than becoming a self-imitation label.
 """
 
 from __future__ import annotations
@@ -39,13 +44,16 @@ JsonObject = Mapping[str, Any]
 
 @dataclass(frozen=True)
 class RootActionValueSample:
-    """One raw root-action post-state paired with its deeper Oracle value target.
+    """One raw root-action post-state paired with its deeper Oracle node-score target.
 
     ``decision_point_id`` identifies the next decision when the post-state is
     non-terminal. Terminal post-states have no next decision and therefore store ``None``.
     The public root action payload and deepest Oracle combat depth are duplicated here on
     purpose: base collection favors preserving useful public context over requiring later
     consumers to reconstruct it from a second section of the record.
+
+    ``target_value`` is the persisted v6 compatibility name. New Python code should use
+    ``target_node_score`` for the same scalar.
     """
 
     action_id: str
@@ -61,6 +69,12 @@ class RootActionValueSample:
     censored: bool
     censor_reason: str | None
     best_node_id: str | None
+
+    @property
+    def target_node_score(self) -> float | None:
+        """Canonical name for the deeper Oracle node score used as the label."""
+
+        return self.target_value
 
 
 @dataclass(frozen=True)
@@ -175,7 +189,7 @@ def build_root_action_value_samples(
     *,
     root_state_dtos: Mapping[str, Mapping[str, Any]],
 ) -> tuple[RootActionValueSample, ...]:
-    """Join root-action raw DTOs to the matching deeper Oracle RNG targets.
+    """Join root-action raw DTOs to the matching deeper Oracle RNG node-score targets.
 
     At most one sample is emitted per root-action RNG outcome. When continuations produce
     more than one combat-depth-1 stable state, the state on the path to ``best_node_id``
@@ -192,7 +206,7 @@ def build_root_action_value_samples(
         if (
             node.root_action_id is not None
             and node.combat_depth == 1
-            and node.value_is_fresh
+            and node.state_score_is_fresh
             and node.node_id in root_state_dtos
         ):
             candidates_by_key[(node.root_action_id, node.rng_id)].append(node)
@@ -212,7 +226,7 @@ def build_root_action_value_samples(
             if dto is None:
                 continue
 
-            target_value = outcome.value
+            target_node_score = outcome.value
             target_source = outcome.target_source
             terminal_reached = outcome.terminal_reached
             censored = outcome.censored
@@ -223,7 +237,7 @@ def build_root_action_value_samples(
                 and best_node_id == selected.node_id
                 and not selected.terminal
             ):
-                target_value = None
+                target_node_score = None
                 target_source = "no_target"
                 terminal_reached = False
                 censored = True
@@ -238,7 +252,7 @@ def build_root_action_value_samples(
                     root_state_node_id=selected.node_id,
                     decision_point_id=selected.decision_point_id or None,
                     masked_emulator_dto=copy.deepcopy(dict(dto)),
-                    target_value=target_value,
+                    target_value=target_node_score,
                     target_source=target_source,
                     terminal_reached=terminal_reached,
                     deepest_combat_depth=outcome.deepest_combat_depth,
