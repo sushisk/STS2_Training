@@ -13,9 +13,9 @@ from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.decision.oracle_search import OracleCollectionResult
 
 # v6 keeps the Oracle/search teacher payload from v5 and adds enough public runtime
-# context to reconstruct the actual committed Combat trajectory.  The logging layer is
-# intentionally information-preserving: public wire fields are retained by default and
-# only hidden/unmasked Emulator state is excluded.
+# context to reconstruct the actual committed Combat trajectory. The logging layer is
+# intentionally information-preserving for bounded public information; deep Beam DTOs
+# remain explicitly excluded because their volume scales with search depth/width.
 ORACLE_RECORD_SCHEMA_VERSION = 6
 ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
 # Value training relies on the full public card-instance identity added by STS2_RL mask
@@ -140,6 +140,42 @@ def _runtime_transition(
     return _jsonable(result)
 
 
+def _bounded_beam_search_result(value: Any) -> dict[str, Any]:
+    """Serialize search diagnostics while omitting deep-node DTO and branch-log payloads."""
+
+    best_node = getattr(value, "best_node", None)
+    best_node_payload: dict[str, Any] | None = None
+    if best_node is not None:
+        best_node_payload = {
+            "branch_id": best_node.branch_id,
+            "parent_branch_id": best_node.parent_branch_id,
+            "rng_id": best_node.rng_id,
+            "decision_point_id": best_node.decision_point_id,
+            "depth": best_node.depth,
+            "value": best_node.value,
+            "root_action_id": best_node.root_action_id,
+            "combat_depth": best_node.combat_depth,
+            "continuation_steps": best_node.continuation_steps,
+            "terminal": best_node.terminal,
+            "action_id": best_node.action_id,
+            "action_type": best_node.action_type,
+            "action": None if best_node.action is None else _jsonable(best_node.action),
+            "policy_rank": best_node.policy_rank,
+            "policy_score": best_node.policy_score,
+            "post_coverage_rank": best_node.post_coverage_rank,
+            "candidate_source": best_node.candidate_source,
+            "omitted_large_fields": ["masked_emulator_dto", "branch_log"],
+        }
+    stats = getattr(value, "stats", None)
+    return {
+        "best_root_action_id": getattr(value, "best_root_action_id", None),
+        "best_value": getattr(value, "best_value", None),
+        "best_node": best_node_payload,
+        "reason": getattr(value, "reason", None),
+        "stats": None if stats is None else _jsonable(stats),
+    }
+
+
 def oracle_collection_record(
     root_decision: Mapping[str, Any],
     result: OracleCollectionResult,
@@ -183,7 +219,7 @@ def oracle_collection_record(
         "decision_index": decision_index,
         "decision_point_id": decision_point_id,
         "dto_contract": dto_contract,
-        # Preserve public response-envelope fields by default.  The masked DTO is stored
+        # Preserve public response-envelope fields by default. The masked DTO is stored
         # separately so this does not duplicate the largest field.
         "decision_response_metadata": response_metadata_without_masked_dto(root_decision),
         # Keep the raw masked public DTO so future feature extractors can be rebuilt
@@ -191,11 +227,14 @@ def oracle_collection_record(
         "masked_emulator_dto": _jsonable(dto),
         # Root-only ValueModel data. Deeper Beam branch DTOs remain intentionally absent.
         "root_value_samples": _jsonable(root_value_samples),
-        "oracle_search_result": _jsonable(result.search_result),
+        # Search outcome metadata is useful, but a raw BeamSearchResult.best_node contains
+        # masked_emulator_dto/branch_log. Keep a bounded summary instead so deep Branch DTOs
+        # cannot leak back into the root-only logging contract.
+        "oracle_search_result": _bounded_beam_search_result(result.search_result),
         "oracle_targets": _jsonable(result.targets),
         "search_trace": [_jsonable(event) for event in result.trace],
         # The actual action committed by the runtime policy/search, plus the exact public
-        # post-commit DTO.  This is distinct from counterfactual Oracle root samples and
+        # post-commit DTO. This is distinct from counterfactual Oracle root samples and
         # makes terminal-return/TD Value learning possible without guessing which branch
         # was really taken.
         "runtime_transition": transition,
