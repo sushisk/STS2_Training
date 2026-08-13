@@ -52,20 +52,27 @@ class OracleProvenanceLogTest(unittest.TestCase):
                 teacher_value_metadata={"checkpoint": "value-v7", "config_hash": "abc"},
             ),
         )
-
+        dto = {
+            "mask_version": ORACLE_VALUE_MASK_VERSION,
+            "dto_version": "emulator-test",
+            "legal_actions": [],
+        }
         record = oracle_collection_record(
-            {
-                "decision_point_id": "d-root",
-                "masked_emulator_dto": {
-                    "mask_version": ORACLE_VALUE_MASK_VERSION,
-                    "legal_actions": [],
-                },
-            },
+            {"decision_point_id": "d-root", "masked_emulator_dto": dto},
             result,
+            instance_id="inst-1",
+            decision_index=0,
+            runtime_transition={
+                "chosen_action_id": "a",
+                "chosen_action": {"action_id": "a"},
+                "next_decision_point_id": "d-next",
+                "commit_response_metadata": {"decision_point_id": "d-next"},
+                "next_masked_emulator_dto": dto,
+            },
         )
 
-        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 5)
-        self.assertEqual(record["record_schema_version"], 5)
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 6)
+        self.assertEqual(record["record_schema_version"], 6)
         self.assertEqual(record["root_value_samples"], [])
         self.assertEqual(
             record["provenance"]["teacher_value_metadata"]["checkpoint"],
