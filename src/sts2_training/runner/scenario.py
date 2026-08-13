@@ -67,7 +67,8 @@ class EnemyScenario:
 
     ``powers={"STRENGTH": 2}`` is a convenience shorthand; a sequence of RL-shaped
     power-stack mappings is accepted when associated-card or other exact stack state is
-    needed.
+    needed. ``forced_move`` and ``state_log`` preserve the enemy move-machine state that
+    RL's ``build_scenario_from_spec()`` can restore exactly.
     """
 
     monster_id: str
@@ -75,6 +76,8 @@ class EnemyScenario:
     max_hp: int | None = None
     block: int = 0
     slot_name: str | None = None
+    forced_move: str | None = None
+    state_log: Sequence[str] = field(default_factory=tuple)
     frog_knight_has_beetle_charged: bool | None = None
     waterfall_giant_current_pressure_gun_damage: int | None = None
     powers: PowerStacks = field(default_factory=dict)
@@ -87,6 +90,10 @@ class EnemyScenario:
             payload["block"] = self.block
         if self.slot_name is not None:
             payload["slot_name"] = self.slot_name
+        if self.forced_move is not None:
+            payload["forced_move"] = self.forced_move
+        if self.state_log:
+            payload["state_log"] = list(self.state_log)
         if self.frog_knight_has_beetle_charged is not None:
             payload["frog_knight_has_beetle_charged"] = self.frog_knight_has_beetle_charged
         if self.waterfall_giant_current_pressure_gun_damage is not None:

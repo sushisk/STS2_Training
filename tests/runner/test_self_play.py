@@ -6,11 +6,14 @@ import asyncio
 import contextlib
 import io
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.self_play import (
     SelfPlayRunResult,
@@ -27,7 +30,7 @@ _ACTION = {"action_id": "a", "action_type": "system", "is_available": True}
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
@@ -84,6 +87,7 @@ class _FakeConnection:
                 if self._committed
                 else {"legal_actions": [_ACTION]}
             )
+            dto["mask_version"] = MASK_VERSION
             dto["godMode"] = self._reported_god_mode()
             return {
                 **_common(request),
@@ -102,6 +106,7 @@ class _FakeConnection:
                 "branch_id": "root",
                 "decision_point_id": "d1",
                 "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
                     "legal_actions": [],
                     "terminal": True,
                     "outcome": "victory",
@@ -321,19 +326,24 @@ class RunSelfPlayBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("god_mode", connection.start_instance_configs[0])
 
     async def test_god_mode_defaults_output_dir_to_a_distinct_subdirectory(self) -> None:
-        results = await run_self_play_batch(
-            character_id="IRONCLAD",
-            num_runs=1,
-            connection_factory=lambda: _FakeConnection(),
-            god_mode=True,
-        )
-
+        # run_self_play_batch resolves its default output_dir relative to the
+        # process cwd, which is the real (gitignored) data/self_play directory
+        # used for actual self-play harvests. Run from an isolated tmp cwd so
+        # this test never reads or clobbers real harvest output.
+        original_cwd = Path.cwd()
+        tmp_cwd = tempfile.mkdtemp()
         try:
+            os.chdir(tmp_cwd)
+            results = await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: _FakeConnection(),
+                god_mode=True,
+            )
             self.assertEqual(results[0].log_path.parent, Path("data/self_play/godmode"))
         finally:
-            for result in results:
-                result.log_path.unlink(missing_ok=True)
-            Path("data/self_play/godmode").rmdir()
+            os.chdir(original_cwd)
+            shutil.rmtree(tmp_cwd, ignore_errors=True)
 
     async def test_god_mode_forces_beam_search_off(self) -> None:
         captured: dict = {}

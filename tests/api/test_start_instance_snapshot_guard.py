@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.api.transport import RetryRequest
 
 
@@ -15,7 +16,7 @@ class _FakeConnection:
     async def exchange(self, request: dict, *, deadline: float) -> dict:
         self.requests.append(dict(request))
         return {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],

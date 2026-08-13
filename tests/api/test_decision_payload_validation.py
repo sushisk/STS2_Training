@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sts2_training.api.contract import ApiContract, ApiProtocolError
+from sts2_training.api.contract import ApiContract, ApiProtocolError, MASK_VERSION
 
 
 class DecisionPayloadValidationTest(unittest.TestCase):
@@ -13,8 +13,14 @@ class DecisionPayloadValidationTest(unittest.TestCase):
     def _response(masked: dict) -> dict:
         return {
             "decision_point_id": "decision-1",
-            "masked_emulator_dto": masked,
+            "masked_emulator_dto": {"mask_version": MASK_VERSION, **masked},
         }
+
+    def test_wrong_mask_version_is_rejected(self) -> None:
+        response = self._response({"legal_actions": []})
+        response["masked_emulator_dto"]["mask_version"] = "1.1"
+        with self.assertRaisesRegex(ApiProtocolError, "mask_version"):
+            self.contract._validate_decision_payload(response)
 
     def test_valid_legal_actions_are_accepted(self) -> None:
         self.contract._validate_decision_payload(

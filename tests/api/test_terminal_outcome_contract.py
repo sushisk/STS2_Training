@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from sts2_training.api.contract import ApiContract, ApiProtocolError
+from sts2_training.api.contract import ApiContract, ApiProtocolError, MASK_VERSION
 
 
 def _response(masked: dict) -> dict:
     return {
         "decision_point_id": "d-terminal",
-        "masked_emulator_dto": masked,
+        "masked_emulator_dto": {"mask_version": MASK_VERSION, **masked},
     }
 
 

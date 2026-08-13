@@ -5,6 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.api.tcp_connection import TcpConnection
 from sts2_training.api.transport import ServerEpochChangedError, TransportError
 
@@ -49,7 +50,7 @@ class TcpConnectionTest(unittest.IsolatedAsyncioTestCase):
                 if request.get("transport_operation") == "hello":
                     response = {
                         "transport_operation": "hello",
-                        "schema_version": "0.7",
+                        "schema_version": SCHEMA_VERSION,
                         "client_session_id": request["client_session_id"],
                         "server_epoch": self.epoch,
                     }

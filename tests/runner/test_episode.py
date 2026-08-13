@@ -9,6 +9,7 @@ import math
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.engine import CombatDecisionEngine
@@ -22,7 +23,7 @@ _LEGACY_SCOPE = frozenset({"system", "card", "potion"})
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
@@ -94,7 +95,11 @@ class _FakeConnection:
 
 def _decision(decision_point_id: str, *, legal_actions=None, **dto_extra) -> dict:
     resolved_legal_actions = legal_actions if legal_actions is not None else [_ACTION]
-    dto = {"legal_actions": resolved_legal_actions, **dto_extra}
+    dto = {
+        "mask_version": MASK_VERSION,
+        "legal_actions": resolved_legal_actions,
+        **dto_extra,
+    }
     if not resolved_legal_actions and "terminal" not in dto and "run_terminal" not in dto:
         dto["terminal"] = True
         dto.setdefault("outcome", "victory")

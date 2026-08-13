@@ -9,6 +9,7 @@ import random
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.engine import CombatDecisionEngine
@@ -19,13 +20,21 @@ from sts2_training.selection.heuristic_selector import HeuristicCombatSelector
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],
         "request_id": request["request_id"],
         "operation": request["operation"],
     }
+
+
+def _wire_decision(decision: dict) -> dict:
+    result = dict(decision)
+    dto = result.get("masked_emulator_dto")
+    if isinstance(dto, dict):
+        result["masked_emulator_dto"] = {"mask_version": MASK_VERSION, **dto}
+    return result
 
 
 class _FakeConnection:
@@ -57,7 +66,7 @@ class _FakeConnection:
                 "instance_id": request["instance_id"],
                 "status": "completed",
                 "branch_id": "root",
-                **self.root_decision,
+                **_wire_decision(self.root_decision),
             }
 
         if operation == "commit_action":
@@ -70,9 +79,10 @@ class _FakeConnection:
                 "decision_point_id": "d-root-2",
                 "branch_log": [],
                 "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
                     "legal_actions": [
                         {"action_id": "noop", "action_type": "system"}
-                    ]
+                    ],
                 },
             }
 
@@ -126,6 +136,7 @@ class _FakeConnection:
 
 def _victory_dto() -> dict:
     return {
+        "mask_version": MASK_VERSION,
         "terminal": True,
         "outcome": "victory",
         "hp": 40,
@@ -137,6 +148,7 @@ def _victory_dto() -> dict:
 
 def _defeat_dto() -> dict:
     return {
+        "mask_version": MASK_VERSION,
         "terminal": True,
         "outcome": "defeat",
         "hp": 0,
@@ -148,6 +160,7 @@ def _defeat_dto() -> dict:
 
 def _alive_dto() -> dict:
     return {
+        "mask_version": MASK_VERSION,
         "hp": 40,
         "maxHp": 50,
         "enemies": [{"hp": 10, "maxHp": 10, "isAlive": True, "intent": {}}],

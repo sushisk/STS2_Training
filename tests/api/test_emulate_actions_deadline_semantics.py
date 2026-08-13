@@ -6,6 +6,7 @@ import asyncio
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
+from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.api.transport import RetryRequest, TransportError
 
 
@@ -21,7 +22,7 @@ class _TwoWorkerFourItemConnection:
     @staticmethod
     def _common(request: dict) -> dict:
         return {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -68,7 +69,10 @@ class _TwoWorkerFourItemConnection:
                 "rng_id": item["rng_id"],
                 "decision_point_id": f"d-{item['branch_id']}-next",
                 "branch_log": [],
-                "masked_emulator_dto": {"legal_actions": [{"action_id": "a-next"}]},
+                "masked_emulator_dto": {
+                    "mask_version": MASK_VERSION,
+                    "legal_actions": [{"action_id": "a-next"}],
+                },
             }
             for item in request["items"]
         }

@@ -7,7 +7,8 @@ from typing import Any
 from sts2_training.selection_log import SelectionAudit, SelectionEventLogger
 
 JsonObject = dict[str, Any]
-SCHEMA_VERSION = "0.7"
+SCHEMA_VERSION = "0.8"
+MASK_VERSION = "1.2"
 ROOT_BRANCH_ID = "root"
 ROOT_RNG_ID = 0
 KNOWN_STATUSES = frozenset(
@@ -58,7 +59,7 @@ class RequestFaultedError(ApiOperationError):
 
 
 class ApiContract:
-    """DTO v0.7 construction, correlation, active-instance state, and selection audit."""
+    """DTO v0.8 construction, correlation, active-instance state, and selection audit."""
 
     def __init__(
         self,
@@ -207,7 +208,7 @@ class ApiContract:
         items: Sequence[Mapping[str, Any]],
         simulation_options: Mapping[str, Any] | None,
     ) -> JsonObject:
-        """Build DTO v0.7's ``emulate_actions`` batch request.
+        """Build DTO v0.8's ``emulate_actions`` batch request.
 
         The wire contract requires every ``parent_branch_id`` to refer to a Branch that
         already exists when this batch request starts. Training cannot prove RL-side
@@ -467,6 +468,10 @@ class ApiContract:
         masked = response.get("masked_emulator_dto")
         if not isinstance(masked, dict):
             raise ApiProtocolError("masked_emulator_dto must be a dictionary")
+        if masked.get("mask_version") != MASK_VERSION:
+            raise ApiProtocolError(
+                f"masked_emulator_dto.mask_version must be {MASK_VERSION!r} for wire DTO {SCHEMA_VERSION}"
+            )
 
         for marker in ("terminal", "run_terminal"):
             if marker in masked and not isinstance(masked[marker], bool):

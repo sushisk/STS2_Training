@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import ApiProtocolError
+from sts2_training.api.contract import ApiProtocolError, SCHEMA_VERSION
 
 
 class _BranchBatchConnection:
@@ -25,7 +25,7 @@ class _BranchBatchConnection:
 
     async def exchange(self, message: dict, *, deadline: float) -> dict:
         common = {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": message["client_session_id"],
             "request_seq": message["request_seq"],

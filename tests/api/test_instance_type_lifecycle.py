@@ -3,12 +3,12 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import RequestFaultedError
+from sts2_training.api.contract import RequestFaultedError, SCHEMA_VERSION
 
 
 def _common(request: dict) -> dict:
     return {
-        "schema_version": "0.7",
+        "schema_version": SCHEMA_VERSION,
         "server_epoch": "epoch-1",
         "client_session_id": request["client_session_id"],
         "request_seq": request["request_seq"],

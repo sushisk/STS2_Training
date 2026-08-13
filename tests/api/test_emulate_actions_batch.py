@@ -1,4 +1,4 @@
-"""Coverage for `AsyncTrainingApiClient.emulate_actions` (DTO v0.7 batch operation).
+"""Coverage for `AsyncTrainingApiClient.emulate_actions` (DTO v0.8 batch operation).
 
 The batch operation stays on the existing single in-flight request stream. Every item
 parent must already exist when the request starts, exact replay applies to the entire
@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
-from sts2_training.api.contract import ApiProtocolError
+from sts2_training.api.contract import ApiProtocolError, MASK_VERSION, SCHEMA_VERSION
 from sts2_training.api.transport import RetryRequest, TransportError
 
 
@@ -25,7 +25,7 @@ class _EmulateActionsConnection:
     @staticmethod
     def _common(request: dict) -> dict:
         return {
-            "schema_version": "0.7",
+            "schema_version": SCHEMA_VERSION,
             "server_epoch": "epoch-1",
             "client_session_id": request["client_session_id"],
             "request_seq": request["request_seq"],
@@ -63,7 +63,10 @@ class _EmulateActionsConnection:
                     "rng_id": item["rng_id"],
                     "decision_point_id": f"d-{item['branch_id']}-001",
                     "branch_log": [],
-                    "masked_emulator_dto": {"legal_actions": [{"action_id": "a-001"}]},
+                    "masked_emulator_dto": {
+                        "mask_version": MASK_VERSION,
+                        "legal_actions": [{"action_id": "a-001"}],
+                    },
                 }
             if self.branch_results_transform is not None:
                 branch_results = self.branch_results_transform(request, branch_results)
@@ -116,7 +119,7 @@ class EmulateActionsBatchTest(unittest.IsolatedAsyncioTestCase):
     async def test_multi_parent_batch_sent_as_a_single_request(self) -> None:
         client, connection, instance_id = await self._started_client()
         try:
-            # v0.7 forbids same-batch newly-created parents. Create b1 and b2 first,
+            # Same-batch newly-created parents are forbidden. Create b1 and b2 first,
             # then use both already-existing Branches as parents in the target batch.
             prepared = await client.emulate_actions(
                 instance_id, self._root_items(), timeout_s=1.0
