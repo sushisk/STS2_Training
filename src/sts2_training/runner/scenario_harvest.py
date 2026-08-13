@@ -97,6 +97,11 @@ def _enemy_scenario(enemy: JsonObject) -> JsonObject | None:
         spec["block"] = int(enemy["block"])
     if enemy.get("slotName") is not None:
         spec["slot_name"] = enemy["slotName"]
+    intent = enemy.get("intent") or {}
+    if intent.get("stateId"):
+        spec["forced_move"] = intent["stateId"]
+    if enemy.get("stateLog"):
+        spec["state_log"] = list(enemy["stateLog"])
     powers = _power_stacks(enemy.get("powers"))
     if powers:
         spec["powers"] = powers
