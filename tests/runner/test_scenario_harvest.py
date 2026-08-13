@@ -16,13 +16,7 @@ from sts2_training.runner.scenario_harvest import (
 
 
 def _card(card_id: str, *, upgraded: bool = False) -> dict:
-    return {
-        "id": card_id,
-        "type": "Attack",
-        "rarity": "Basic",
-        "cost": 1,
-        "upgraded": upgraded,
-    }
+    return {"id": card_id, "type": "Attack", "rarity": "Basic", "cost": 1, "upgraded": upgraded}
 
 
 def _multiset_record(card_id: str, count: int, **overrides) -> dict:
@@ -93,15 +87,7 @@ def _combat_start_dto(**overrides) -> dict:
                 "slotName": "A",
                 "powers": [{"id": "RITUAL_POWER", "amount": 3, "type": "Buff"}],
             },
-            {
-                "id": "CULTIST",
-                "hp": 0,
-                "maxHp": 48,
-                "block": 0,
-                "isAlive": False,
-                "slotName": "B",
-                "powers": [],
-            },
+            {"id": "CULTIST", "hp": 0, "maxHp": 48, "block": 0, "isAlive": False, "slotName": "B", "powers": []},
         ],
     }
     dto.update(overrides)
@@ -119,10 +105,16 @@ class DtoToScenarioSpecTest(unittest.TestCase):
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
 
         assert spec is not None
-        self.assertEqual(
-            {power["power_id"] for power in spec["player_powers"]},
-            {"VULNERABLE_POWER"},
-        )
+        power_ids = {p["power_id"] for p in spec["player_powers"]}
+        self.assertEqual(power_ids, {"VULNERABLE_POWER"})
+
+    def test_drops_dead_enemies(self) -> None:
+        spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
+
+        assert spec is not None
+        self.assertEqual(len(spec["enemies"]), 1)
+        self.assertEqual(spec["enemies"][0]["monster_id"], "CULTIST")
+        self.assertEqual(spec["enemies"][0]["hp"], 40)
 
     def test_preserves_enemy_intent_and_state_log(self) -> None:
         enemy = {
@@ -143,35 +135,29 @@ class DtoToScenarioSpecTest(unittest.TestCase):
         self.assertEqual(spec["enemies"][0]["forced_move"], "INCANTATION")
         self.assertEqual(spec["enemies"][0]["state_log"], ["ENTRY", "INCANTATION"])
 
-    def test_skips_unsafe_snapshots(self) -> None:
-        unsafe = (
-            _combat_start_dto(
-                enemies=[{"id": "CULTIST", "hp": 0, "isAlive": False}]
-            ),
-            _combat_start_dto(pendingChoice={"choiceType": "discard"}),
-        )
-        for dto in unsafe:
-            with self.subTest(dto=dto):
-                self.assertIsNone(dto_to_scenario_spec(dto, seed=1))
+    def test_returns_none_with_no_living_enemies(self) -> None:
+        dto = _combat_start_dto(enemies=[{"id": "CULTIST", "hp": 0, "isAlive": False}])
+        self.assertIsNone(dto_to_scenario_spec(dto, seed=1))
+
+    def test_returns_none_with_a_live_pending_choice(self) -> None:
+        dto = _combat_start_dto(pendingChoice={"choiceType": "discard"})
+        self.assertIsNone(dto_to_scenario_spec(dto, seed=1))
 
     def test_preserves_hand_card_upgrade_level_and_enchantment(self) -> None:
-        dto = _combat_start_dto(
-            hand=[
-                {
-                    "id": "STRIKE_IRONCLAD",
-                    "upgraded": True,
-                    "upgradeLevel": 1,
-                    "enchantment": {"id": "SHARP", "amount": 2, "status": "Normal"},
-                }
-            ]
-        )
+        enchanted_card = {
+            "id": "STRIKE_IRONCLAD",
+            "upgraded": True,
+            "upgradeLevel": 1,
+            "enchantment": {"id": "SHARP", "amount": 2, "status": "Normal"},
+        }
+        dto = _combat_start_dto(hand=[enchanted_card])
 
         spec = dto_to_scenario_spec(dto, seed=1)
 
         assert spec is not None
-        self.assertEqual(spec["hand"], [])
+        hand_cards = spec["extra"]["hand_cards"]
         self.assertEqual(
-            spec["extra"]["hand_cards"],
+            hand_cards,
             [
                 {
                     "card_id": "STRIKE_IRONCLAD",
@@ -182,26 +168,37 @@ class DtoToScenarioSpecTest(unittest.TestCase):
             ],
         )
 
-    def test_expands_multiset_piles_preserving_card_identity(self) -> None:
+    def test_preserves_upgraded_cards_via_extra_hand_cards(self) -> None:
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
 
         assert spec is not None
+        hand_cards = spec["extra"]["hand_cards"]
+        self.assertEqual(
+            hand_cards,
+            [
+                {"card_id": "STRIKE_IRONCLAD", "is_upgraded": False},
+                {"card_id": "BASH", "is_upgraded": True},
+            ],
+        )
+        # Plain piles stay empty - upgrade-preserving *_cards in extra carry the real data.
+        self.assertEqual(spec["hand"], [])
+
+    def test_expands_multiset_piles_into_extra_cards_preserving_upgrade_state(self) -> None:
+        spec = dto_to_scenario_spec(_combat_start_dto(), seed=1)
+
+        assert spec is not None
+        # Plain draw_pile/discard_pile/exhaust_pile stay empty - the upgrade-preserving
+        # *_cards extra fields carry the real data, mirroring hand_cards.
         self.assertEqual(spec["draw_pile"], [])
         self.assertEqual(spec["discard_pile"], [])
         self.assertEqual(spec["exhaust_pile"], [])
+
+        draw_pile_cards = spec["extra"]["draw_pile_cards"]
         self.assertEqual(
-            spec["extra"]["draw_pile_cards"],
+            draw_pile_cards,
             [
-                {
-                    "card_id": "DEFEND_IRONCLAD",
-                    "is_upgraded": False,
-                    "upgrade_level": 0,
-                },
-                {
-                    "card_id": "STRIKE_IRONCLAD",
-                    "is_upgraded": False,
-                    "upgrade_level": 0,
-                },
+                {"card_id": "DEFEND_IRONCLAD", "is_upgraded": False, "upgrade_level": 0},
+                {"card_id": "STRIKE_IRONCLAD", "is_upgraded": False, "upgrade_level": 0},
                 {
                     "card_id": "STRIKE_IRONCLAD",
                     "is_upgraded": True,
@@ -210,38 +207,33 @@ class DtoToScenarioSpecTest(unittest.TestCase):
                 },
             ],
         )
+        self.assertNotIn("discard_pile_cards", spec["extra"])
+        self.assertNotIn("exhaust_pile_cards", spec["extra"])
 
-    def test_produced_spec_deserializes_into_combat_scenario(self) -> None:
+    def test_produced_spec_deserializes_into_a_real_combat_scenario(self) -> None:
         spec = dto_to_scenario_spec(_combat_start_dto(), seed=42)
         assert spec is not None
 
         fields = dict(spec)
         fields["enemies"] = [EnemyScenario(**enemy) for enemy in fields["enemies"]]
         scenario = CombatScenario(**fields)
-        instance_config = scenario.to_instance_config()
 
         self.assertEqual(scenario.character_id, "IRONCLAD")
         self.assertEqual(len(scenario.enemies), 1)
+        instance_config = scenario.to_instance_config()
         self.assertEqual(instance_config["hand_cards"][1]["is_upgraded"], True)
 
 
 class HarvestScenariosFromJsonlTest(unittest.TestCase):
     def _write_log(self, tmp: Path, records: list[dict]) -> Path:
         path = tmp / "run.jsonl"
-        path.write_text(
-            "\n".join(json.dumps(record) for record in records) + "\n",
-            encoding="utf-8",
-        )
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
         return path
 
     def test_harvests_one_scenario_per_distinct_combat_room(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             records = [
-                {"event": "self_play_run_result", "final_dto": _combat_start_dto()},
-                {
-                    "event": "selection",
-                    "received": {"masked_emulator_dto": {"currentRoomType": "MapSelect"}},
-                },
+                {"event": "selection", "received": {"masked_emulator_dto": {"currentRoomType": "MapSelect"}}},
                 {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
                 {
                     "event": "selection",
@@ -252,80 +244,80 @@ class HarvestScenariosFromJsonlTest(unittest.TestCase):
                 {
                     "event": "selection",
                     "received": {
-                        "masked_emulator_dto": _combat_start_dto(
-                            room_context={"column": 3, "row": 4}
-                        )
+                        "masked_emulator_dto": _combat_start_dto(room_context={"column": 3, "row": 4})
                     },
                 },
             ]
             path = self._write_log(Path(tmp), records)
 
-            specs = harvest_scenarios_from_jsonl(
-                path,
-                exclude_final_combat=False,
-                rng=random.Random(0),
-            )
+            specs = harvest_scenarios_from_jsonl(path, exclude_final_combat=False, rng=random.Random(0))
 
-        self.assertEqual(len(specs), 2)
+            self.assertEqual(len(specs), 2)
 
     def test_exclude_final_combat_drops_the_last_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_log(
-                Path(tmp),
-                [
-                    {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
-                    {
-                        "event": "selection",
-                        "received": {
-                            "masked_emulator_dto": _combat_start_dto(
-                                room_context={"column": 3, "row": 4}
-                            )
-                        },
+            records = [
+                {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
+                {
+                    "event": "selection",
+                    "received": {
+                        "masked_emulator_dto": _combat_start_dto(room_context={"column": 3, "row": 4})
                     },
-                ],
-            )
-            specs = harvest_scenarios_from_jsonl(
-                path,
-                exclude_final_combat=True,
-                rng=random.Random(0),
-            )
+                },
+            ]
+            path = self._write_log(Path(tmp), records)
 
-        self.assertEqual(len(specs), 1)
+            specs = harvest_scenarios_from_jsonl(path, exclude_final_combat=True, rng=random.Random(0))
 
-    def test_auto_detects_completed_and_incomplete_runs(self) -> None:
-        cases = (
-            (
-                "completed",
-                [
-                    {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
-                    {"event": "self_play_run_result", "god_mode": True, "outcome": "run_victory"},
-                ],
-                True,
-                1,
-            ),
-            (
-                "incomplete",
-                [
-                    {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
-                    {
-                        "event": "selection",
-                        "received": {
-                            "masked_emulator_dto": _combat_start_dto(
-                                room_context={"column": 3, "row": 4}
-                            )
-                        },
+            self.assertEqual(len(specs), 1)
+
+    def test_ignores_non_selection_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [
+                {"event": "self_play_run_result", "final_dto": _combat_start_dto()},
+                {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
+            ]
+            path = self._write_log(Path(tmp), records)
+
+            specs = harvest_scenarios_from_jsonl(path, exclude_final_combat=False, rng=random.Random(0))
+
+            self.assertEqual(len(specs), 1)
+
+
+class AutoDetectCompletionTest(unittest.TestCase):
+    def _write_log(self, tmp: Path, records: list[dict]) -> Path:
+        path = tmp / "run.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        return path
+
+    def test_completed_run_keeps_the_final_combat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [
+                {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
+                {"event": "self_play_run_result", "god_mode": True, "outcome": "run_victory"},
+            ]
+            path = self._write_log(Path(tmp), records)
+
+            self.assertTrue(is_completed_run_log(path))
+            specs = harvest_scenarios_auto(path, rng=random.Random(0))
+            self.assertEqual(len(specs), 1)
+
+    def test_incomplete_run_drops_the_final_combat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [
+                {"event": "selection", "received": {"masked_emulator_dto": _combat_start_dto()}},
+                {
+                    "event": "selection",
+                    "received": {
+                        "masked_emulator_dto": _combat_start_dto(room_context={"column": 3, "row": 4})
                     },
-                ],
-                False,
-                1,
-            ),
-        )
-        for name, records, completed, expected_count in cases:
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
-                path = self._write_log(Path(tmp), records)
-                self.assertEqual(is_completed_run_log(path), completed)
-                specs = harvest_scenarios_auto(path, rng=random.Random(0))
-                self.assertEqual(len(specs), expected_count)
+                },
+            ]
+            path = self._write_log(Path(tmp), records)
+
+            self.assertFalse(is_completed_run_log(path))
+            specs = harvest_scenarios_auto(path, rng=random.Random(0))
+            self.assertEqual(len(specs), 1)
 
 
 if __name__ == "__main__":
