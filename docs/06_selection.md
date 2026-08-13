@@ -90,4 +90,4 @@ option_id = choice_option_id({
 
 ## 5. 補足説明
 
-`event_choice_heuristic.safe_event_option_candidates()` は `willKillPlayer is True` が明示された option だけを除外する。未知の lethal risk を推測で除外しない。canonical card choice semantics の背景は古い [choice_card_semantics.md](choice_card_semantics.md) にも残っているが、この文書では current parser の挙動を優先する。
+`event_choice_heuristic.safe_event_option_candidates()` は `willKillPlayer is True` が明示された option だけを除外する。未知の lethal risk を推測で除外しない。canonical card choice semantics は本文書の内容が正であり、旧 `choice_card_semantics.md`(削除済み)の記述を優先しない。

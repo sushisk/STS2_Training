@@ -173,4 +173,4 @@ if ($latestTrainingSha -ne $currentTrainingSha -or $latestRlSha -ne $currentRlSh
 }
 
 Write-Host "Advisory real-Emulator paired v0.7 validation passed for Training=$currentTrainingSha RL=$currentRlSha"
-Write-Host 'No GitHub status was published. A trusted exact-pair release gate requires the isolated orchestrator described in docs/dto_v07_paired_release_assurance.md.'
+Write-Host 'No GitHub status was published. A trusted exact-pair release gate requires the isolated orchestrator described in docs/dto_paired_release_gate_v0.7.md.'

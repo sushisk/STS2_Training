@@ -1,4 +1,4 @@
-# DTO v0.7 pair release assurance
+# DTO v0.7 paired release gate
 
 DTO v0.7 is a hard-cutover wire-contract change shared by STS2_Training and STS2_RL. The two repositories therefore need two different kinds of assurance, and they must not be conflated.
 
@@ -8,7 +8,7 @@ Each repository has its own PR-required GitHub-hosted job that validates only th
 
 Each repository's workflow file keeps a historical `paired-v07-*` identifier only for tooling compatibility. That identifier must not be interpreted as cross-repository attestation.
 
-The exact required job name, workflow file, and what it validates are repo-local facts, not part of this shared contract - see this repository's own `dto_v07_paired_release_assurance_local.md` (not synced across repositories).
+The exact required job name, workflow file, and what it validates are repo-local facts, not part of this shared contract - see this repository's own `dto_paired_release_gate_v0.7_local.md` (not synced across repositories).
 
 ## Exact-pair release gate
 
@@ -28,7 +28,7 @@ If independent rolling deployment is required, v0.7 hard cutover is insufficient
 
 Real-Emulator paired tests execute PR-controlled code and therefore require a stronger boundary than removing GitHub credentials from the test process. A trusted release gate should run that code in a disposable/ephemeral or equivalently isolated worker with no GitHub write credential, no developer credential store, minimal filesystem exposure, and restricted network access. A separate trusted controller may hold status-publishing credentials and publish a result only after verifying the pair identity and returned test evidence.
 
-Until such an isolated exact-pair orchestrator exists, any real-Emulator paired-validation script in either repository is advisory/manual validation only and must not be represented as a branch-protection proof of exact-pair compatibility. See this repository's own `dto_v07_paired_release_assurance_local.md` for the exact script/test this repository runs.
+Until such an isolated exact-pair orchestrator exists, any real-Emulator paired-validation script in either repository is advisory/manual validation only and must not be represented as a branch-protection proof of exact-pair compatibility. See this repository's own `dto_paired_release_gate_v0.7_local.md` for the exact script/test this repository runs.
 
 ## Worked example: Whole Run `action_id` cutover (Training #28 / `sushisk/STS2_RL#10`)
 
