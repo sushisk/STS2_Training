@@ -183,9 +183,12 @@ class PriorHeuristicPolicy(PolicyModel):
         else:
             scored_actions.sort(key=lambda row: (-row[0], -row[1], row[2]))
 
+        # Keep the naming refactor behavior-neutral: the heuristic has always used this
+        # scalar only to order candidates. Persisted policy_score context therefore stays
+        # absent unless a PolicyModel explicitly chooses to expose ActionCandidate.action_score.
         return [
-            ActionCandidate(action_id=action["action_id"], action_score=action_score)
-            for action_score, _, _, action in scored_actions[:top_k]
+            ActionCandidate(action_id=action["action_id"])
+            for _, _, _, action in scored_actions[:top_k]
         ]
 
 
