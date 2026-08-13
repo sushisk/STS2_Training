@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
-from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION, oracle_collection_record
+from sts2_training.decision.oracle_log import (
+    ORACLE_RECORD_SCHEMA_VERSION,
+    ORACLE_VALUE_MASK_VERSION,
+    oracle_collection_record,
+)
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
     OracleProvenance,
@@ -52,13 +56,17 @@ class OracleProvenanceLogTest(unittest.TestCase):
         record = oracle_collection_record(
             {
                 "decision_point_id": "d-root",
-                "masked_emulator_dto": {"legal_actions": []},
+                "masked_emulator_dto": {
+                    "mask_version": ORACLE_VALUE_MASK_VERSION,
+                    "legal_actions": [],
+                },
             },
             result,
         )
 
-        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 4)
-        self.assertEqual(record["record_schema_version"], 4)
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 5)
+        self.assertEqual(record["record_schema_version"], 5)
+        self.assertEqual(record["root_value_samples"], [])
         self.assertEqual(
             record["provenance"]["teacher_value_metadata"]["checkpoint"],
             "value-v7",

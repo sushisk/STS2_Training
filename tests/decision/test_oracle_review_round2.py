@@ -7,7 +7,10 @@ from sts2_training.decision.beam_search import (
     BeamSearchResult,
     BeamSearchStats,
 )
-from sts2_training.decision.oracle_log import oracle_collection_record
+from sts2_training.decision.oracle_log import (
+    ORACLE_VALUE_MASK_VERSION,
+    oracle_collection_record,
+)
 from sts2_training.decision.oracle_search import (
     BudgetedOracleCollector,
     OracleCollectionResult,
@@ -148,7 +151,10 @@ class OracleEffectiveBudgetMetadataTest(unittest.TestCase):
         record = oracle_collection_record(
             {
                 "decision_point_id": "d-root",
-                "masked_emulator_dto": {"legal_actions": []},
+                "masked_emulator_dto": {
+                    "mask_version": ORACLE_VALUE_MASK_VERSION,
+                    "legal_actions": [],
+                },
             },
             result,
         )

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
-from sts2_training.decision.oracle_log import OracleJsonlWriter
+from sts2_training.decision.oracle_log import ORACLE_VALUE_MASK_VERSION, OracleJsonlWriter
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
     OracleProvenance,
@@ -26,6 +26,7 @@ class _FakeClient:
         return {
             "decision_point_id": "d-root",
             "masked_emulator_dto": {
+                "mask_version": ORACLE_VALUE_MASK_VERSION,
                 "hp": 30,
                 "legal_actions": [
                     {"action_id": "a", "action_type": "card", "is_available": True},
@@ -39,8 +40,26 @@ class _FakeClient:
         return {
             "decision_point_id": "d-terminal",
             "masked_emulator_dto": {
+                "mask_version": ORACLE_VALUE_MASK_VERSION,
                 "terminal": True,
                 "outcome": "victory",
+                "hand": [
+                    {
+                        "id": "STRIKE_IRONCLAD",
+                        "type": "Attack",
+                        "upgradeLevel": 2,
+                        "enchantment": {"id": "SHARP", "amount": 3, "status": "Normal"},
+                    }
+                ],
+                "drawPile": [
+                    {
+                        "id": "DEFEND_IRONCLAD",
+                        "type": "Skill",
+                        "upgradeLevel": 1,
+                        "enchantment": None,
+                        "count": 2,
+                    }
+                ],
                 "legal_actions": [],
             },
         }
@@ -58,6 +77,12 @@ class _FakeCommitEngine:
     async def decide(self, instance_id, *, timeout_s, decision):
         self.decisions.append(decision["decision_point_id"])
         return SimpleNamespace(chosen_action_id="a")
+
+
+class _FailingCommitEngine(_FakeCommitEngine):
+    async def decide(self, instance_id, *, timeout_s, decision):
+        self.decisions.append(decision["decision_point_id"])
+        raise RuntimeError("commit decision failed")
 
 
 class _FakeOracle:
@@ -100,7 +125,7 @@ class _FakeOracle:
 
 
 class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
-    async def test_collects_before_runtime_commit_and_writes_one_record(self) -> None:
+    async def test_collects_before_runtime_commit_and_appends_combat_result(self) -> None:
         client = _FakeClient()
         oracle = _FakeOracle()
         commit_engine = _FakeCommitEngine(client)
@@ -126,10 +151,55 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.closed, ["inst"])
         self.assertEqual(result.decisions_collected, 1)
         self.assertEqual(result.final_dto["outcome"], "victory")
-        self.assertEqual(len(records), 1)
+        self.assertTrue(result.completed)
+        self.assertEqual(result.combat_result, "victory")
+        self.assertEqual(result.termination_reason, "terminal")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["record_type"], "combat_oracle_decision")
         self.assertEqual(records[0]["decision_point_id"], "d-root")
+        self.assertEqual(records[0]["root_value_samples"], [])
         self.assertEqual(records[0]["provenance"]["training_commit"], "abc")
         self.assertEqual(records[0]["provenance"]["teacher_inner_policy_class"], "teacher.Policy")
+        self.assertEqual(records[1]["record_type"], "combat_oracle_episode_result")
+        self.assertTrue(records[1]["completed"])
+        self.assertEqual(records[1]["termination_reason"], "terminal")
+        self.assertEqual(records[1]["combat_result"], "victory")
+        final = records[1]["final_masked_emulator_dto"]
+        self.assertEqual(final["outcome"], "victory")
+        self.assertEqual(final["mask_version"], "1.2")
+        self.assertEqual(final["hand"][0]["upgradeLevel"], 2)
+        self.assertEqual(final["hand"][0]["enchantment"]["amount"], 3)
+        self.assertIsInstance(final["drawPile"], list)
+        self.assertEqual(final["drawPile"][0]["count"], 2)
+
+    async def test_commit_failure_rolls_back_partial_episode_output(self) -> None:
+        client = _FakeClient()
+        oracle = _FakeOracle()
+        commit_engine = _FailingCommitEngine(client)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            prefix = '{"record_type":"previous_complete_episode"}\n'
+            path.write_text(prefix, encoding="utf-8")
+            runner = OracleEpisodeRunner(
+                client,
+                oracle=oracle,  # type: ignore[arg-type]
+                commit_engine=commit_engine,  # type: ignore[arg-type]
+                writer=OracleJsonlWriter(path),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "commit decision failed"):
+                await runner.run(
+                    "inst",
+                    oracle_timeout_s=5.0,
+                    decision_timeout_s=5.0,
+                )
+
+            output = path.read_text(encoding="utf-8")
+
+        self.assertEqual(oracle.decisions, ["d-root"])
+        self.assertEqual(commit_engine.decisions, ["d-root"])
+        self.assertEqual(client.closed, ["inst"])
+        self.assertEqual(output, prefix)
 
     def test_cli_defaults_to_exhaustive_root_and_runtime_target_beam(self) -> None:
         args = _parse_args(["--scenario", "scenario.json", "--output", "oracle.jsonl"])

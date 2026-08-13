@@ -7,8 +7,8 @@ teacher search.
 
 CLI example::
 
-    python -m sts2_training.runner.oracle_collection \\
-        --scenario combat.json --output data/combat_oracle.jsonl \\
+    python -m sts2_training.runner.oracle_collection \
+        --scenario combat.json --output data/combat_oracle.jsonl \
         --oracle-beam-width 32 --oracle-depth 4 --target-beam-width 8
 """
 
@@ -28,8 +28,9 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.api.contract import ROOT_BRANCH_ID
 from sts2_training.decision.engine import CombatDecisionEngine
-from sts2_training.decision.oracle_log import OracleJsonlWriter
-from sts2_training.decision.oracle_search import BudgetedOracleCollector, OracleCollectionConfig
+from sts2_training.decision.oracle_log import OracleJsonlWriter, combat_result_from_dto
+from sts2_training.decision.oracle_search import OracleCollectionConfig
+from sts2_training.decision.oracle_value_logging import RootValueLoggingOracleCollector
 from sts2_training.runner._cli import add_common_arguments, configure_logging
 from sts2_training.runner.episode import build_engine
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario
@@ -41,6 +42,9 @@ class OracleEpisodeResult:
     instance_id: str
     decisions_collected: int
     final_dto: dict[str, Any]
+    combat_result: str | None
+    completed: bool
+    termination_reason: str
     elapsed_s: float
     output_path: str
 
@@ -52,7 +56,7 @@ class OracleEpisodeRunner:
         self,
         client: Any,
         *,
-        oracle: BudgetedOracleCollector,
+        oracle: RootValueLoggingOracleCollector,
         commit_engine: CombatDecisionEngine,
         writer: OracleJsonlWriter,
         training_commit: str | None = None,
@@ -90,6 +94,9 @@ class OracleEpisodeRunner:
         decisions_collected = 0
         next_decision: dict[str, Any] | None = None
         final_dto: dict[str, Any] = {}
+        completed = False
+        termination_reason = "unknown"
+        output_start_size = self._output_size()
 
         try:
             while True:
@@ -106,6 +113,8 @@ class OracleEpisodeRunner:
                 final_dto = dict(dto)
 
                 if _is_terminal(dto):
+                    completed = True
+                    termination_reason = "terminal"
                     break
                 legal_actions = _available_action_ids(dto)
                 if not legal_actions:
@@ -148,19 +157,64 @@ class OracleEpisodeRunner:
                 next_decision = _validated_decision(response)
                 final_dto = dict(next_decision["masked_emulator_dto"])
                 if _is_terminal(final_dto):
+                    completed = True
+                    termination_reason = "terminal"
                     break
                 if max_decisions is not None and decisions_collected >= max_decisions:
+                    termination_reason = "max_decisions"
                     break
+        except Exception as exc:
+            try:
+                self._rollback_output(output_start_size)
+            except Exception as rollback_exc:
+                raise ExceptionGroup(
+                    "Oracle collection failed and partial JSONL rollback also failed",
+                    [exc, rollback_exc],
+                ) from None
+            raise
         finally:
             await self._close_best_effort(instance_id, close_timeout_s)
 
+        elapsed_s = time.monotonic() - t0
+        self._writer.write_episode_result(
+            instance_id=instance_id,
+            decisions_collected=decisions_collected,
+            final_dto=final_dto,
+            completed=completed,
+            termination_reason=termination_reason,
+            elapsed_s=elapsed_s,
+        )
         return OracleEpisodeResult(
             instance_id=instance_id,
             decisions_collected=decisions_collected,
             final_dto=final_dto,
-            elapsed_s=time.monotonic() - t0,
+            combat_result=combat_result_from_dto(final_dto),
+            completed=completed,
+            termination_reason=termination_reason,
+            elapsed_s=elapsed_s,
             output_path=str(self._writer.path),
         )
+
+    def _output_size(self) -> int:
+        try:
+            return self._writer.path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
+    def _rollback_output(self, start_size: int) -> None:
+        path = self._writer.path
+        try:
+            current_size = path.stat().st_size
+        except FileNotFoundError:
+            if start_size == 0:
+                return
+            raise RuntimeError("Oracle output disappeared before rollback") from None
+        if current_size < start_size:
+            raise RuntimeError(
+                "Oracle output shrank below its pre-episode size; refusing unsafe rollback"
+            )
+        with path.open("r+b") as handle:
+            handle.truncate(start_size)
 
     async def _close_best_effort(self, instance_id: str, timeout_s: float) -> None:
         if getattr(self._client, "pending_retry", None) is not None or getattr(
@@ -188,7 +242,13 @@ def _validated_decision(value: Any) -> dict[str, Any]:
 
 
 def _is_terminal(dto: Mapping[str, Any]) -> bool:
-    return dto.get("terminal") is True or dto.get("run_terminal") is True
+    if dto.get("terminal") is True or dto.get("run_terminal") is True:
+        return True
+    boundary = dto.get("boundary")
+    if isinstance(boundary, str) and boundary in {"terminal", "run_terminal"}:
+        return True
+    transition = dto.get("transition")
+    return isinstance(transition, Mapping) and transition.get("kind") == "combat_completed"
 
 
 def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
@@ -291,7 +351,7 @@ async def _run(args: argparse.Namespace) -> OracleEpisodeResult:
             if args.target_beam_width is None
             else args.target_beam_width
         )
-        oracle = BudgetedOracleCollector.from_beam_engine(
+        oracle = RootValueLoggingOracleCollector.from_beam_engine(
             commit_engine.beam_search,
             config=OracleCollectionConfig(
                 beam_config=oracle_beam_config,
@@ -326,6 +386,9 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "instance_id": result.instance_id,
                 "decisions_collected": result.decisions_collected,
+                "combat_result": result.combat_result,
+                "completed": result.completed,
+                "termination_reason": result.termination_reason,
                 "elapsed_s": result.elapsed_s,
                 "final_dto": result.final_dto,
                 "output_path": result.output_path,

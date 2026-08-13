@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 
 from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
-from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION, OracleJsonlWriter
+from sts2_training.decision.oracle_log import (
+    ORACLE_RECORD_SCHEMA_VERSION,
+    ORACLE_VALUE_MASK_VERSION,
+    OracleJsonlWriter,
+)
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
     OracleProvenance,
@@ -53,6 +57,7 @@ class OracleJsonlWriterTest(unittest.TestCase):
         decision = {
             "decision_point_id": "d-root",
             "masked_emulator_dto": {
+                "mask_version": ORACLE_VALUE_MASK_VERSION,
                 "hp": 37,
                 "legal_actions": [
                     {"action_id": "play", "action_type": "card", "is_available": True}
@@ -71,6 +76,7 @@ class OracleJsonlWriterTest(unittest.TestCase):
         self.assertEqual(record["record_schema_version"], ORACLE_RECORD_SCHEMA_VERSION)
         self.assertEqual(parsed["decision_point_id"], "d-root")
         self.assertEqual(parsed["masked_emulator_dto"]["hp"], 37)
+        self.assertEqual(parsed["masked_emulator_dto"]["mask_version"], "1.2")
         self.assertEqual(parsed["oracle_targets"]["metadata"]["oracle_beam_width"], 16)
         self.assertEqual(parsed["provenance"]["training_commit"], "abc123")
         self.assertEqual(parsed["provenance"]["rng_sampling"], "independent")
@@ -82,51 +88,68 @@ class OracleJsonlWriterTest(unittest.TestCase):
         )
         self.assertEqual(parsed["provenance"]["teacher_value_class"], "example.Value")
 
-    def test_writer_preserves_card_upgrade_level_and_enchantment(self) -> None:
-        """oracle_collection_record() keeps the raw masked_emulator_dto verbatim so
-        future feature extractors can be rebuilt without replaying the emulator (see
-        its docstring) - confirm that guarantee actually covers the per-card
-        upgradeLevel/enchantment fields (STS2_Emulator#7 / STS2_RL#41), not just
-        scalar top-level fields like hp."""
+    def test_writer_preserves_upgrade_and_enchantment_card_identity(self) -> None:
+        rich_card = {
+            "id": "STRIKE_IRONCLAD",
+            "type": "Attack",
+            "rarity": "Basic",
+            "cost": 1,
+            "targetType": "AnyEnemy",
+            "upgraded": True,
+            "upgradeLevel": 2,
+            "tinkerTimeType": None,
+            "tinkerTimeRider": None,
+            "enchantment": {"id": "SHARP", "amount": 3, "status": "Normal"},
+        }
         decision = {
             "decision_point_id": "d-root",
             "masked_emulator_dto": {
-                "hand": [
-                    {
-                        "id": "WITHER",
-                        "type": "Status",
-                        "upgraded": True,
-                        "upgradeLevel": 2,
-                        "enchantment": None,
-                    },
-                    {
-                        "id": "STRIKE_IRONCLAD",
-                        "type": "Attack",
-                        "upgraded": False,
-                        "upgradeLevel": 0,
-                        "enchantment": {"id": "SHARP", "amount": 3, "status": "Normal"},
-                    },
-                ],
+                "mask_version": ORACLE_VALUE_MASK_VERSION,
+                "hand": [rich_card],
+                "drawPile": [{**rich_card, "count": 2}],
+                "discardPile": [],
+                "exhaustPile": [],
                 "legal_actions": [],
             },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oracle.jsonl"
-            OracleJsonlWriter(path).write(decision, self._result(), training_commit="abc123")
+            OracleJsonlWriter(path).write(decision, self._result())
             parsed = json.loads(path.read_text(encoding="utf-8").strip())
 
-        hand = parsed["masked_emulator_dto"]["hand"]
-        wither = next(c for c in hand if c["id"] == "WITHER")
-        self.assertTrue(wither["upgraded"])
-        self.assertEqual(wither["upgradeLevel"], 2)
+        dto = parsed["masked_emulator_dto"]
+        self.assertEqual(dto["hand"][0]["upgradeLevel"], 2)
+        self.assertEqual(dto["hand"][0]["enchantment"]["amount"], 3)
+        self.assertIsInstance(dto["drawPile"], list)
+        self.assertEqual(dto["drawPile"][0]["count"], 2)
+        self.assertEqual(dto["drawPile"][0]["enchantment"]["id"], "SHARP")
 
-        strike = next(c for c in hand if c["id"] == "STRIKE_IRONCLAD")
-        self.assertEqual(strike["enchantment"], {"id": "SHARP", "amount": 3, "status": "Normal"})
+    def test_writer_rejects_legacy_or_missing_mask_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            writer = OracleJsonlWriter(path)
+            for version in (None, "1.1"):
+                dto = {"legal_actions": []}
+                if version is not None:
+                    dto["mask_version"] = version
+                with self.subTest(version=version), self.assertRaisesRegex(
+                    ValueError, "mask_version='1.2'"
+                ):
+                    writer.write(
+                        {
+                            "decision_point_id": "d-root",
+                            "masked_emulator_dto": dto,
+                        },
+                        self._result(),
+                    )
 
     def test_writer_appends_one_record_per_decision(self) -> None:
         decision = {
             "decision_point_id": "d-root",
-            "masked_emulator_dto": {"legal_actions": []},
+            "masked_emulator_dto": {
+                "mask_version": ORACLE_VALUE_MASK_VERSION,
+                "legal_actions": [],
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oracle.jsonl"
