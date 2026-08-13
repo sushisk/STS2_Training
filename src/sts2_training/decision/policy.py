@@ -64,6 +64,12 @@ class ActionCandidate:
     action_id: str
     action_score: float | None = None
 
+    @property
+    def action_rank(self) -> int | None:
+        """Policy candidates acquire a concrete rank only after proposal ordering."""
+
+        return None
+
 
 @dataclass(frozen=True)
 class _CombatContext:
