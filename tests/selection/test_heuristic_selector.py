@@ -105,6 +105,50 @@ def test_select_replaces_when_reward_cannot_be_skipped() -> None:
     assert chosen["action_type"] == "choice_reward_potion_replace"
 
 
+def _target_action(action_id: str, enemy_index: int, hp: object) -> dict:
+    action = _action(action_id, "choice_target")
+    action["parameters"] = {"enemyIndex": enemy_index, "hp": hp}
+    return action
+
+
+def test_select_target_prefers_enemy_with_lowest_hp() -> None:
+    legal_actions = [
+        _target_action("a-high", 0, 42),
+        _target_action("a-low", 1, 7),
+        _target_action("a-mid", 2, 19),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=1.0)
+
+    chosen = selector.select(legal_actions)
+
+    assert chosen["action_id"] == "a-low"
+
+
+def test_select_target_randomizes_equal_lowest_hp_ties() -> None:
+    legal_actions = [
+        _target_action("a-low-0", 0, 7),
+        _target_action("a-low-1", 1, 7),
+        _target_action("a-high", 2, 42),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=1.0)
+
+    chosen_ids = {selector.select(legal_actions)["action_id"] for _ in range(20)}
+
+    assert chosen_ids == {"a-low-0", "a-low-1"}
+
+
+def test_select_target_falls_back_to_random_when_hp_is_malformed() -> None:
+    legal_actions = [
+        _target_action("a-valid", 0, 7),
+        _target_action("a-malformed", 1, "unknown"),
+    ]
+    selector = HeuristicCombatSelector(rng=random.Random(0), epsilon=1.0)
+
+    chosen_ids = {selector.select(legal_actions)["action_id"] for _ in range(20)}
+
+    assert chosen_ids == {"a-valid", "a-malformed"}
+
+
 def _card_action(action_id: str, card_id: str) -> dict:
     action = _action(action_id, "card")
     action["parameters"] = {"cardId": card_id}

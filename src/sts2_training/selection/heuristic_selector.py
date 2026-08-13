@@ -16,6 +16,7 @@ from sts2_training.selection.action_classification import (
     CHOICE_REWARD_POTION_TAKE_ACTION_TYPE,
     CHOICE_REWARD_SKIP_ACTION_TYPE,
     CHOICE_SKIP_ACTION_TYPE,
+    CHOICE_TARGET_ACTION_TYPE,
     MAP_ROOM_ACTION_TYPE,
     JsonObject,
     available_actions,
@@ -112,6 +113,10 @@ class HeuristicCombatSelector:
         if event_options:
             return self._choose_event_option(event_options)
 
+        target_choices = by_type.get(CHOICE_TARGET_ACTION_TYPE)
+        if target_choices:
+            return self._choose_target(target_choices)
+
         for action_type in _CATEGORY_PRIORITY:
             candidates = by_type.get(action_type)
             if not candidates:
@@ -173,6 +178,26 @@ class HeuristicCombatSelector:
         beyond lethality there is no generic quality signal for event options, so the
         (already lethality-filtered) candidates are chosen from uniformly at random."""
         return self._choose(safe_event_option_candidates(candidates))
+
+    def _choose_target(self, candidates: Sequence[JsonObject]) -> JsonObject:
+        """Prefer the enemy with the lowest current HP; randomize only equal-HP ties."""
+        lowest_hp: float | None = None
+        preferred: list[JsonObject] = []
+
+        for action in candidates:
+            params = action.get("parameters")
+            hp = params.get("hp") if isinstance(params, Mapping) else None
+            if isinstance(hp, bool) or not isinstance(hp, (int, float)):
+                return self._choose(candidates)
+
+            hp_value = float(hp)
+            if lowest_hp is None or hp_value < lowest_hp:
+                lowest_hp = hp_value
+                preferred = [action]
+            elif hp_value == lowest_hp:
+                preferred.append(action)
+
+        return self._choose(preferred)
 
     def _choose_best_scored(
         self,
