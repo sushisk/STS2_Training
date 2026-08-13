@@ -19,8 +19,9 @@ Those remain separate search-control mechanisms and may later move behind a broa
 ## Training target
 
 The initial model is a contextual per-node linear ranker. For every stable prune frontier,
-Oracle collection provides a downstream `target_value` for nodes that the wider teacher
-search actually followed far enough to produce a fresh leaf/terminal outcome.
+Oracle collection provides a downstream `target_value` (canonical name: `target_node_score`
+— see `combat_search_learning_plan.md`'s "Score terminology" section) for nodes that the
+wider teacher search actually followed far enough to produce a fresh leaf/terminal outcome.
 
 Training creates pairwise examples within the same prune frontier:
 

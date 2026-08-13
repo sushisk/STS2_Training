@@ -14,6 +14,17 @@ This PR implements both the stable-pruning/trace foundation and the first budget
 
 The dependency contract is intentionally one-way: #47 owns the stable-pruning public data/API contract, later supervised learned-pruner work consumes it, and later RL work consumes the learned artifact/feature contract. Downstream work must not depend on private `BeamNode` fields or require this seam to grow retroactively.
 
+## Score terminology
+
+Four distinct "score" concepts recur across `beam_search.py`, `candidate_coverage.py`, `stable_pruner.py`, and `oracle_search.py`/`oracle_value_logging.py`. Each is exposed as a `@property` documented `"""Canonical name for ..."""` over an underlying raw field, so code can be read without memorizing which raw field belongs to which role. Do not introduce a new raw field name for a concept one of these four already covers.
+
+- **`state_score`** — the `ValueModel`'s evaluation of one already-resolved (stable/terminal) Combat state. Canonical name for `value` on `BeamNode`/`StablePruneNodeView`. Never valid for a pending/continuation node, whose value is inherited/stale (see `StablePruneNodeView.value`'s own contract in "Public stable-pruning contract v1" below).
+- **`action_score`** — a candidate action's score *before* it is simulated/resolved, i.e. the policy's own prior/ranking score for that action. Canonical name for `policy_score` (`BeamNode`, `RankedCandidate` in `candidate_coverage.py`, `StablePruneNodeView`). Pairs with `action_rank`, the canonical name for the matching pre-coverage `policy_rank`. `None` when the policy exposes no score for that candidate.
+- **`node_score`** — the score attributed to a search-tree node as a whole. In `BeamSearchResult`/`SearchTraceEvent` this is just the winning node's `state_score` (canonical name for `best_value`). In Oracle aggregation (`oracle_search.py`'s `OracleRngOutcome`/`RootActionOracleTarget`) it is broader: an RNG hypothesis's attributed outcome, or a root action's aggregated `estimated_q` across RNG hypotheses — not necessarily one single state's direct `ValueModel` output.
+- **`target_node_score`** — the descendant-derived node-score *used as a supervised training label* (`StableNodeOracleTarget`/`RootActionValueSample` in `oracle_search.py`/`oracle_value_logging.py`, canonical name for `target_value`). Deliberately distinct from `node_score`: a stable-pruning target is bootstrapped from a later/deeper fresh leaf outcome (see "Outcome semantics" below), not from the node's own immediately-computed score, so `target_node_score` and that same node's `node_score` are not interchangeable and must not be conflated when building training data.
+
+`action_rank`/`policy_rank` and `behavior_frontier_scores` (`pruner_rl.py`, the RL fine-tuning behavior policy's stochastic top-K sampling scores) are related but are not part of this four-term set — they rank or drive sampling rather than evaluate a state or node.
+
 ## Search-control boundaries
 
 `BeamSearchEngine` currently has several separate allocation/pruning mechanisms:
