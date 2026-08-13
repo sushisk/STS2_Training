@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
+from sts2_training.decision.beam_search import BeamNode, BeamSearchResult, BeamSearchStats
 from sts2_training.decision.oracle_log import ORACLE_VALUE_MASK_VERSION, OracleJsonlWriter
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
@@ -85,13 +85,28 @@ class _FakeCommitEngine:
 
     async def decide(self, instance_id, *, timeout_s, decision):
         self.decisions.append(decision["decision_point_id"])
+        best_node = BeamNode(
+            branch_id="deep-branch",
+            parent_branch_id="b1",
+            rng_id=7,
+            decision_point_id="deep-d",
+            masked_emulator_dto={"deep_branch_payload": "must-not-be-logged"},
+            depth=3,
+            value=2.5,
+            root_action_id="a",
+            combat_depth=3,
+            branch_log=("large", "branch", "log"),
+            action_id="deep-action",
+            action_type="card",
+            action={"action_id": "deep-action", "action_type": "card"},
+        )
         return SimpleNamespace(
             chosen_action_id="a",
             source="beam_search",
             beam_result=BeamSearchResult(
                 best_root_action_id="a",
                 best_value=2.5,
-                best_node=None,
+                best_node=best_node,
                 reason="max_depth",
                 stats=BeamSearchStats(depths_completed=2, nodes_expanded=4),
             ),
@@ -188,6 +203,14 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transition["decision_source"], "beam_search")
         self.assertEqual(transition["beam_result"]["best_root_action_id"], "a")
         self.assertEqual(transition["beam_result"]["best_value"], 2.5)
+        best_node = transition["beam_result"]["best_node"]
+        self.assertEqual(best_node["branch_id"], "deep-branch")
+        self.assertNotIn("masked_emulator_dto", best_node)
+        self.assertNotIn("branch_log", best_node)
+        self.assertEqual(
+            best_node["omitted_large_fields"],
+            ["masked_emulator_dto", "branch_log"],
+        )
         self.assertEqual(transition["next_decision_point_id"], "d-terminal")
         self.assertEqual(transition["combat_result"], "victory")
         self.assertEqual(transition["next_dto_contract"]["dto_version"], _DTO_VERSION)
