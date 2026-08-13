@@ -2,13 +2,17 @@
 
 ## 0. 文章の目的
 
-この文書は `decision/` の中核である Beam Search、Policy、Value、CombatDecisionEngine、Combat DTO 正規化、event branch search、candidate coverage を説明する。stable frontier pruning の学習部分は [03_stable_pruner.md](03_stable_pruner.md)、Oracle は [04_oracle.md](04_oracle.md) に分ける。
+この文書は `decision/` の中核である Beam Search、Policy、Value、CombatDecisionEngine、Combat DTO 正規化、event branch search、candidate coverage に加え、learned Value とその training/trajectory data contract を説明する。stable frontier pruning の学習部分は [03_stable_pruner.md](03_stable_pruner.md)、Oracle target と collection は [04_oracle.md](04_oracle.md) に分ける。
 
 ## 1. 概要
 
 decision core は、1 つの Combat decision DTO から action を選ぶ層である。`CombatDecisionEngine` はまず event choice の特殊処理を試し、Combat search 可能な状態なら `BeamSearchEngine` を実行し、actionable な search result がない場合は fallback selector に戻す。
 
 `BeamSearchEngine` は `PolicyModel` が提案した候補 action を `AsyncTrainingApiClient.emulate_action(s)` で分岐実行し、`ValueModel` が stable/terminal state を評価し、beam width と depth budget の範囲で best root action を返す。`candidate_coverage.py` は policy ranking の後に構造的に必要な action type を補い、policy-only の blind spot を減らす。
+
+Value は heuristic 実装に加えて `LinearValueModel` を利用できる。learned Value は `VALUE_FEATURE_SCHEMA_VERSION = 2` の feature を使い、artifact schema `3`、mask version `1.2`、学習時の exact `dto_version`、feature names を load 時に検証する。runtime inference は artifact の scaler/係数を使う線形評価で、terminal utility が DTO から exact に得られる場合はそれを優先する。
+
+学習データは二系統を明確に分ける。supervised Value は Oracle の counterfactual `root_value_samples` を使い、actual trajectory loader は runtime で実際に commit された transition だけを読む。両者を混ぜて、実際の combat result を counterfactual action の label にすることはない。
 
 ## 2. Architecture
 
@@ -17,6 +21,10 @@ decision core は、1 つの Combat decision DTO から action を選ぶ層で�
 | `combat_observation.py` | public Combat DTO から `CombatObservation` / `EnemyObservation` を作る |
 | `policy.py` | `PolicyModel` interface、`ActionCandidate`、`PriorHeuristicPolicy` |
 | `value.py` | `ValueModel` interface と heuristic value |
+| `value_features.py` | learned Value 用 feature schema v2 と DTO featurization |
+| `learned_value.py` | artifact schema v3 の `LinearValueModel` と runtime contract validation |
+| `value_training_data.py` / `_value_training_data_impl.py` | supervised root-value sample と actual committed trajectory の structured loader |
+| `value_raw_data.py` | public Oracle JSONL を lossless に保持する raw loader |
 | `beam_search.py` | branch/rng allocator、frontier expansion、stable scoring、trace、cleanup |
 | `engine.py` | root decision orchestration、search/fallback/event branch の統合 |
 | `combat_decision.py` | Combat action type ontology と continuation 判定 |
@@ -34,6 +42,10 @@ score 用語は 4 つに分ける。
 | `target_node_score` | supervised label として使う descendant-derived score。stable pruning target では、その node 自身の即時 value ではなく、後続 Oracle leaf/terminal から作られる |
 
 `action_rank` / `policy_rank` と、RL の `behavior_frontier_scores` は ranking/sampling の情報であり、上の 4 つの score とは分けて読む。
+
+Value feature schema v2 は HP/block/energy/enemy threat に加え、hand と draw/discard/exhaust pile の public card state を集約する。upgrade、enchantment、tinker-time、card type は feature に反映する一方、opaque な card id 自体は learned input にしない。raw DTO は再 featurization 用に data loader が保持する。
+
+`load_combat_value_rl_episodes()` は episode 内の `decision_index` だけでなく、隣接 step の `next_decision_point_id` と次 step の `decision_point_id`、前 step の `next_masked_emulator_dto` と次 step の `masked_emulator_dto` が一致することも検証する。`completed_only=True` でも filter 前に chain を検証する。
 
 ## 3. API
 
@@ -70,6 +82,31 @@ class ValueModel:
 ```
 
 ```python
+class LinearValueModel(ValueModel):
+    @classmethod
+    def from_weights_file(cls, path: str | Path) -> "LinearValueModel"
+    def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float
+    def exact_terminal_utility(self, masked_emulator_dto: Mapping[str, Any]) -> float | None
+    def oracle_provenance(self) -> Mapping[str, Any]
+```
+
+Value training data:
+
+```python
+inspect_oracle_value_dto_contract(paths) -> OracleValueDtoContract
+load_combat_value_examples(
+    paths,
+    *,
+    terminal_weight=1.0,
+    bootstrap_weight=0.5,
+    allow_mixed_teachers=False,
+) -> tuple[list[CombatValueTrainingExample], CombatValueDatasetStats]
+load_combat_value_rl_episodes(paths, *, completed_only=False) -> list[CombatValueRLEpisode]
+load_oracle_value_raw_records(paths) -> tuple[list[RawOracleValueRecord], OracleValueDtoContract]
+load_raw_combat_value_episodes(paths) -> list[RawCombatValueEpisode]
+```
+
+```python
 class CombatDecisionEngine:
     async def decide(self, instance_id: str, *, timeout_s: float, decision: Mapping[str, Any] | None = None) -> DecisionOutcome
     async def decide_and_commit(self, instance_id: str, *, timeout_s: float, decision: Mapping[str, Any] | None = None) -> dict[str, Any]
@@ -86,6 +123,8 @@ best_event_option(client, *, instance_id: str, decision_point_id: str, legal_act
 ```
 
 ## 4. 使用例
+
+通常の decision:
 
 ```python
 import asyncio
@@ -115,6 +154,36 @@ async def choose_once(instance_id: str) -> None:
 asyncio.run(choose_once("existing-instance-id"))
 ```
 
+learned Value の学習と load:
+
+```bash
+python tools/train_combat_value.py \
+  --log-dir data/combat_oracle \
+  --output tools/output/combat_value_weights.json
+```
+
+```python
+from sts2_training.decision.learned_value import LinearValueModel
+
+value_model = LinearValueModel.from_weights_file(
+    "tools/output/combat_value_weights.json"
+)
+```
+
+actual trajectory を読む場合:
+
+```python
+from sts2_training.decision.value_training_data import load_combat_value_rl_episodes
+
+episodes = load_combat_value_rl_episodes(["data/combat_oracle/example.jsonl"])
+terminal_return_episodes = load_combat_value_rl_episodes(
+    ["data/combat_oracle/example.jsonl"],
+    completed_only=True,
+)
+```
+
 ## 5. 補足説明
 
-Beam Search は continuation handling、policy candidate limit、Whole Run active branch capacity、stable frontier pruning を別々の責務として扱う。`StableFrontierPruner` が制御するのは stable/resolved frontier の survivor selection だけであり、詳細は [03_stable_pruner.md](03_stable_pruner.md) を参照する。Oracle collection は runtime engine とは別 teacher copy を使うため、[04_oracle.md](04_oracle.md) で扱う。
+Beam Search は continuation handling、policy candidate limit、Whole Run active branch capacity、stable frontier pruning を別々の責務として扱う。`StableFrontierPruner` が制御するのは stable/resolved frontier の survivor selection だけであり、詳細は [03_stable_pruner.md](03_stable_pruner.md) を参照する。
+
+Value supervised data の `root_value_samples` は Oracle が生成した counterfactual post-state/target であり、actual committed trajectory とは別物である。target の生成規則、Oracle record schema、teacher provenance は [04_oracle.md](04_oracle.md) を参照する。structured dataclass で未使用の public producer field まで保持したい場合は `value_raw_data.py` の raw loader を使う。
