@@ -1,4 +1,10 @@
-"""Combat search trace data structures for training and replay."""
+"""Combat search trace data structures for training and replay.
+
+The persisted v4 field spellings are retained for record compatibility, while canonical
+Python access follows the Oracle terminology: ``action_score``/``action_rank`` for
+pre-simulation policy provenance, ``state_score`` for a resolved state, and
+``best_node_score`` for the score attributed to the selected search node.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +44,14 @@ class PolicyCandidateTrace:
     post_coverage_rank: int
     candidate_source: str
 
+    @property
+    def action_rank(self) -> int | None:
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        return self.policy_score
+
 
 @dataclass(frozen=True)
 class PolicyProposalTrace:
@@ -57,9 +71,11 @@ class PolicyProposalTrace:
 class ResolvedNodeTrace:
     """One emulator result materialized as a Beam node.
 
-    ``value_source`` is ``terminal`` or ``value_bootstrap`` only when ``value_is_fresh``
-    is true. Pending continuation nodes carry an inherited parent value and therefore use
-    ``value_source='inherited'``; those values must not become learning targets.
+    Canonically, ``state_score_source`` is ``terminal`` or ``value_bootstrap`` only when
+    ``state_score_is_fresh`` is true. Pending continuation nodes carry an inherited parent
+    state score and therefore use ``state_score_source='inherited'``; those scores must not
+    become learning targets. The stored v4 names remain ``value``/``value_is_fresh``/
+    ``value_source`` for trace compatibility.
     """
 
     search_id: str
@@ -88,6 +104,26 @@ class ResolvedNodeTrace:
     candidate_source: str | None
     event_type: str = field(default="resolved_node", init=False)
 
+    @property
+    def state_score(self) -> float:
+        return self.value
+
+    @property
+    def state_score_is_fresh(self) -> bool:
+        return self.value_is_fresh
+
+    @property
+    def state_score_source(self) -> str:
+        return self.value_source
+
+    @property
+    def action_rank(self) -> int | None:
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        return self.policy_score
+
 
 @dataclass(frozen=True)
 class StablePruneNodeTrace:
@@ -113,19 +149,31 @@ class StablePruneNodeTrace:
     post_coverage_rank: int | None
     candidate_source: str | None
 
+    @property
+    def state_score(self) -> float:
+        return self.value
+
+    @property
+    def action_rank(self) -> int | None:
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        return self.policy_score
+
     def to_prune_view(self) -> StablePruneNodeView:
         """Reconstruct exactly the public pruning view for this trace node."""
 
         return StablePruneNodeView(
-            value=self.value,
+            value=self.state_score,
             root_action_id=self.root_action_id,
             depth=self.depth,
             combat_depth=self.combat_depth,
             continuation_steps=self.continuation_steps,
             terminal=self.terminal,
             action_type=self.action_type,
-            policy_rank=self.policy_rank,
-            policy_score=self.policy_score,
+            policy_rank=self.action_rank,
+            policy_score=self.action_score,
             post_coverage_rank=self.post_coverage_rank,
             candidate_source=self.candidate_source,
         )
@@ -229,6 +277,12 @@ class SearchTraceEnd:
     nodes_expanded: int
     branches_created: int
     event_type: str = field(default="search_end", init=False)
+
+    @property
+    def best_node_score(self) -> float | None:
+        """Canonical name for the score attributed to the selected search-tree node."""
+
+        return self.best_value
 
 
 SearchTraceEvent: TypeAlias = (
