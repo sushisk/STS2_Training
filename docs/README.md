@@ -6,8 +6,8 @@
 
 `docs/` には性質の異なる2種類の文書が混在している。どちらに属するかで従うルールが変わる。
 
-1. **コード解説ドキュメント**(`00_overview.md` 〜 `08_visualizer.md`): `src/sts2_training/` の各モジュールを説明する。下記「文章編集ポリシー」に従う。
-2. **wire protocol / paired release 文書**(`STS2_wire_contract_v0.*.md`, `emulate_actions_timeout_semantics_v0.7.md`, `paired_v07_release_assurance.md`, `whole_run_action_id_cutover.md`): STS2_RL と共有するバージョン管理された契約・移行記録。固定フォーマットを強制しない。新規追加時は既存ファイルの書式(バージョン番号の付け方、"paired with sushisk/STS2_RL#N" の明記など)に合わせる。
+1. **コード解説ドキュメント**(`00_overview.md` 〜 `08_visualizer.md`): `src/sts2_training/` の各モジュールを説明する。「文章編集ポリシー」に従う。
+2. **wire protocol / paired release 文書**(`STS2_wire_contract_v0.*.md`, `emulate_actions_timeout_semantics_v0.7.md`, `paired_v07_release_assurance.md` は STS2_RL と共有する契約。`paired_v07_release_assurance_local.md` のような `_local.md` はこの repo だけの非同期ファイル): 「wire protocol / paired release 文書の編集ポリシー」に従う。
 
 ## 文章編集ポリシー(コード解説ドキュメント)
 
@@ -22,6 +22,16 @@
 - コード解説ドキュメントを追加する場合、`src/sts2_training/` の既存モジュール構成に対応させる。既存ファイルのどれかのスコープに収まるなら新規ファイルを作らず、そのファイルを拡張する。
 - 新しいモジュール/サブシステムを追加した場合のみ、次の空き番号で `NN_<topic>.md` を作成し、固定フォーマットに従い、`00_overview.md` の索引テーブルに1行追加する。
 - 番号・ファイル名は一度決めたら変更しない(相互リンクが壊れるため)。リネームが必要な場合は全ファイルの参照リンクを一括更新する。
+
+## wire protocol / paired release 文書の編集ポリシー
+
+これらは STS2_RL と共有する契約であり、コード解説ドキュメントの固定フォーマット(0〜5)は適用しない。代わりに以下に従う。
+
+- **STS2_Training の `docs/` が正本(canonical source)**: `STS2_wire_contract_v0.7.md` / `STS2_wire_contract_v0.8.md` / `emulate_actions_timeout_semantics_v0.7.md` / `paired_v07_release_assurance.md` の4ファイルは、この repo で編集し、変更を STS2_RL の同名ファイルへ**バイト単位で同一**にコピーする。STS2_RL 側を先に、または独自に編集しない。
+- **repo 固有の内容は同期しない別ファイルに分離する**: CI job 名やワークフローファイル名など、repo ごとに事実として異なる内容(例: 必須 CI job が `training-hosted-contract` か `rl-hosted-contract` か)を正本ファイルに書かない。`<topic>_local.md` という名前で repo ごとに個別に保持し、正本側から相対リンクで参照する(`paired_v07_release_assurance_local.md` がその例)。この `_local.md` ファイルは repo 間で同期しない。
+- **ファイルを分割・統合する判断基準**: 内容が「一般手順」なら正本ファイル内に、「特定の1回限りの移行の実行記録」ならその一般手順を説明する正本ファイルへ worked example として統合する(スタンドアロンの移行メモを増やさない)。ただし単独の話題として十分な分量・独立した参照価値がある場合(例: `emulate_actions_timeout_semantics_v0.7.md` はタイムアウト設定という単一の運用上の注意点に特化しており、`STS2_wire_contract_v0.7.md` に埋め込むと後者が肥大化する)は独立ファイルのままでよい。
+- **バージョン番号は既存の付番規則に従う**: 新しいバージョンは `<topic>_v0.N.md` として追加し、旧バージョンは削除せず「historical」として残す(`STS2_wire_contract_v0.8.md` 冒頭の "Version ... remains historical unless overridden below" のような書き方を踏襲する)。
+- **STS2_RL 側での編集が必要になったら**: まずこの repo の正本ファイルを直す PR を作り、マージ後に STS2_RL 側へ同一内容をコピーする PR を作る(2 repo にまたがる変更を1コミットで済ませない)。
 
 ## そのほか注意点
 
