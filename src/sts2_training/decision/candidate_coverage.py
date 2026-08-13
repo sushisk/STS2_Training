@@ -8,7 +8,9 @@ completion branch.
 
 Phase-1 search instrumentation also needs to distinguish inner-policy ranking from
 structural coverage. ``CandidateProposal`` carries that provenance without widening the
-``ActionCandidate`` contract or changing candidate ordering.
+``ActionCandidate`` contract or changing candidate ordering. Canonically, the
+pre-simulation scalar is an ``action_score``; the historical ``policy_score`` and
+``policy_rank`` dataclass fields are retained as compatibility storage names.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ _POTION_ACTION_TYPE = "potion"
 
 @dataclass(frozen=True)
 class CandidateProposal:
-    """One post-coverage candidate plus ranking provenance for search traces."""
+    """One post-coverage candidate plus action-ranking provenance for search traces."""
 
     candidate: ActionCandidate
     policy_rank: int | None
@@ -44,6 +46,18 @@ class CandidateProposal:
     @property
     def action_id(self) -> str:
         return self.candidate.action_id
+
+    @property
+    def action_rank(self) -> int | None:
+        """Canonical name for the candidate's pre-coverage rank."""
+
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        """Canonical name for the candidate's pre-simulation score."""
+
+        return self.policy_score
 
 
 class CoverageConstrainedPolicy(PolicyModel):
@@ -184,7 +198,7 @@ def apply_structural_coverage_with_provenance(
 
     selected: list[CandidateProposal] = []
     seen: set[str] = set()
-    for policy_rank, candidate in enumerate(ranked):
+    for action_rank, candidate in enumerate(ranked):
         if not isinstance(candidate, ActionCandidate):
             raise RuntimeError("PolicyModel must return ActionCandidate objects")
         if candidate.action_id not in by_id:
@@ -198,8 +212,8 @@ def apply_structural_coverage_with_provenance(
         selected.append(
             CandidateProposal(
                 candidate=candidate,
-                policy_rank=policy_rank,
-                policy_score=_policy_score(candidate),
+                policy_rank=action_rank,
+                policy_score=_action_score(candidate),
                 post_coverage_rank=len(selected),
                 candidate_source="policy",
             )
@@ -236,8 +250,8 @@ def apply_structural_coverage_with_provenance(
     return [
         CandidateProposal(
             candidate=proposal.candidate,
-            policy_rank=proposal.policy_rank,
-            policy_score=proposal.policy_score,
+            policy_rank=proposal.action_rank,
+            policy_score=proposal.action_score,
             post_coverage_rank=index,
             candidate_source=proposal.candidate_source,
         )
@@ -253,29 +267,31 @@ def _policy_only_proposals(
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
         raise ValueError("top_k must be a positive integer")
     proposals: list[CandidateProposal] = []
-    for rank, candidate in enumerate(ranked):
+    for action_rank, candidate in enumerate(ranked):
         if not isinstance(candidate, ActionCandidate):
             raise RuntimeError("PolicyModel.propose_batch must return ActionCandidate objects")
         proposals.append(
             CandidateProposal(
                 candidate=candidate,
-                policy_rank=rank,
-                policy_score=_policy_score(candidate),
-                post_coverage_rank=rank,
+                policy_rank=action_rank,
+                policy_score=_action_score(candidate),
+                post_coverage_rank=action_rank,
                 candidate_source="policy",
             )
         )
     return proposals
 
 
-def _policy_score(candidate: ActionCandidate) -> float | None:
-    for attribute in ("policy_score", "score", "prior", "logit"):
+def _action_score(candidate: ActionCandidate) -> float | None:
+    """Read a finite pre-simulation action score from known candidate conventions."""
+
+    for attribute in ("action_score", "policy_score", "score", "prior", "logit"):
         raw = getattr(candidate, attribute, None)
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
-        value = float(raw)
-        if math.isfinite(value):
-            return value
+        action_score = float(raw)
+        if math.isfinite(action_score):
+            return action_score
     return None
 
 
