@@ -98,7 +98,7 @@ class DtoToScenarioSpecTest(unittest.TestCase):
     def test_rejects_legacy_or_missing_mask_version(self) -> None:
         for mask_version in ("1.1", None, "invalid"):
             with self.subTest(mask_version=mask_version):
-                with self.assertRaisesRegex(ValueError, r"mask_version >= 1\.2"):
+                with self.assertRaisesRegex(ValueError, r"mask_version exactly '1\.2'"):
                     dto_to_scenario_spec(_combat_start_dto(mask_version=mask_version), seed=1)
 
     def test_strips_god_mode_powers_but_keeps_others(self) -> None:
@@ -144,7 +144,7 @@ class DtoToScenarioSpecTest(unittest.TestCase):
                     "card_id": "STRIKE_IRONCLAD",
                     "is_upgraded": True,
                     "upgrade_level": 1,
-                    "enchantment": {"id": "SHARP", "amount": 2},
+                    "enchantment": {"id": "SHARP", "amount": 2, "status": "Normal"},
                 }
             ],
         )
@@ -178,8 +178,8 @@ class DtoToScenarioSpecTest(unittest.TestCase):
         self.assertEqual(
             draw_pile_cards,
             [
-                {"card_id": "DEFEND_IRONCLAD", "is_upgraded": False},
-                {"card_id": "STRIKE_IRONCLAD", "is_upgraded": False},
+                {"card_id": "DEFEND_IRONCLAD", "is_upgraded": False, "upgrade_level": 0},
+                {"card_id": "STRIKE_IRONCLAD", "is_upgraded": False, "upgrade_level": 0},
                 {
                     "card_id": "STRIKE_IRONCLAD",
                     "is_upgraded": True,
