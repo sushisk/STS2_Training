@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import io
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -324,19 +326,24 @@ class RunSelfPlayBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("god_mode", connection.start_instance_configs[0])
 
     async def test_god_mode_defaults_output_dir_to_a_distinct_subdirectory(self) -> None:
-        results = await run_self_play_batch(
-            character_id="IRONCLAD",
-            num_runs=1,
-            connection_factory=lambda: _FakeConnection(),
-            god_mode=True,
-        )
-
+        # run_self_play_batch resolves its default output_dir relative to the
+        # process cwd, which is the real (gitignored) data/self_play directory
+        # used for actual self-play harvests. Run from an isolated tmp cwd so
+        # this test never reads or clobbers real harvest output.
+        original_cwd = Path.cwd()
+        tmp_cwd = tempfile.mkdtemp()
         try:
+            os.chdir(tmp_cwd)
+            results = await run_self_play_batch(
+                character_id="IRONCLAD",
+                num_runs=1,
+                connection_factory=lambda: _FakeConnection(),
+                god_mode=True,
+            )
             self.assertEqual(results[0].log_path.parent, Path("data/self_play/godmode"))
         finally:
-            for result in results:
-                result.log_path.unlink(missing_ok=True)
-            Path("data/self_play/godmode").rmdir()
+            os.chdir(original_cwd)
+            shutil.rmtree(tmp_cwd, ignore_errors=True)
 
     async def test_god_mode_forces_beam_search_off(self) -> None:
         captured: dict = {}
