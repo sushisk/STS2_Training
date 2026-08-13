@@ -101,4 +101,4 @@ python -m sts2_training.board_eval.training_data \
 
 ## 5. 補足説明
 
-既存の `sts2_deck_evaluation_rl_implementation.md` は将来案としての neural/embedding 構想を多く含むが、現在の source は feature extraction、summary、linear value interface、log example builder までが実装範囲である。非 Combat selector から board context を使う場合は [06_selection.md](06_selection.md) を参照する。
+旧 `sts2_deck_evaluation_rl_implementation.md`(削除済み)は将来案としての neural/embedding 構想を多く含んでいたが、現在の source は feature extraction、summary、linear value interface、log example builder までが実装範囲である。将来の拡張構想は本文書のスコープではなく、現在動く実装だけを記載する。非 Combat selector から board context を使う場合は [06_selection.md](06_selection.md) を参照する。

@@ -2,7 +2,7 @@
 
 ## 0. 文章の目的
 
-この文書は `src/sts2_training/api/` が担う Training API 接続層を説明する。対象は TCP/async client、DTO contract validation、response routing、local process transport、smoke test であり、wire protocol 詳細そのものは [STS2_wire_contract_v0.8.md](STS2_wire_contract_v0.8.md) を参照する。
+この文書は `src/sts2_training/api/` が担う Training API 接続層を説明する。対象は TCP/async client、DTO contract validation、response routing、local process transport、smoke test であり、wire protocol 詳細そのものは [wire_contract_v0.8.md](wire_contract_v0.8.md) を参照する。
 
 ## 1. 概要
 

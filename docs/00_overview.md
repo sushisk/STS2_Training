@@ -8,7 +8,7 @@
 
 `STS2_Training` は、 sibling repo である `STS2_RL` / `STS2_Emulator` の Training API に接続し、Slay the Spire 2 の意思決定を収集・探索・学習する Python パッケージである。中心は Combat の意思決定で、`PolicyModel`、`ValueModel`、`StableFrontierPruner` を組み合わせて、Beam Search による行動選択と教師データ生成を行う。
 
-この repo は大きく分けて、API 接続、Combat decision stack、stable frontier pruning、Budgeted Oracle、Run-state board evaluation、非 Combat heuristic selection、runner CLI、live visualizer から成る。外部 wire protocol の版管理文書である `STS2_wire_contract_v0.7.md` と `STS2_wire_contract_v0.8.md` はこの rewrite の対象外であり、引き続き外部共有仕様として扱う。
+この repo は大きく分けて、API 接続、Combat decision stack、stable frontier pruning、Budgeted Oracle、Run-state board evaluation、非 Combat heuristic selection、runner CLI、live visualizer から成る。外部 wire protocol の版管理文書である `wire_contract_v0.7.md` と `wire_contract_v0.8.md` はこの rewrite の対象外であり、引き続き外部共有仕様として扱う。
 
 ## 2. Architecture
 
