@@ -7,6 +7,12 @@ lifecycles and passes an already ordered stable frontier to ``StableFrontierPrun
 The public seam exposes only ``StablePruneNodeView``. Internal ``BeamNode`` identity,
 DTO/action payloads, branch/node IDs, RNG identity, logs, and capacity state stay outside
 the pruning API.
+
+Score terminology follows the Oracle naming contract: ``state_score`` is the score of an
+isolated resolved state, ``action_score`` is the pre-simulation action score, and a
+learned pruner produces a separate ``frontier_score``. The v1 dataclass field names
+``value``/``policy_rank``/``policy_score`` remain as compatibility storage names; new
+runtime code should use the canonical properties exposed below.
 """
 
 from __future__ import annotations
@@ -26,8 +32,9 @@ class StablePruneNodeView:
 
     Contract v1 field semantics:
 
-    - ``value`` is the finite current score for a stable/resolved/terminal node. A
-      continuation node's inherited/stale value must never enter this seam.
+    - ``value`` is the compatibility storage name for canonical ``state_score``: the
+      finite current score for a stable/resolved/terminal state. A continuation node's
+      inherited/stale state score must never enter this seam.
     - ``root_action_id`` is an opaque grouping key scoped to one search only; it is not a
       global learned identity.
     - ``depth`` is Beam transition depth; ``combat_depth`` counts non-continuation Combat
@@ -35,9 +42,11 @@ class StablePruneNodeView:
     - ``terminal`` identifies terminal stable/resolved nodes.
     - ``action_type`` is only the coarse semantic type of the action that produced this
       node. Full action payloads are deliberately excluded.
-    - ``policy_rank`` is the inner-policy 0-based rank, or ``None`` when structural
-      coverage inserted the candidate without an inner-policy rank.
-    - ``policy_score`` is a finite numeric score when available, otherwise ``None``.
+    - ``policy_rank`` is the compatibility storage name for canonical ``action_rank``:
+      the inner-policy 0-based rank, or ``None`` when structural coverage inserted the
+      candidate without an inner-policy rank.
+    - ``policy_score`` is the compatibility storage name for canonical ``action_score``:
+      a finite pre-simulation action score when available, otherwise ``None``.
     - ``post_coverage_rank`` is the 0-based rank after structural coverage, or ``None``
       only when provenance is unavailable for a synthetic/legacy node.
     - ``candidate_source`` is ``"policy"`` or ``"structural_coverage"``; ``None`` is
@@ -83,6 +92,24 @@ class StablePruneNodeView:
                 raise ValueError(
                     "candidate_source must be 'policy', 'structural_coverage', or None"
                 )
+
+    @property
+    def state_score(self) -> float:
+        """Canonical name for the resolved state's score."""
+
+        return self.value
+
+    @property
+    def action_rank(self) -> int | None:
+        """Canonical name for the pre-coverage action rank."""
+
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        """Canonical name for the pre-simulation action score."""
+
+        return self.policy_score
 
 
 @dataclass(frozen=True)
@@ -138,7 +165,7 @@ class StableFrontierPruner:
 
 
 class ValueTopKPruner(StableFrontierPruner):
-    """Exact baseline: stable descending-value sort over frontier indices."""
+    """Exact baseline: stable descending-``state_score`` sort over frontier indices."""
 
     name = "value_top_k"
     version = "1"
@@ -152,10 +179,10 @@ class ValueTopKPruner(StableFrontierPruner):
     ) -> list[int]:
         del context
         _positive_int(k, "k")
-        # Python's sort is stable, so equal values preserve authoritative frontier order.
+        # Python's sort is stable, so equal state scores preserve frontier order.
         ranked_indices = sorted(
             range(len(frontier)),
-            key=lambda index: frontier[index].value,
+            key=lambda index: frontier[index].state_score,
             reverse=True,
         )
         return ranked_indices[:k]
