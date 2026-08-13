@@ -85,7 +85,17 @@ class _FakeCommitEngine:
 
     async def decide(self, instance_id, *, timeout_s, decision):
         self.decisions.append(decision["decision_point_id"])
-        return SimpleNamespace(chosen_action_id="a")
+        return SimpleNamespace(
+            chosen_action_id="a",
+            source="beam_search",
+            beam_result=BeamSearchResult(
+                best_root_action_id="a",
+                best_value=2.5,
+                best_node=None,
+                reason="max_depth",
+                stats=BeamSearchStats(depths_completed=2, nodes_expanded=4),
+            ),
+        )
 
 
 class _FailingCommitEngine(_FakeCommitEngine):
@@ -175,6 +185,9 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         transition = decision_record["runtime_transition"]
         self.assertEqual(transition["chosen_action_id"], "a")
         self.assertEqual(transition["chosen_action"]["action_type"], "card")
+        self.assertEqual(transition["decision_source"], "beam_search")
+        self.assertEqual(transition["beam_result"]["best_root_action_id"], "a")
+        self.assertEqual(transition["beam_result"]["best_value"], 2.5)
         self.assertEqual(transition["next_decision_point_id"], "d-terminal")
         self.assertEqual(transition["combat_result"], "victory")
         self.assertEqual(transition["next_dto_contract"]["dto_version"], _DTO_VERSION)
