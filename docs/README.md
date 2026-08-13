@@ -7,7 +7,7 @@
 `docs/` には性質の異なる2種類の文書が混在している。どちらに属するかで従うルールが変わる。
 
 1. **コード解説ドキュメント**(`00_overview.md` 〜 `08_visualizer.md`): `src/sts2_training/` の各モジュールを説明する。「文章編集ポリシー」に従う。
-2. **wire protocol / paired release 文書**(`STS2_wire_contract_v0.*.md`, `emulate_actions_timeout_semantics_v0.7.md`, `paired_v07_release_assurance.md`, `paired_v07_release_assurance_local.md`): STS2_RL と共有する契約。「wire protocol / paired release 文書の編集ポリシー」に従う。
+2. **wire protocol / paired release 文書**(`STS2_wire_contract_v0.*.md`, `emulate_actions_timeout_semantics_v0.7.md`, `paired_v07_release_assurance.md` は STS2_RL と共有する契約。`paired_v07_release_assurance_local.md` のような `_local.md` はこの repo だけの非同期ファイル): 「wire protocol / paired release 文書の編集ポリシー」に従う。
 
 ## 文章編集ポリシー(コード解説ドキュメント)
 
