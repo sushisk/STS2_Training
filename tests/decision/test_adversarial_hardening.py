@@ -246,7 +246,6 @@ class BeamSearchHardeningTest(unittest.IsolatedAsyncioTestCase):
         await engine.search("inst-001", _root(actions), timeout_s=1.0)
 
         self.assertEqual(client.emulate_call_sizes, [2, 1])
-
     async def test_non_combat_boundary_is_not_expanded_at_deeper_depth(self) -> None:
         client = _BeamClient()
         client.child_dto = {
@@ -324,7 +323,7 @@ class BeamSearchHardeningTest(unittest.IsolatedAsyncioTestCase):
             config=BeamSearchConfig(max_depth=1, top_k_actions=1),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "exactly one value"):
+        with self.assertRaisesRegex(RuntimeError, "exactly one state score"):
             await engine.search(
                 "inst-001",
                 _root([_card("strike")]),
@@ -417,7 +416,6 @@ class BeamSearchHardeningTest(unittest.IsolatedAsyncioTestCase):
             _root([_card("c1"), _card("c2"), _card("c3")]),
             timeout_s=1.0,
         )
-
         self.assertTrue(result.reason.startswith("emulate_actions_rejected"))
         self.assertEqual(result.stats.depths_completed, 0)
         self.assertIsNotNone(result.best_root_action_id)
