@@ -164,12 +164,11 @@ class OracleEpisodeRunner:
                 final_dto = dict(next_decision["masked_emulator_dto"])
                 final_decision_metadata = response_metadata_without_masked_dto(next_decision)
 
-                # Write only after the runtime commit succeeds.  Each decision record is
-                # therefore a complete tuple of (public pre-state, Oracle counterfactuals,
-                # actual action, public post-state), suitable for both distillation and
-                # future trajectory-based Value learning. Runtime selection diagnostics
-                # are retained as generated information rather than discarded at the base
-                # logging layer.
+                # Write only after the runtime commit succeeds. Each retained record is a
+                # complete (public pre-state, Oracle counterfactuals, actual action, public
+                # post-state) tuple. Runtime search diagnostics are retained, but the
+                # BeamSearchResult is summarized so its deep best-node DTO/branch_log do
+                # not violate the explicit root-only DTO volume boundary.
                 self._writer.write(
                     decision,
                     oracle_result,
@@ -179,7 +178,7 @@ class OracleEpisodeRunner:
                         "chosen_action_id": chosen,
                         "chosen_action": chosen_action,
                         "decision_source": outcome.source,
-                        "beam_result": outcome.beam_result,
+                        "beam_result": _beam_result_summary(outcome.beam_result),
                         "next_decision_point_id": next_decision["decision_point_id"],
                         "commit_response_metadata": final_decision_metadata,
                         "next_masked_emulator_dto": final_dto,
@@ -309,6 +308,45 @@ def _available_action_by_id(dto: Mapping[str, Any], action_id: str) -> dict[str,
         ):
             return dict(action)
     return None
+
+
+def _beam_result_summary(result: Any) -> dict[str, Any] | None:
+    """Preserve runtime search diagnostics without serializing a deep Beam DTO."""
+
+    if result is None:
+        return None
+    stats = getattr(result, "stats", None)
+    stats_payload = None if stats is None else dict(vars(stats))
+    best_node = getattr(result, "best_node", None)
+    best_node_payload: dict[str, Any] | None = None
+    if best_node is not None:
+        best_node_payload = {
+            "branch_id": best_node.branch_id,
+            "parent_branch_id": best_node.parent_branch_id,
+            "rng_id": best_node.rng_id,
+            "decision_point_id": best_node.decision_point_id,
+            "depth": best_node.depth,
+            "value": best_node.value,
+            "root_action_id": best_node.root_action_id,
+            "combat_depth": best_node.combat_depth,
+            "continuation_steps": best_node.continuation_steps,
+            "terminal": best_node.terminal,
+            "action_id": best_node.action_id,
+            "action_type": best_node.action_type,
+            "action": None if best_node.action is None else dict(best_node.action),
+            "policy_rank": best_node.policy_rank,
+            "policy_score": best_node.policy_score,
+            "post_coverage_rank": best_node.post_coverage_rank,
+            "candidate_source": best_node.candidate_source,
+            "omitted_large_fields": ["masked_emulator_dto", "branch_log"],
+        }
+    return {
+        "best_root_action_id": getattr(result, "best_root_action_id", None),
+        "best_value": getattr(result, "best_value", None),
+        "best_node": best_node_payload,
+        "reason": getattr(result, "reason", None),
+        "stats": stats_payload,
+    }
 
 
 def _positive_timeout(name: str, value: float) -> None:
