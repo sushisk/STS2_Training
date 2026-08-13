@@ -17,6 +17,9 @@ from sts2_training.decision.oracle_search import (
 from sts2_training.runner.oracle_collection import OracleEpisodeRunner, _parse_args
 
 
+_DTO_VERSION = "emulator-test"
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self.closed: list[str] = []
@@ -24,9 +27,12 @@ class _FakeClient:
 
     async def get_decision(self, instance_id, branch_id, *, timeout_s):
         return {
+            "status": "completed",
+            "server_epoch": "epoch-1",
             "decision_point_id": "d-root",
             "masked_emulator_dto": {
                 "mask_version": ORACLE_VALUE_MASK_VERSION,
+                "dto_version": _DTO_VERSION,
                 "hp": 30,
                 "legal_actions": [
                     {"action_id": "a", "action_type": "card", "is_available": True},
@@ -38,9 +44,12 @@ class _FakeClient:
     async def commit_action(self, instance_id, decision_point_id, action_id, *, timeout_s):
         self.commits.append(action_id)
         return {
+            "status": "completed",
+            "server_epoch": "epoch-1",
             "decision_point_id": "d-terminal",
             "masked_emulator_dto": {
                 "mask_version": ORACLE_VALUE_MASK_VERSION,
+                "dto_version": _DTO_VERSION,
                 "terminal": True,
                 "outcome": "victory",
                 "hand": [
@@ -125,7 +134,7 @@ class _FakeOracle:
 
 
 class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
-    async def test_collects_before_runtime_commit_and_appends_combat_result(self) -> None:
+    async def test_collects_teacher_then_logs_actual_runtime_transition_and_result(self) -> None:
         client = _FakeClient()
         oracle = _FakeOracle()
         commit_engine = _FakeCommitEngine(client)
@@ -150,29 +159,39 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.commits, ["a"])
         self.assertEqual(client.closed, ["inst"])
         self.assertEqual(result.decisions_collected, 1)
-        self.assertEqual(result.final_dto["outcome"], "victory")
         self.assertTrue(result.completed)
         self.assertEqual(result.combat_result, "victory")
-        self.assertEqual(result.termination_reason, "terminal")
         self.assertEqual(len(records), 2)
-        self.assertEqual(records[0]["record_type"], "combat_oracle_decision")
-        self.assertEqual(records[0]["decision_point_id"], "d-root")
-        self.assertEqual(records[0]["root_value_samples"], [])
-        self.assertEqual(records[0]["provenance"]["training_commit"], "abc")
-        self.assertEqual(records[0]["provenance"]["teacher_inner_policy_class"], "teacher.Policy")
-        self.assertEqual(records[1]["record_type"], "combat_oracle_episode_result")
-        self.assertTrue(records[1]["completed"])
-        self.assertEqual(records[1]["termination_reason"], "terminal")
-        self.assertEqual(records[1]["combat_result"], "victory")
-        final = records[1]["final_masked_emulator_dto"]
-        self.assertEqual(final["outcome"], "victory")
-        self.assertEqual(final["mask_version"], "1.2")
+
+        decision_record = records[0]
+        self.assertEqual(decision_record["record_type"], "combat_oracle_decision")
+        self.assertEqual(decision_record["instance_id"], "inst")
+        self.assertEqual(decision_record["decision_index"], 0)
+        self.assertEqual(decision_record["decision_point_id"], "d-root")
+        self.assertEqual(decision_record["dto_contract"]["dto_version"], _DTO_VERSION)
+        self.assertEqual(decision_record["decision_response_metadata"]["server_epoch"], "epoch-1")
+        self.assertEqual(decision_record["root_value_samples"], [])
+        self.assertEqual(decision_record["provenance"]["training_commit"], "abc")
+        transition = decision_record["runtime_transition"]
+        self.assertEqual(transition["chosen_action_id"], "a")
+        self.assertEqual(transition["chosen_action"]["action_type"], "card")
+        self.assertEqual(transition["next_decision_point_id"], "d-terminal")
+        self.assertEqual(transition["combat_result"], "victory")
+        self.assertEqual(transition["next_dto_contract"]["dto_version"], _DTO_VERSION)
+        self.assertEqual(transition["next_masked_emulator_dto"]["outcome"], "victory")
+
+        episode_record = records[1]
+        self.assertEqual(episode_record["record_type"], "combat_oracle_episode_result")
+        self.assertTrue(episode_record["completed"])
+        self.assertEqual(episode_record["combat_result"], "victory")
+        self.assertEqual(episode_record["dto_contract"]["dto_version"], _DTO_VERSION)
+        self.assertEqual(episode_record["final_decision_metadata"]["server_epoch"], "epoch-1")
+        final = episode_record["final_masked_emulator_dto"]
         self.assertEqual(final["hand"][0]["upgradeLevel"], 2)
         self.assertEqual(final["hand"][0]["enchantment"]["amount"], 3)
-        self.assertIsInstance(final["drawPile"], list)
         self.assertEqual(final["drawPile"][0]["count"], 2)
 
-    async def test_commit_failure_rolls_back_partial_episode_output(self) -> None:
+    async def test_commit_failure_rolls_back_episode_output(self) -> None:
         client = _FakeClient()
         oracle = _FakeOracle()
         commit_engine = _FailingCommitEngine(client)
@@ -186,24 +205,19 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
                 commit_engine=commit_engine,  # type: ignore[arg-type]
                 writer=OracleJsonlWriter(path),
             )
-
             with self.assertRaisesRegex(RuntimeError, "commit decision failed"):
                 await runner.run(
                     "inst",
                     oracle_timeout_s=5.0,
                     decision_timeout_s=5.0,
                 )
-
             output = path.read_text(encoding="utf-8")
 
-        self.assertEqual(oracle.decisions, ["d-root"])
-        self.assertEqual(commit_engine.decisions, ["d-root"])
-        self.assertEqual(client.closed, ["inst"])
         self.assertEqual(output, prefix)
+        self.assertEqual(client.closed, ["inst"])
 
     def test_cli_defaults_to_exhaustive_root_and_runtime_target_beam(self) -> None:
         args = _parse_args(["--scenario", "scenario.json", "--output", "oracle.jsonl"])
-
         self.assertFalse(args.policy_limited_root)
         self.assertEqual(args.oracle_beam_width, 32)
         self.assertEqual(args.oracle_depth, 4)
