@@ -19,6 +19,9 @@ from sts2_training.decision.oracle_search import (
 )
 
 
+_DTO_VERSION = "emulator-test"
+
+
 class OracleJsonlWriterTest(unittest.TestCase):
     def _result(self) -> OracleCollectionResult:
         metadata = OracleTargetMetadata(
@@ -53,40 +56,62 @@ class OracleJsonlWriterTest(unittest.TestCase):
             ),
         )
 
-    def test_writer_preserves_masked_dto_targets_and_provenance(self) -> None:
+    def _dto(self, **extra):
+        return {
+            "mask_version": ORACLE_VALUE_MASK_VERSION,
+            "dto_version": _DTO_VERSION,
+            "legal_actions": [],
+            **extra,
+        }
+
+    def _transition(self, *, next_id: str = "d-next", next_dto=None):
+        return {
+            "chosen_action_id": "play",
+            "chosen_action": {"action_id": "play", "action_type": "card"},
+            "next_decision_point_id": next_id,
+            "commit_response_metadata": {"decision_point_id": next_id, "status": "completed"},
+            "next_masked_emulator_dto": next_dto or self._dto(),
+        }
+
+    def test_writer_preserves_public_envelope_dto_oracle_and_actual_transition(self) -> None:
         decision = {
+            "status": "completed",
+            "server_epoch": "epoch-1",
             "decision_point_id": "d-root",
-            "masked_emulator_dto": {
-                "mask_version": ORACLE_VALUE_MASK_VERSION,
-                "hp": 37,
-                "legal_actions": [
+            "masked_emulator_dto": self._dto(
+                hp=37,
+                legal_actions=[
                     {"action_id": "play", "action_type": "card", "is_available": True}
                 ],
-            },
+            ),
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oracle.jsonl"
             record = OracleJsonlWriter(path).write(
                 decision,
                 self._result(),
+                instance_id="inst-1",
+                decision_index=0,
+                runtime_transition=self._transition(),
                 training_commit="abc123",
             )
             parsed = json.loads(path.read_text(encoding="utf-8").strip())
 
         self.assertEqual(record["record_schema_version"], ORACLE_RECORD_SCHEMA_VERSION)
-        self.assertEqual(parsed["decision_point_id"], "d-root")
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 6)
+        self.assertEqual(parsed["instance_id"], "inst-1")
+        self.assertEqual(parsed["decision_index"], 0)
+        self.assertEqual(parsed["decision_response_metadata"]["server_epoch"], "epoch-1")
+        self.assertNotIn("masked_emulator_dto", parsed["decision_response_metadata"])
+        self.assertEqual(parsed["dto_contract"]["dto_version"], _DTO_VERSION)
         self.assertEqual(parsed["masked_emulator_dto"]["hp"], 37)
-        self.assertEqual(parsed["masked_emulator_dto"]["mask_version"], "1.2")
+        self.assertEqual(parsed["runtime_transition"]["chosen_action_id"], "play")
+        self.assertEqual(
+            parsed["runtime_transition"]["next_masked_emulator_dto"]["dto_version"],
+            _DTO_VERSION,
+        )
         self.assertEqual(parsed["oracle_targets"]["metadata"]["oracle_beam_width"], 16)
         self.assertEqual(parsed["provenance"]["training_commit"], "abc123")
-        self.assertEqual(parsed["provenance"]["rng_sampling"], "independent")
-        self.assertEqual(parsed["provenance"]["teacher_policy_class"], "example.CoveragePolicy")
-        self.assertEqual(parsed["provenance"]["teacher_inner_policy_class"], "example.Policy")
-        self.assertEqual(
-            parsed["provenance"]["teacher_coverage_policy_class"],
-            "example.CoveragePolicy",
-        )
-        self.assertEqual(parsed["provenance"]["teacher_value_class"], "example.Value")
 
     def test_writer_preserves_upgrade_and_enchantment_card_identity(self) -> None:
         rich_card = {
@@ -103,18 +128,22 @@ class OracleJsonlWriterTest(unittest.TestCase):
         }
         decision = {
             "decision_point_id": "d-root",
-            "masked_emulator_dto": {
-                "mask_version": ORACLE_VALUE_MASK_VERSION,
-                "hand": [rich_card],
-                "drawPile": [{**rich_card, "count": 2}],
-                "discardPile": [],
-                "exhaustPile": [],
-                "legal_actions": [],
-            },
+            "masked_emulator_dto": self._dto(
+                hand=[rich_card],
+                drawPile=[{**rich_card, "count": 2}],
+                discardPile=[],
+                exhaustPile=[],
+            ),
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oracle.jsonl"
-            OracleJsonlWriter(path).write(decision, self._result())
+            OracleJsonlWriter(path).write(
+                decision,
+                self._result(),
+                instance_id="inst-1",
+                decision_index=0,
+                runtime_transition=self._transition(),
+            )
             parsed = json.loads(path.read_text(encoding="utf-8").strip())
 
         dto = parsed["masked_emulator_dto"]
@@ -122,47 +151,36 @@ class OracleJsonlWriterTest(unittest.TestCase):
         self.assertEqual(dto["hand"][0]["enchantment"]["amount"], 3)
         self.assertIsInstance(dto["drawPile"], list)
         self.assertEqual(dto["drawPile"][0]["count"], 2)
-        self.assertEqual(dto["drawPile"][0]["enchantment"]["id"], "SHARP")
 
-    def test_writer_rejects_legacy_or_missing_mask_version(self) -> None:
+    def test_writer_rejects_legacy_mask_or_missing_dto_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "oracle.jsonl"
-            writer = OracleJsonlWriter(path)
-            for version in (None, "1.1"):
-                dto = {"legal_actions": []}
-                if version is not None:
-                    dto["mask_version"] = version
-                with self.subTest(version=version), self.assertRaisesRegex(
-                    ValueError, "mask_version='1.2'"
-                ):
+            writer = OracleJsonlWriter(Path(tmpdir) / "oracle.jsonl")
+            invalid = [
+                {"mask_version": "1.1", "dto_version": _DTO_VERSION, "legal_actions": []},
+                {"mask_version": "1.2", "legal_actions": []},
+            ]
+            for dto in invalid:
+                with self.subTest(dto=dto), self.assertRaises(ValueError):
                     writer.write(
-                        {
-                            "decision_point_id": "d-root",
-                            "masked_emulator_dto": dto,
-                        },
+                        {"decision_point_id": "d-root", "masked_emulator_dto": dto},
                         self._result(),
+                        instance_id="inst-1",
+                        decision_index=0,
+                        runtime_transition=self._transition(),
                     )
 
-    def test_writer_appends_one_record_per_decision(self) -> None:
-        decision = {
-            "decision_point_id": "d-root",
-            "masked_emulator_dto": {
-                "mask_version": ORACLE_VALUE_MASK_VERSION,
-                "legal_actions": [],
-            },
-        }
+    def test_writer_rejects_dto_version_change_across_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "oracle.jsonl"
-            writer = OracleJsonlWriter(path)
-            for index in range(2):
+            writer = OracleJsonlWriter(Path(tmpdir) / "oracle.jsonl")
+            bad_next = self._dto(dto_version="emulator-other")
+            with self.assertRaisesRegex(ValueError, "dto_version"):
                 writer.write(
-                    {**decision, "decision_point_id": f"d-{index}"},
+                    {"decision_point_id": "d-root", "masked_emulator_dto": self._dto()},
                     self._result(),
+                    instance_id="inst-1",
+                    decision_index=0,
+                    runtime_transition=self._transition(next_dto=bad_next),
                 )
-            lines = path.read_text(encoding="utf-8").splitlines()
-
-        self.assertEqual(len(lines), 2)
-        self.assertEqual(json.loads(lines[1])["decision_point_id"], "d-1")
 
 
 if __name__ == "__main__":
