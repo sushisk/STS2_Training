@@ -43,9 +43,13 @@ class RootActionValueSample:
 
     ``decision_point_id`` identifies the next decision when the post-state is
     non-terminal. Terminal post-states have no next decision and therefore store ``None``.
+    The public root action payload and deepest Oracle combat depth are duplicated here on
+    purpose: base collection favors preserving useful public context over requiring later
+    consumers to reconstruct it from a second section of the record.
     """
 
     action_id: str
+    action: JsonObject
     rng_id: int
     root_state_node_id: str
     decision_point_id: str | None
@@ -53,6 +57,7 @@ class RootActionValueSample:
     target_value: float | None
     target_source: str
     terminal_reached: bool
+    deepest_combat_depth: int
     censored: bool
     censor_reason: str | None
     best_node_id: str | None
@@ -228,6 +233,7 @@ def build_root_action_value_samples(
             samples.append(
                 RootActionValueSample(
                     action_id=action_target.action_id,
+                    action=copy.deepcopy(dict(action_target.action)),
                     rng_id=outcome.rng_id,
                     root_state_node_id=selected.node_id,
                     decision_point_id=selected.decision_point_id or None,
@@ -235,6 +241,7 @@ def build_root_action_value_samples(
                     target_value=target_value,
                     target_source=target_source,
                     terminal_reached=terminal_reached,
+                    deepest_combat_depth=outcome.deepest_combat_depth,
                     censored=censored,
                     censor_reason=censor_reason,
                     best_node_id=best_node_id,
