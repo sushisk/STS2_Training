@@ -9,13 +9,15 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.decision.oracle_search import OracleCollectionResult
 
-# v5 adds bounded root-action ValueModel training samples. The raw DTO persisted for a
-# sample is exactly the resolved masked_emulator_dto consumed by ValueModel; deeper Beam
-# branch DTOs are intentionally not serialized.
-ORACLE_RECORD_SCHEMA_VERSION = 5
-ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 1
+# v6 keeps the Oracle/search teacher payload from v5 and adds enough public runtime
+# context to reconstruct the actual committed Combat trajectory.  The logging layer is
+# intentionally information-preserving: public wire fields are retained by default and
+# only hidden/unmasked Emulator state is excluded.
+ORACLE_RECORD_SCHEMA_VERSION = 6
+ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
 # Value training relies on the full public card-instance identity added by STS2_RL mask
 # v1.2: pile multisets retain upgradeLevel, tinker-time state, and enchantment.
 ORACLE_VALUE_MASK_VERSION = "1.2"
@@ -36,7 +38,52 @@ def require_oracle_value_mask_version(
         )
 
 
-def _require_root_value_sample_mask_versions(samples: Any) -> None:
+def oracle_value_dto_contract(
+    dto: Mapping[str, Any],
+    *,
+    context: str,
+) -> dict[str, str]:
+    """Return the public wire identity that gives a Value sample its semantics."""
+
+    require_oracle_value_mask_version(dto, context=context)
+    dto_version = dto.get("dto_version")
+    if not isinstance(dto_version, str) or not dto_version:
+        raise ValueError(f"{context} requires a non-empty masked DTO dto_version")
+    return {
+        "wire_schema_version": SCHEMA_VERSION,
+        "mask_version": ORACLE_VALUE_MASK_VERSION,
+        "dto_version": dto_version,
+    }
+
+
+def require_oracle_value_dto_version(
+    dto: Mapping[str, Any],
+    *,
+    expected: str,
+    context: str,
+) -> None:
+    """Require the exact Emulator DTO generation pinned by a learned artifact/dataset."""
+
+    actual = oracle_value_dto_contract(dto, context=context)["dto_version"]
+    if actual != expected:
+        raise ValueError(
+            f"{context} requires masked DTO dto_version={expected!r}; got {actual!r}"
+        )
+
+
+def response_metadata_without_masked_dto(response: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve all public response-envelope fields without duplicating the large DTO."""
+
+    return _jsonable(
+        {
+            key: value
+            for key, value in response.items()
+            if key != "masked_emulator_dto"
+        }
+    )
+
+
+def _require_root_value_sample_contracts(samples: Any, *, dto_version: str) -> None:
     if samples is None:
         return
     if not isinstance(samples, Sequence) or isinstance(samples, (str, bytes, bytearray)):
@@ -50,43 +97,108 @@ def _require_root_value_sample_mask_versions(samples: Any) -> None:
             raise ValueError(
                 f"Oracle root_value_samples[{index}] must contain masked_emulator_dto"
             )
-        require_oracle_value_mask_version(
+        require_oracle_value_dto_version(
             dto,
+            expected=dto_version,
             context=f"Oracle root_value_samples[{index}]",
         )
+
+
+def _runtime_transition(
+    value: Mapping[str, Any],
+    *,
+    dto_version: str,
+) -> dict[str, Any]:
+    chosen_action_id = value.get("chosen_action_id")
+    if not isinstance(chosen_action_id, str) or not chosen_action_id:
+        raise ValueError("runtime_transition.chosen_action_id must be a non-empty string")
+    chosen_action = value.get("chosen_action")
+    if not isinstance(chosen_action, Mapping):
+        raise ValueError("runtime_transition.chosen_action must be an object")
+    next_decision_point_id = value.get("next_decision_point_id")
+    if not isinstance(next_decision_point_id, str) or not next_decision_point_id:
+        raise ValueError(
+            "runtime_transition.next_decision_point_id must be a non-empty string"
+        )
+    next_dto = value.get("next_masked_emulator_dto")
+    if not isinstance(next_dto, Mapping):
+        raise ValueError("runtime_transition.next_masked_emulator_dto must be an object")
+    require_oracle_value_dto_version(
+        next_dto,
+        expected=dto_version,
+        context="Oracle runtime_transition.next_masked_emulator_dto",
+    )
+    metadata = value.get("commit_response_metadata")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("runtime_transition.commit_response_metadata must be an object")
+    result = dict(value)
+    result["next_dto_contract"] = oracle_value_dto_contract(
+        next_dto,
+        context="Oracle runtime_transition.next_masked_emulator_dto",
+    )
+    result["combat_result"] = combat_result_from_dto(next_dto)
+    return _jsonable(result)
 
 
 def oracle_collection_record(
     root_decision: Mapping[str, Any],
     result: OracleCollectionResult,
     *,
+    instance_id: str,
+    decision_index: int,
+    runtime_transition: Mapping[str, Any],
     training_commit: str | None = None,
 ) -> dict[str, Any]:
-    """Build one self-contained, re-featurizable record for one root Decision."""
+    """Build one self-contained Oracle + actual-runtime record for one root Decision."""
 
+    if not isinstance(instance_id, str) or not instance_id:
+        raise ValueError("instance_id must be a non-empty string")
+    if (
+        isinstance(decision_index, bool)
+        or not isinstance(decision_index, int)
+        or decision_index < 0
+    ):
+        raise ValueError("decision_index must be a non-negative integer")
     decision_point_id = root_decision.get("decision_point_id")
     dto = root_decision.get("masked_emulator_dto")
     if not isinstance(decision_point_id, str) or not decision_point_id:
         raise ValueError("root_decision must contain a non-empty decision_point_id")
     if not isinstance(dto, Mapping):
         raise ValueError("root_decision must contain masked_emulator_dto")
-    require_oracle_value_mask_version(dto, context="Oracle decision log")
+    dto_contract = oracle_value_dto_contract(dto, context="Oracle decision log")
     root_value_samples = getattr(result, "root_value_samples", ())
-    _require_root_value_sample_mask_versions(root_value_samples)
+    _require_root_value_sample_contracts(
+        root_value_samples,
+        dto_version=dto_contract["dto_version"],
+    )
+    transition = _runtime_transition(
+        runtime_transition,
+        dto_version=dto_contract["dto_version"],
+    )
 
     return {
         "record_type": "combat_oracle_decision",
         "record_schema_version": ORACLE_RECORD_SCHEMA_VERSION,
+        "instance_id": instance_id,
+        "decision_index": decision_index,
         "decision_point_id": decision_point_id,
+        "dto_contract": dto_contract,
+        # Preserve public response-envelope fields by default.  The masked DTO is stored
+        # separately so this does not duplicate the largest field.
+        "decision_response_metadata": response_metadata_without_masked_dto(root_decision),
         # Keep the raw masked public DTO so future feature extractors can be rebuilt
         # without replaying the emulator or trusting today's feature schema.
         "masked_emulator_dto": _jsonable(dto),
-        # Root-only ValueModel data. Older/programmatic OracleCollectionResult instances
-        # may omit this attribute, in which case the v5 field is an empty list.
+        # Root-only ValueModel data. Deeper Beam branch DTOs remain intentionally absent.
         "root_value_samples": _jsonable(root_value_samples),
         "oracle_search_result": _jsonable(result.search_result),
         "oracle_targets": _jsonable(result.targets),
         "search_trace": [_jsonable(event) for event in result.trace],
+        # The actual action committed by the runtime policy/search, plus the exact public
+        # post-commit DTO.  This is distinct from counterfactual Oracle root samples and
+        # makes terminal-return/TD Value learning possible without guessing which branch
+        # was really taken.
+        "runtime_transition": transition,
         "provenance": {
             "training_commit": training_commit,
             "teacher_policy_class": result.provenance.teacher_policy_class,
@@ -134,6 +246,7 @@ def oracle_episode_result_record(
     instance_id: str,
     decisions_collected: int,
     final_dto: Mapping[str, Any],
+    final_decision_metadata: Mapping[str, Any],
     completed: bool,
     termination_reason: str,
     elapsed_s: float,
@@ -146,6 +259,8 @@ def oracle_episode_result_record(
         raise ValueError("decisions_collected must be an integer")
     if decisions_collected < 0:
         raise ValueError("decisions_collected must be non-negative")
+    if not isinstance(final_decision_metadata, Mapping):
+        raise ValueError("final_decision_metadata must be an object")
     if not isinstance(completed, bool):
         raise TypeError("completed must be a bool")
     if not isinstance(termination_reason, str) or not termination_reason:
@@ -157,7 +272,7 @@ def oracle_episode_result_record(
         or elapsed_s < 0
     ):
         raise ValueError("elapsed_s must be a finite non-negative number")
-    require_oracle_value_mask_version(final_dto, context="Oracle episode result")
+    dto_contract = oracle_value_dto_contract(final_dto, context="Oracle episode result")
 
     return {
         "record_type": "combat_oracle_episode_result",
@@ -167,8 +282,10 @@ def oracle_episode_result_record(
         "completed": completed,
         "termination_reason": termination_reason,
         "combat_result": combat_result_from_dto(final_dto),
-        # Persist the final public DTO verbatim so terminal details are not lost even when
-        # a future RL schema adds result fields this client does not yet normalize.
+        "dto_contract": dto_contract,
+        "final_decision_metadata": _jsonable(final_decision_metadata),
+        # Persist the final public DTO verbatim so future RL schemas/result fields are not
+        # lost merely because today's consumer does not yet use them.
         "final_masked_emulator_dto": _jsonable(final_dto),
         "elapsed_s": float(elapsed_s),
     }
@@ -185,11 +302,17 @@ class OracleJsonlWriter:
         root_decision: Mapping[str, Any],
         result: OracleCollectionResult,
         *,
+        instance_id: str,
+        decision_index: int,
+        runtime_transition: Mapping[str, Any],
         training_commit: str | None = None,
     ) -> dict[str, Any]:
         record = oracle_collection_record(
             root_decision,
             result,
+            instance_id=instance_id,
+            decision_index=decision_index,
+            runtime_transition=runtime_transition,
             training_commit=training_commit,
         )
         self._append(record)
@@ -201,6 +324,7 @@ class OracleJsonlWriter:
         instance_id: str,
         decisions_collected: int,
         final_dto: Mapping[str, Any],
+        final_decision_metadata: Mapping[str, Any],
         completed: bool,
         termination_reason: str,
         elapsed_s: float,
@@ -209,6 +333,7 @@ class OracleJsonlWriter:
             instance_id=instance_id,
             decisions_collected=decisions_collected,
             final_dto=final_dto,
+            final_decision_metadata=final_decision_metadata,
             completed=completed,
             termination_reason=termination_reason,
             elapsed_s=elapsed_s,
