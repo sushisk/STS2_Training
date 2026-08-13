@@ -166,14 +166,27 @@ class _FakeClient:
 class BestEventOptionTest(unittest.IsolatedAsyncioTestCase):
     async def test_prefers_the_option_that_preserves_the_most_hp(self) -> None:
         client = _FakeClient({"a-overcome": 60.0, "a-hold-on": 53.0})
+        clock = [0.0]
+        original_emulate_actions = client.emulate_actions
 
-        result = await best_event_option(
-            client,
-            instance_id="inst-1",
-            decision_point_id="d1",
-            legal_actions=[_OVERCOME, _HOLD_ON],
-            timeout_s=5.0,
-        )
+        async def advance_clock(*args, **kwargs):
+            result = await original_emulate_actions(*args, **kwargs)
+            clock[0] += 0.1
+            return result
+
+        client.emulate_actions = advance_clock  # type: ignore[method-assign]
+
+        with patch(
+            "sts2_training.decision.event_branch_search.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            result = await best_event_option(
+                client,
+                instance_id="inst-1",
+                decision_point_id="d1",
+                legal_actions=[_OVERCOME, _HOLD_ON],
+                timeout_s=5.0,
+            )
 
         self.assertEqual(result, "a-overcome")
         self.assertEqual(len(client.emulate_batches), 1)
