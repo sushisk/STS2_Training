@@ -28,7 +28,11 @@ from typing import Any
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.api.contract import ROOT_BRANCH_ID
 from sts2_training.decision.engine import CombatDecisionEngine
-from sts2_training.decision.oracle_log import OracleJsonlWriter, combat_result_from_dto
+from sts2_training.decision.oracle_log import (
+    OracleJsonlWriter,
+    combat_result_from_dto,
+    response_metadata_without_masked_dto,
+)
 from sts2_training.decision.oracle_search import OracleCollectionConfig
 from sts2_training.decision.oracle_value_logging import RootValueLoggingOracleCollector
 from sts2_training.runner._cli import add_common_arguments, configure_logging
@@ -78,7 +82,7 @@ class OracleEpisodeRunner:
         max_decisions: int | None = None,
         close_timeout_s: float = 10.0,
     ) -> OracleEpisodeResult:
-        """Collect before each commit; ``max_decisions`` is a deliberate collection cap."""
+        """Collect Oracle labels, then commit runtime actions and log the actual trajectory."""
 
         _positive_timeout("oracle_timeout_s", oracle_timeout_s)
         _positive_timeout("decision_timeout_s", decision_timeout_s)
@@ -94,6 +98,7 @@ class OracleEpisodeRunner:
         decisions_collected = 0
         next_decision: dict[str, Any] | None = None
         final_dto: dict[str, Any] = {}
+        final_decision_metadata: dict[str, Any] = {}
         completed = False
         termination_reason = "unknown"
         output_start_size = self._output_size()
@@ -111,6 +116,7 @@ class OracleEpisodeRunner:
                 decision = _validated_decision(raw_decision)
                 dto = decision["masked_emulator_dto"]
                 final_dto = dict(dto)
+                final_decision_metadata = response_metadata_without_masked_dto(decision)
 
                 if _is_terminal(dto):
                     completed = True
@@ -128,12 +134,6 @@ class OracleEpisodeRunner:
                     decision,
                     timeout_s=oracle_timeout_s,
                 )
-                self._writer.write(
-                    decision,
-                    oracle_result,
-                    training_commit=self._training_commit,
-                )
-                decisions_collected += 1
 
                 # Commit with the runtime engine, not the teacher, so the state
                 # distribution remains aligned with the policy/search we intend to improve.
@@ -148,6 +148,12 @@ class OracleEpisodeRunner:
                         "runtime commit engine did not return an available action",
                         decision=decision,
                     )
+                chosen_action = _available_action_by_id(dto, chosen)
+                if chosen_action is None:
+                    raise NoAvailableActionError(
+                        "runtime chosen action could not be recovered from public legal_actions",
+                        decision=decision,
+                    )
                 response = await self._client.commit_action(
                     instance_id,
                     decision["decision_point_id"],
@@ -156,6 +162,28 @@ class OracleEpisodeRunner:
                 )
                 next_decision = _validated_decision(response)
                 final_dto = dict(next_decision["masked_emulator_dto"])
+                final_decision_metadata = response_metadata_without_masked_dto(next_decision)
+
+                # Write only after the runtime commit succeeds.  Each decision record is
+                # therefore a complete tuple of (public pre-state, Oracle counterfactuals,
+                # actual action, public post-state), suitable for both distillation and
+                # future trajectory-based Value learning.
+                self._writer.write(
+                    decision,
+                    oracle_result,
+                    instance_id=instance_id,
+                    decision_index=decisions_collected,
+                    runtime_transition={
+                        "chosen_action_id": chosen,
+                        "chosen_action": chosen_action,
+                        "next_decision_point_id": next_decision["decision_point_id"],
+                        "commit_response_metadata": final_decision_metadata,
+                        "next_masked_emulator_dto": final_dto,
+                    },
+                    training_commit=self._training_commit,
+                )
+                decisions_collected += 1
+
                 if _is_terminal(final_dto):
                     completed = True
                     termination_reason = "terminal"
@@ -180,6 +208,7 @@ class OracleEpisodeRunner:
             instance_id=instance_id,
             decisions_collected=decisions_collected,
             final_dto=final_dto,
+            final_decision_metadata=final_decision_metadata,
             completed=completed,
             termination_reason=termination_reason,
             elapsed_s=elapsed_s,
@@ -262,6 +291,20 @@ def _available_action_ids(dto: Mapping[str, Any]) -> set[str]:
         for action_id in [action.get("action_id")]
         if isinstance(action_id, str) and action_id
     }
+
+
+def _available_action_by_id(dto: Mapping[str, Any], action_id: str) -> dict[str, Any] | None:
+    actions = dto.get("legal_actions")
+    if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes)):
+        return None
+    for action in actions:
+        if (
+            isinstance(action, Mapping)
+            and action.get("is_available") is not False
+            and action.get("action_id") == action_id
+        ):
+            return dict(action)
+    return None
 
 
 def _positive_timeout(name: str, value: float) -> None:
