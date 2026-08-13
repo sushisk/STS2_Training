@@ -46,7 +46,7 @@ from sts2_training.decision.search_trace import (
     SearchTraceStart,
     StablePruneTrace,
 )
-from sts2_training.decision.stable_pruner import StableFrontierPruner, ValueTopKPruner
+from sts2_training.decision.stable_pruner import StableFrontierPruner, StateScoreTopKPruner
 from sts2_training.decision.value import ValueModel
 
 JsonObject = Mapping[str, Any]
@@ -266,7 +266,7 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
 
     def _score_frontier(self, item_meta, branch_results, depth=None):  # type: ignore[override]
         result = super()._score_frontier(item_meta, branch_results, depth)
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit = result
+        next_beam, newly_finished, _state_score_ms, _hit_depth, _hit_limit = result
         search_id = self._current_search_id()
         if search_id is not None and self.trace_collector is not None:
             finished_object_ids = {id(node) for node in newly_finished}
@@ -365,7 +365,7 @@ class BudgetedOracleCollector:
         self._policy = policy
         self._value_fn = value_fn
         self.config = config or OracleCollectionConfig()
-        self._stable_pruner = stable_pruner or ValueTopKPruner()
+        self._stable_pruner = stable_pruner or StateScoreTopKPruner()
         self._branch_allocator = branch_allocator or BranchIdAllocator()
 
     @classmethod
