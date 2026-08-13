@@ -40,10 +40,16 @@ score 用語は 4 つに分ける。
 ```python
 @dataclass
 class BeamSearchConfig:
-    beam_width: int = ...
-    top_k_actions: int = ...
-    max_depth: int = ...
-    timeout_s: float | None = ...
+    beam_width: int = 8
+    top_k_actions: int = 4
+    max_depth: int = 2
+    simulation_options: Mapping[str, Any] | None = None
+    time_budget_ms: float | None = None
+    max_batch_size: int = 64
+    expand_partial: bool = True
+    release_branches_on_finish: bool = True
+    beam_searchable_action_types: frozenset[str] = field(default_factory=lambda: frozenset({"system", "card", "potion"}))
+    max_continuation_steps: int = 8
 
 class BeamSearchEngine:
     def __init__(self, client: Any, *, policy: PolicyModel, value_fn: ValueModel, config: BeamSearchConfig | None = None, stable_pruner: StableFrontierPruner | None = None, trace_collector: SearchTraceCollector | None = None) -> None
@@ -76,7 +82,7 @@ available_action_types(dto) -> set[str] | None
 is_continuation_decision(dto) -> bool
 action_type_for_id(dto, action_id) -> str | None
 apply_structural_coverage(candidates, legal_actions, *, top_k) -> list[ActionCandidate]
-best_event_option(client, decision, *, timeout_s: float = ...) -> Mapping[str, Any] | None
+best_event_option(client, *, instance_id: str, decision_point_id: str, legal_actions: Sequence[JsonObject], timeout_s: float) -> str | None
 ```
 
 ## 4. 使用例
