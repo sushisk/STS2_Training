@@ -5,7 +5,9 @@ Plackett-Luce exploration wrapper that samples survivor sets without changing po
 candidate generation, continuation handling, beam width, or stopping.
 
 The wrapper consumes only the public ``StablePruneNodeView`` contract owned by PR #47
-and returns ordered frontier indices, matching ``StableFrontierPruner`` exactly.
+and returns ordered frontier indices, matching ``StableFrontierPruner`` exactly. Learned
+ranking outputs are called ``frontier_score`` values to distinguish them from isolated
+``state_score`` values and pre-simulation ``action_score`` values.
 """
 
 from __future__ import annotations
@@ -32,7 +34,11 @@ from sts2_training.decision.stable_pruner import (
 
 @dataclass(frozen=True)
 class PrunerRLStep:
-    """One stochastic stable-prune action under the behavior policy."""
+    """One stochastic stable-prune action under the behavior policy.
+
+    ``behavior_scores`` is the persisted compatibility field name for the behavior
+    policy's learned ``frontier_score`` values.
+    """
 
     search_id: str
     prune_step_id: str
@@ -50,6 +56,12 @@ class PrunerRLStep:
     sampled_indices: tuple[int, ...]
     returned_indices: tuple[int, ...]
     selection_log_probability: float
+
+    @property
+    def behavior_frontier_scores(self) -> tuple[float, ...]:
+        """Canonical name for the behavior policy's learned frontier scores."""
+
+        return self.behavior_scores
 
 
 class PrunerRLStepCollector(Protocol):
@@ -69,8 +81,8 @@ class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
     """Explore stable survivor sets around a trained linear pruner.
 
     The sampled Plackett-Luce order is the stochastic action used for policy-gradient
-    accounting. Runtime returns the sampled *set* in deterministic base-score order so
-    exploration does not additionally randomize parent expansion order.
+    accounting. Runtime returns the sampled *set* in deterministic base-frontier-score
+    order so exploration does not additionally randomize parent expansion order.
     """
 
     name = "plackett_luce_linear_pruner"
@@ -121,13 +133,23 @@ class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
     def sampler_seed(self) -> int:
         return self._sampler_seed
 
+    def frontier_scores(
+        self,
+        frontier: Sequence[StablePruneNodeView],
+        *,
+        context: StablePruneContext,
+    ) -> list[float]:
+        return self._base.frontier_scores(frontier, context=context)
+
     def score_batch(
         self,
         frontier: Sequence[StablePruneNodeView],
         *,
         context: StablePruneContext,
     ) -> list[float]:
-        return self._base.score_batch(frontier, context=context)
+        """Compatibility alias for :meth:`frontier_scores`."""
+
+        return self.frontier_scores(frontier, context=context)
 
     def select(
         self,
@@ -142,14 +164,20 @@ class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
             return []
 
         rows = stable_pruner_feature_matrix(frontier, context=context)
-        scores = tuple(self._base.score_features(row) for row in rows)
-        if not all(math.isfinite(score) for score in scores):
-            raise ValueError("stable pruner scores must be finite")
+        frontier_scores = tuple(
+            self._base.frontier_score_features(row) for row in rows
+        )
+        if not all(math.isfinite(frontier_score) for frontier_score in frontier_scores):
+            raise ValueError("stable pruner frontier scores must be finite")
 
         take = min(k, len(frontier))
-        # Python's sort is stable, so score ties preserve authoritative frontier order.
+        # Python's sort is stable, so frontier-score ties preserve authoritative order.
         base_order = tuple(
-            sorted(range(len(frontier)), key=lambda index: scores[index], reverse=True)
+            sorted(
+                range(len(frontier)),
+                key=lambda index: frontier_scores[index],
+                reverse=True,
+            )
         )
 
         # No actual pruning choice exists when every node survives. Match the supervised
@@ -158,7 +186,7 @@ class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
             return list(base_order)
 
         sampled_indices = _sample_plackett_luce_order(
-            scores,
+            frontier_scores,
             take=take,
             temperature=self._temperature,
             rng=self._rng,
@@ -166,7 +194,7 @@ class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
         selected_set = set(sampled_indices)
         returned_indices = tuple(index for index in base_order if index in selected_set)
         log_probability = plackett_luce_log_probability(
-            scores,
+            frontier_scores,
             sampled_indices,
             temperature=self._temperature,
         )
@@ -188,7 +216,7 @@ class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
                     temperature=self._temperature,
                     sampler_seed=self._sampler_seed,
                     frontier_features=tuple(rows),
-                    behavior_scores=scores,
+                    behavior_scores=frontier_scores,
                     sampled_indices=sampled_indices,
                     returned_indices=returned_indices,
                     selection_log_probability=log_probability,
@@ -203,7 +231,11 @@ def plackett_luce_log_probability(
     *,
     temperature: float,
 ) -> float:
-    """Log probability of one ordered sample without replacement."""
+    """Log probability of one ordered sample without replacement.
+
+    ``scores`` is retained as the public parameter name for compatibility; callers in the
+    stable-pruner domain should pass learned ``frontier_score`` values.
+    """
 
     _validate_temperature(temperature)
     available = list(range(len(scores)))
@@ -235,7 +267,11 @@ def plackett_luce_logprob_gradient(
     temperature: float,
     scale: Sequence[float],
 ) -> tuple[float, ...]:
-    """Gradient of ordered log probability with respect to linear coefficients."""
+    """Gradient of ordered log probability with respect to linear coefficients.
+
+    ``scores`` is retained as the public parameter name for compatibility; it represents
+    learned ``frontier_score`` values.
+    """
 
     _validate_temperature(temperature)
     if len(scores) != len(feature_rows):
@@ -286,20 +322,25 @@ def plackett_luce_logprob_gradient(
 
 
 def _sample_plackett_luce_order(
-    scores: Sequence[float],
+    frontier_scores: Sequence[float],
     *,
     take: int,
     temperature: float,
     rng: random.Random,
 ) -> tuple[int, ...]:
     _validate_temperature(temperature)
-    if isinstance(take, bool) or not isinstance(take, int) or take < 0 or take > len(scores):
-        raise ValueError("take must be in [0, len(scores)]")
-    available = list(range(len(scores)))
+    if (
+        isinstance(take, bool)
+        or not isinstance(take, int)
+        or take < 0
+        or take > len(frontier_scores)
+    ):
+        raise ValueError("take must be in [0, len(frontier_scores)]")
+    available = list(range(len(frontier_scores)))
     selected: list[int] = []
     for _ in range(take):
         probabilities = _softmax(
-            [float(scores[index]) / float(temperature) for index in available]
+            [float(frontier_scores[index]) / float(temperature) for index in available]
         )
         threshold = rng.random()
         cumulative = 0.0
