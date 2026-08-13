@@ -25,7 +25,7 @@ LEARNED_PRUNER_ARTIFACT_SCHEMA_VERSION = 2
 
 
 class LinearStableFrontierPruner(StableFrontierPruner):
-    """Rank stable-node views with a learned linear score and return survivor indices."""
+    """Rank stable-node views with a learned ``frontier_score`` and return survivors."""
 
     name = "linear_learned_pruner"
     version = "1"
@@ -103,9 +103,26 @@ class LinearStableFrontierPruner(StableFrontierPruner):
     def artifact_metadata(self) -> dict[str, Any]:
         return dict(self._artifact_metadata)
 
-    def score_features(self, features: Sequence[float]) -> float:
-        """Score one already-featurized node, for offline evaluation/replay tooling."""
+    def frontier_score_features(self, features: Sequence[float]) -> float:
+        """Compute one learned ``frontier_score`` from an already-featurized node."""
+
         return self._score_row(features)
+
+    def score_features(self, features: Sequence[float]) -> float:
+        """Compatibility alias for :meth:`frontier_score_features`."""
+
+        return self.frontier_score_features(features)
+
+    def frontier_scores(
+        self,
+        frontier: Sequence[StablePruneNodeView],
+        *,
+        context: StablePruneContext,
+    ) -> list[float]:
+        """Return learned ``frontier_score`` values in authoritative frontier order."""
+
+        rows = stable_pruner_feature_matrix(frontier, context=context)
+        return [self.frontier_score_features(row) for row in rows]
 
     def score_batch(
         self,
@@ -113,8 +130,9 @@ class LinearStableFrontierPruner(StableFrontierPruner):
         *,
         context: StablePruneContext,
     ) -> list[float]:
-        rows = stable_pruner_feature_matrix(frontier, context=context)
-        return [self.score_features(row) for row in rows]
+        """Compatibility alias for :meth:`frontier_scores`."""
+
+        return self.frontier_scores(frontier, context=context)
 
     def select(
         self,
@@ -125,9 +143,13 @@ class LinearStableFrontierPruner(StableFrontierPruner):
     ) -> list[int]:
         if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
             raise ValueError("k must be a positive integer")
-        scores = self.score_batch(frontier, context=context)
-        # Python's sort is stable, so score ties preserve authoritative frontier order.
-        order = sorted(range(len(frontier)), key=lambda index: scores[index], reverse=True)
+        frontier_scores = self.frontier_scores(frontier, context=context)
+        # Python's sort is stable, so frontier-score ties preserve authoritative order.
+        order = sorted(
+            range(len(frontier)),
+            key=lambda index: frontier_scores[index],
+            reverse=True,
+        )
         return order[:k]
 
     def _score_row(self, row: Sequence[float]) -> float:
