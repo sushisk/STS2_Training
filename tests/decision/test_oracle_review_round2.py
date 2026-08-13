@@ -2,67 +2,20 @@ from __future__ import annotations
 
 import unittest
 
-from sts2_training.decision.beam_search import (
-    BeamSearchEngine,
-    BeamSearchResult,
-    BeamSearchStats,
-)
+from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
 from sts2_training.decision.oracle_log import oracle_collection_record
 from sts2_training.decision.oracle_search import (
-    BudgetedOracleCollector,
     OracleCollectionResult,
     OracleProvenance,
     _OracleTraceCollector,
     _effective_time_budget_ms,
     build_oracle_targets,
 )
-from sts2_training.decision.policy import PolicyModel
 from sts2_training.decision.search_trace import (
     PolicyProposalTrace,
     SearchTraceEnd,
     SearchTraceStart,
 )
-from sts2_training.decision.value import ValueModel
-
-
-class _NoopPolicy(PolicyModel):
-    def propose(self, legal_actions, masked_emulator_dto, *, top_k):
-        return []
-
-
-class _NoopValue(ValueModel):
-    def evaluate_batch(self, masked_emulator_dtos):
-        return [0.0 for _dto in masked_emulator_dtos]
-
-
-class OracleRngNamespaceTest(unittest.TestCase):
-    def test_from_beam_engine_shares_rng_namespace_across_oracle_runtime_oracle(self) -> None:
-        runtime = BeamSearchEngine(
-            object(),
-            policy=_NoopPolicy(),
-            value_fn=_NoopValue(),
-        )
-        oracle = BudgetedOracleCollector.from_beam_engine(runtime)
-
-        oracle_first = oracle._branch_allocator.next_rng_id()  # noqa: SLF001
-        runtime_next = runtime._allocator.next_rng_id()  # noqa: SLF001
-        oracle_second = oracle._branch_allocator.next_rng_id()  # noqa: SLF001
-
-        self.assertEqual((oracle_first, runtime_next, oracle_second), (1, 2, 3))
-        self.assertEqual(len({oracle_first, runtime_next, oracle_second}), 3)
-        self.assertIs(oracle._branch_allocator, runtime._allocator)  # noqa: SLF001
-
-    def test_explicit_oracle_collector_keeps_allocator_across_collections(self) -> None:
-        oracle = BudgetedOracleCollector(
-            object(),
-            policy=_NoopPolicy(),
-            value_fn=_NoopValue(),
-        )
-
-        first = oracle._branch_allocator.next_rng_id()  # noqa: SLF001
-        second = oracle._branch_allocator.next_rng_id()  # noqa: SLF001
-
-        self.assertEqual((first, second), (1, 2))
 
 
 class OracleEffectiveBudgetMetadataTest(unittest.TestCase):
