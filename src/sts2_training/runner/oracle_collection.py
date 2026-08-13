@@ -167,7 +167,9 @@ class OracleEpisodeRunner:
                 # Write only after the runtime commit succeeds.  Each decision record is
                 # therefore a complete tuple of (public pre-state, Oracle counterfactuals,
                 # actual action, public post-state), suitable for both distillation and
-                # future trajectory-based Value learning.
+                # future trajectory-based Value learning. Runtime selection diagnostics
+                # are retained as generated information rather than discarded at the base
+                # logging layer.
                 self._writer.write(
                     decision,
                     oracle_result,
@@ -176,6 +178,8 @@ class OracleEpisodeRunner:
                     runtime_transition={
                         "chosen_action_id": chosen,
                         "chosen_action": chosen_action,
+                        "decision_source": outcome.source,
+                        "beam_result": outcome.beam_result,
                         "next_decision_point_id": next_decision["decision_point_id"],
                         "commit_response_metadata": final_decision_metadata,
                         "next_masked_emulator_dto": final_dto,
