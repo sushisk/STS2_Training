@@ -116,6 +116,25 @@ class DtoToScenarioSpecTest(unittest.TestCase):
         self.assertEqual(spec["enemies"][0]["monster_id"], "CULTIST")
         self.assertEqual(spec["enemies"][0]["hp"], 40)
 
+    def test_preserves_enemy_intent_and_state_log(self) -> None:
+        enemy = {
+            "id": "CULTIST",
+            "hp": 40,
+            "maxHp": 48,
+            "block": 0,
+            "isAlive": True,
+            "slotName": "A",
+            "intent": {"stateId": "INCANTATION"},
+            "stateLog": ["ENTRY", "INCANTATION"],
+            "powers": [],
+        }
+
+        spec = dto_to_scenario_spec(_combat_start_dto(enemies=[enemy]), seed=1)
+
+        assert spec is not None
+        self.assertEqual(spec["enemies"][0]["forced_move"], "INCANTATION")
+        self.assertEqual(spec["enemies"][0]["state_log"], ["ENTRY", "INCANTATION"])
+
     def test_returns_none_with_no_living_enemies(self) -> None:
         dto = _combat_start_dto(enemies=[{"id": "CULTIST", "hp": 0, "isAlive": False}])
         self.assertIsNone(dto_to_scenario_spec(dto, seed=1))
