@@ -4,6 +4,12 @@ The oracle is deliberately an expensive *estimate*, not ground truth. It runs th
 BeamSearch traversal with a larger budget, records all resolved nodes that the base search
 materializes, and derives targets with explicit censoring metadata.
 
+Score naming follows the Oracle contract: ValueModel emits a ``state_score`` for one
+resolved state; once that scalar is attributed to a concrete search-tree branch/action it
+is a ``node_score``. Historical persisted fields such as ``value``, ``target_value`` and
+``estimated_q`` remain compatibility spellings, with canonical Python properties exposed
+on the target dataclasses.
+
 Ordinary root actions keep independent RNG hypotheses. Cross-action common-RNG sampling
 is intentionally unsupported until the Training/RL API contract explicitly guarantees
 its semantics.
@@ -90,6 +96,12 @@ class OracleRngOutcome:
     censor_reason: str | None
     best_node_id: str | None
 
+    @property
+    def node_score(self) -> float | None:
+        """Canonical name for this RNG hypothesis's attributed node score."""
+
+        return self.value
+
 
 @dataclass(frozen=True)
 class RootActionOracleTarget:
@@ -102,6 +114,12 @@ class RootActionOracleTarget:
     terminal_reached: bool
     censored: bool
     censor_reason: str | None
+
+    @property
+    def node_score(self) -> float | None:
+        """Canonical name for the root action's aggregated Oracle node score."""
+
+        return self.estimated_q
 
 
 @dataclass(frozen=True)
@@ -119,6 +137,12 @@ class StableNodeOracleTarget:
     censored: bool
     censor_reason: str | None
     best_descendant_node_id: str | None
+
+    @property
+    def target_node_score(self) -> float | None:
+        """Canonical name for the descendant-derived node-score target."""
+
+        return self.target_value
 
 
 @dataclass(frozen=True)
@@ -248,8 +272,8 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
             finished_object_ids = {id(node) for node in newly_finished}
             for node in (*next_beam, *newly_finished):
                 continuation = is_continuation_decision(node.masked_emulator_dto)
-                value_is_fresh = not continuation
-                trace_value = node.value
+                state_score_is_fresh = not continuation
+                trace_state_score = node.value
                 if node.terminal:
                     state_kind = "terminal"
                     resolution = "terminal"
@@ -257,7 +281,7 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                         node.masked_emulator_dto
                     )
                     if exact_terminal is None:
-                        value_source = "value_bootstrap"
+                        state_score_source = "value_bootstrap"
                     else:
                         if (
                             isinstance(exact_terminal, bool)
@@ -268,15 +292,15 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                                 "ValueModel.exact_terminal_utility must return a finite "
                                 "number or None"
                             )
-                        trace_value = float(exact_terminal)
-                        value_source = "terminal"
+                        trace_state_score = float(exact_terminal)
+                        state_score_source = "terminal"
                 elif continuation:
                     state_kind = "continuation"
                     resolution = "continuation"
-                    value_source = "inherited"
+                    state_score_source = "inherited"
                 else:
                     state_kind = "stable"
-                    value_source = "value_bootstrap"
+                    state_score_source = "value_bootstrap"
                     if id(node) in finished_object_ids:
                         resolution = (
                             "max_depth"
@@ -298,9 +322,9 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                         depth=node.depth,
                         combat_depth=node.combat_depth,
                         continuation_steps=node.continuation_steps,
-                        value=trace_value,
-                        value_is_fresh=value_is_fresh,
-                        value_source=value_source,
+                        value=trace_state_score,
+                        value_is_fresh=state_score_is_fresh,
+                        value_source=state_score_source,
                         state_kind=state_kind,
                         resolution=resolution,
                         terminal=node.terminal,
@@ -426,14 +450,14 @@ def build_oracle_targets(
     exhaustive_root_actions: bool,
     rng_sampling: str = "independent",
 ) -> OracleTargets:
-    """Derive root-action and stable-pruning targets from one oracle trace.
+    """Derive root-action and stable-pruning node-score targets from one oracle trace.
 
     Stable-node targets use *future leaf descendants only*. A node that the oracle itself
     pruned before follow-up therefore receives ``no_target`` rather than its current
-    ValueModel score, avoiding direct self-imitation of the pruning rule. Intermediate
-    states that were subsequently expanded are not treated as final Q outcomes either.
-    A node with a recorded policy proposal is also not a final leaf when that expansion
-    attempt failed to materialize a resolved child.
+    ValueModel state score, avoiding direct self-imitation of the pruning rule.
+    Intermediate states that were subsequently expanded are not treated as final node
+    outcomes either. A node with a recorded policy proposal is also not a final leaf when
+    that expansion attempt failed to materialize a resolved child.
     """
 
     starts = [event for event in events if isinstance(event, SearchTraceStart)]
@@ -486,7 +510,7 @@ def build_oracle_targets(
     )
     stable_targets: list[StableNodeOracleTarget] = []
     for prune in prune_events:
-        baseline_ids = _value_top_k_ids(prune, k=target_beam_width)
+        baseline_ids = _state_score_top_k_ids(prune, k=target_beam_width)
         for node in prune.nodes:
             descendants = _descendant_nodes(
                 node.node_id,
@@ -500,9 +524,13 @@ def build_oracle_targets(
                 if candidate.node_id not in oracle_pruned_node_ids
                 and candidate.node_id not in expanded_node_ids
             ]
-            best = max(leaf_descendants, key=lambda candidate: candidate.value, default=None)
+            best = max(
+                leaf_descendants,
+                key=lambda candidate: candidate.state_score,
+                default=None,
+            )
             if best is None:
-                target_value = None
+                target_node_score = None
                 target_source = "no_target"
                 terminal_reached = False
                 censored = True
@@ -527,10 +555,10 @@ def build_oracle_targets(
                 )
                 best_node_id = None
             else:
-                target_value = best.value
-                target_source = best.value_source
+                target_node_score = best.state_score
+                target_source = best.state_score_source
                 terminal_reached = any(candidate.terminal for candidate in leaf_descendants)
-                censored = best.value_source != "terminal"
+                censored = best.state_score_source != "terminal"
                 censor_reason = None if not censored else f"value_bootstrap:{best.resolution}"
                 best_node_id = best.node_id
             stable_targets.append(
@@ -542,7 +570,7 @@ def build_oracle_targets(
                     oracle_kept=node.kept,
                     target_beam_width=target_beam_width,
                     baseline_would_keep=node.node_id in baseline_ids,
-                    target_value=target_value,
+                    target_value=target_node_score,
                     target_source=target_source,
                     terminal_reached=terminal_reached,
                     censored=censored,
@@ -650,7 +678,7 @@ def _root_action_targets(
                 if node.node_id not in oracle_pruned_node_ids
                 and node.node_id not in expanded_node_ids
             ]
-            best = max(leaves, key=lambda node: node.value, default=None)
+            best = max(leaves, key=lambda node: node.state_score, default=None)
             deepest = max((node.combat_depth for node in nodes), default=0)
             terminal_reached = any(node.terminal for node in leaves)
             if best is None:
@@ -678,12 +706,12 @@ def _root_action_targets(
                     )
                 )
             else:
-                censored = best.value_source != "terminal"
+                censored = best.state_score_source != "terminal"
                 outcomes.append(
                     OracleRngOutcome(
                         rng_id=rng_id,
-                        value=best.value,
-                        target_source=best.value_source,
+                        value=best.state_score,
+                        target_source=best.state_score_source,
                         terminal_reached=terminal_reached,
                         deepest_combat_depth=deepest,
                         censored=censored,
@@ -694,9 +722,13 @@ def _root_action_targets(
                     )
                 )
 
-        values = [outcome.value for outcome in outcomes if outcome.value is not None]
-        sources = {outcome.target_source for outcome in outcomes if outcome.value is not None}
-        if not values:
+        node_scores = [
+            outcome.node_score for outcome in outcomes if outcome.node_score is not None
+        ]
+        sources = {
+            outcome.target_source for outcome in outcomes if outcome.node_score is not None
+        }
+        if not node_scores:
             target_source = "no_target"
         elif sources == {"terminal"}:
             target_source = "terminal"
@@ -704,7 +736,7 @@ def _root_action_targets(
             target_source = "value_bootstrap"
         else:
             target_source = "mixed"
-        censored = any(outcome.censored for outcome in outcomes) or not values
+        censored = any(outcome.censored for outcome in outcomes) or not node_scores
         censor_reason = next(
             (outcome.censor_reason for outcome in outcomes if outcome.censor_reason is not None),
             None,
@@ -714,7 +746,7 @@ def _root_action_targets(
                 action_id=action_id,
                 action=dict(action),
                 evaluated=True,
-                estimated_q=None if not values else fmean(values),
+                estimated_q=None if not node_scores else fmean(node_scores),
                 rng_outcomes=tuple(outcomes),
                 target_source=target_source,
                 terminal_reached=any(outcome.terminal_reached for outcome in outcomes),
@@ -755,12 +787,12 @@ def _leaf_fresh_nodes(
     return [
         node
         for node in nodes
-        if node.value_is_fresh and not children.get(node.node_id)
+        if node.state_score_is_fresh and not children.get(node.node_id)
     ]
 
 
-def _value_top_k_ids(prune: StablePruneTrace, *, k: int) -> set[str]:
-    ranked = sorted(prune.nodes, key=lambda node: node.value, reverse=True)
+def _state_score_top_k_ids(prune: StablePruneTrace, *, k: int) -> set[str]:
+    ranked = sorted(prune.nodes, key=lambda node: node.state_score, reverse=True)
     return {node.node_id for node in ranked[:k]}
 
 

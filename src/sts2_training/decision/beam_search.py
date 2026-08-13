@@ -3,13 +3,17 @@
 Ordinary combat actions consume `max_depth`. Interactive choice continuations are
 resolved as local macro-action steps: continuation DTOs are expanded using policy order
 without passing those intermediate states through the global ValueModel. Stable/terminal
-states are value-scored only after the continuation resolves. This keeps ValueModel's
-meaning centered on resolved Combat states while still bounding continuation work with
-`max_continuation_steps` and `beam_width`.
+states receive a ``state_score`` only after the continuation resolves. This keeps
+ValueModel's meaning centered on resolved Combat states while still bounding continuation
+work with `max_continuation_steps` and `beam_width`.
 
-Stable/resolved frontier selection is delegated to ``StableFrontierPruner``. Policy
-candidate limits, continuation ordering, and Whole Run active-branch capacity remain
-separate mechanisms owned by this engine.
+Policy ranking produces a cheap pre-simulation ``action_score``. Stable/resolved frontier
+selection is delegated to ``StableFrontierPruner``, whose learned implementation may
+produce a separate ``frontier_score``. Historical dataclass fields and timing fields keep
+their existing spellings for compatibility; runtime code uses canonical score accessors.
+
+Policy candidate limits, continuation ordering, and Whole Run active-branch capacity
+remain separate mechanisms owned by this engine.
 """
 
 from __future__ import annotations
@@ -118,6 +122,24 @@ class BeamNode:
     post_coverage_rank: int | None = None
     candidate_source: str | None = None
 
+    @property
+    def state_score(self) -> float:
+        """Canonical name for the resolved state's ValueModel score."""
+
+        return self.value
+
+    @property
+    def action_rank(self) -> int | None:
+        """Canonical name for the action's pre-coverage rank."""
+
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        """Canonical name for the action's pre-simulation score."""
+
+        return self.policy_score
+
 
 @dataclass
 class BeamSearchStats:
@@ -130,6 +152,18 @@ class BeamSearchStats:
     cleanup_ms: float = 0.0
     total_ms: float = 0.0
 
+    @property
+    def action_score_ms(self) -> float:
+        """Compatibility view of time spent producing/ranking action candidates."""
+
+        return self.policy_ms
+
+    @property
+    def state_score_ms(self) -> float:
+        """Compatibility view of time spent evaluating resolved state scores."""
+
+        return self.value_ms
+
 
 @dataclass(frozen=True)
 class BeamSearchResult:
@@ -138,6 +172,12 @@ class BeamSearchResult:
     best_node: BeamNode | None
     reason: str
     stats: BeamSearchStats
+
+    @property
+    def best_node_score(self) -> float | None:
+        """Canonical name for the score attributed to the selected search-tree node."""
+
+        return self.best_value
 
 
 class BranchIdAllocator:
@@ -295,13 +335,13 @@ class BeamSearchEngine:
                     reason = "not_beam_searchable"
                     break
 
-                items, item_meta, policy_ms = self._propose_frontier(
+                items, item_meta, action_score_ms = self._propose_frontier(
                     beam,
                     search_id=search_id,
                     proposal_step_index=proposal_step_index,
                 )
                 proposal_step_index += 1
-                stats.policy_ms += policy_ms
+                stats.policy_ms += action_score_ms
                 if not items:
                     reason = "no_candidates"
                     break
@@ -342,11 +382,11 @@ class BeamSearchEngine:
                 (
                     next_beam,
                     newly_finished,
-                    value_ms,
+                    state_score_ms,
                     hit_max_depth,
                     hit_continuation_limit,
                 ) = self._score_frontier(item_meta, branch_results)
-                stats.value_ms += value_ms
+                stats.value_ms += state_score_ms
                 stats.nodes_expanded += len(branch_results)
                 if (
                     branch_results
@@ -463,16 +503,20 @@ class BeamSearchEngine:
         if not actionable:
             result = BeamSearchResult(None, None, None, reason, stats)
         else:
-            best_node = max(actionable, key=lambda node: node.value)
+            best_node = max(actionable, key=lambda node: node.state_score)
             result = BeamSearchResult(
-                best_node.root_action_id, best_node.value, best_node, reason, stats
+                best_node.root_action_id,
+                best_node.state_score,
+                best_node,
+                reason,
+                stats,
             )
         self._record_trace(
             SearchTraceEnd(
                 search_id=search_id,
                 reason=result.reason,
                 best_root_action_id=result.best_root_action_id,
-                best_value=result.best_value,
+                best_value=result.best_node_score,
                 depths_completed=result.stats.depths_completed,
                 nodes_expanded=result.stats.nodes_expanded,
                 branches_created=result.stats.branches_created,
@@ -501,7 +545,7 @@ class BeamSearchEngine:
             requests,
             top_k=self.config.top_k_actions,
         )
-        policy_ms = (time.monotonic() - t0) * 1000.0
+        action_score_ms = (time.monotonic() - t0) * 1000.0
         if len(proposals) != len(beam):
             raise RuntimeError("PolicyModel.propose_batch must return exactly one entry per request")
 
@@ -546,8 +590,8 @@ class BeamSearchEngine:
                             action={} if action is None else dict(action),
                             branch_id=branch_id,
                             rng_id=rng_id,
-                            policy_rank=candidate.policy_rank,
-                            policy_score=candidate.policy_score,
+                            policy_rank=candidate.action_rank,
+                            policy_score=candidate.action_score,
                             post_coverage_rank=candidate.post_coverage_rank,
                             candidate_source=candidate.candidate_source,
                         )
@@ -570,7 +614,7 @@ class BeamSearchEngine:
                         candidates=tuple(trace_candidates),
                     )
                 )
-        return items, item_meta, policy_ms
+        return items, item_meta, action_score_ms
 
     def _prune_stable_frontier(
         self,
@@ -630,7 +674,7 @@ class BeamSearchEngine:
                             parent_branch_id=node.parent_branch_id,
                             frontier_index_before_prune=index,
                             kept=index in selected_index_set,
-                            value=view.value,
+                            value=view.state_score,
                             root_action_id=view.root_action_id,
                             rng_id=node.rng_id,
                             decision_point_id=node.decision_point_id,
@@ -641,8 +685,8 @@ class BeamSearchEngine:
                             action_id=node.action_id,
                             action_type=view.action_type,
                             action=None if node.action is None else dict(node.action),
-                            policy_rank=view.policy_rank,
-                            policy_score=view.policy_score,
+                            policy_rank=view.action_rank,
+                            policy_score=view.action_score,
                             post_coverage_rank=view.post_coverage_rank,
                             candidate_source=view.candidate_source,
                         )
@@ -709,7 +753,11 @@ class BeamSearchEngine:
             limited = True
 
         waiting_budget = max(0, capacity - used_slots)
-        ranked_waiting = sorted(waiting_stable, key=lambda node: node.value, reverse=True)
+        ranked_waiting = sorted(
+            waiting_stable,
+            key=lambda node: node.state_score,
+            reverse=True,
+        )
         kept_waiting = ranked_waiting[:waiting_budget]
         pruned_waiting = ranked_waiting[waiting_budget:]
         if pruned_waiting:
@@ -809,7 +857,7 @@ class BeamSearchEngine:
                     (node, candidate, branch_id, rng_id, result, dto, result.get("status"))
                 )
 
-        value_entries = [
+        state_score_entries = [
             entry
             for entry in resolved
             if _is_terminal(entry[5])
@@ -823,15 +871,19 @@ class BeamSearchEngine:
             )
         ]
         t0 = time.monotonic()
-        raw_values = (
-            self._value_fn.evaluate_batch([entry[5] for entry in value_entries])
-            if value_entries
+        raw_state_scores = (
+            self._value_fn.evaluate_batch([entry[5] for entry in state_score_entries])
+            if state_score_entries
             else []
         )
-        value_ms = (time.monotonic() - t0) * 1000.0
-        values = _validated_values(raw_values, expected=len(value_entries))
-        value_by_branch = {
-            entry[2]: value for entry, value in zip(value_entries, values)
+        state_score_ms = (time.monotonic() - t0) * 1000.0
+        state_scores = _validated_state_scores(
+            raw_state_scores,
+            expected=len(state_score_entries),
+        )
+        state_score_by_branch = {
+            entry[2]: state_score
+            for entry, state_score in zip(state_score_entries, state_scores)
         }
 
         next_beam: list[BeamNode] = []
@@ -856,7 +908,7 @@ class BeamSearchEngine:
                 cfg.beam_searchable_action_types,
             ):
                 continue
-            value = value_by_branch.get(branch_id, node.value)
+            state_score = state_score_by_branch.get(branch_id, node.state_score)
             decision_point_id = result.get("decision_point_id")
             new_node = BeamNode(
                 branch_id=branch_id,
@@ -867,7 +919,7 @@ class BeamSearchEngine:
                 ),
                 masked_emulator_dto=dto,
                 depth=node.depth + 1,
-                value=value,
+                value=state_score,
                 root_action_id=node.root_action_id or candidate.action_id,
                 combat_depth=combat_depth,
                 continuation_steps=continuation_steps,
@@ -876,10 +928,10 @@ class BeamSearchEngine:
                 action_id=candidate.action_id,
                 action_type=action_type,
                 action=None if action is None else dict(action),
-                policy_rank=getattr(candidate, "policy_rank", None),
-                policy_score=getattr(candidate, "policy_score", None),
-                post_coverage_rank=getattr(candidate, "post_coverage_rank", None),
-                candidate_source=getattr(candidate, "candidate_source", None),
+                policy_rank=candidate.action_rank,
+                policy_score=candidate.action_score,
+                post_coverage_rank=candidate.post_coverage_rank,
+                candidate_source=candidate.candidate_source,
             )
             cannot_expand = not new_node.decision_point_id or (
                 status == "partial" and not cfg.expand_partial
@@ -899,7 +951,7 @@ class BeamSearchEngine:
             else:
                 next_beam.append(new_node)
 
-        return next_beam, newly_finished, value_ms, hit_max_depth, hit_continuation_limit
+        return next_beam, newly_finished, state_score_ms, hit_max_depth, hit_continuation_limit
 
     async def _release_unneeded_whole_run_branches(
         self,
@@ -1056,18 +1108,19 @@ def _action_for_id(
 def _stable_prune_node_view(node: BeamNode) -> StablePruneNodeView:
     if is_continuation_decision(node.masked_emulator_dto):
         raise RuntimeError(
-            "StableFrontierPruner cannot receive continuation nodes with inherited/stale values"
+            "StableFrontierPruner cannot receive continuation nodes with inherited/stale "
+            "state scores"
         )
     return StablePruneNodeView(
-        value=node.value,
+        value=node.state_score,
         root_action_id=node.root_action_id,
         depth=node.depth,
         combat_depth=node.combat_depth,
         continuation_steps=node.continuation_steps,
         terminal=node.terminal,
         action_type=node.action_type,
-        policy_rank=node.policy_rank,
-        policy_score=node.policy_score,
+        policy_rank=node.action_rank,
+        policy_score=node.action_score,
         post_coverage_rank=node.post_coverage_rank,
         candidate_source=node.candidate_source,
     )
@@ -1101,23 +1154,39 @@ def _trace_node_id(search_id: str, branch_id: str) -> str:
     return f"{search_id}:{branch_id}"
 
 
-def _validated_values(values: Sequence[Any], *, expected: int) -> list[float]:
-    if len(values) != expected:
-        raise RuntimeError("ValueModel.evaluate_batch must return exactly one value per dto")
+def _validated_state_scores(
+    state_scores: Sequence[Any],
+    *,
+    expected: int,
+) -> list[float]:
+    if len(state_scores) != expected:
+        raise RuntimeError(
+            "ValueModel.evaluate_batch must return exactly one state score per dto"
+        )
     normalized: list[float] = []
-    for raw_value in values:
-        if isinstance(raw_value, (bool, str, bytes)):
-            raise RuntimeError("ValueModel.evaluate_batch must return finite numeric values")
+    for raw_state_score in state_scores:
+        if isinstance(raw_state_score, (bool, str, bytes)):
+            raise RuntimeError(
+                "ValueModel.evaluate_batch must return finite numeric state scores"
+            )
         try:
-            value = float(raw_value)
+            state_score = float(raw_state_score)
         except (TypeError, ValueError, OverflowError) as exc:
             raise RuntimeError(
-                "ValueModel.evaluate_batch must return finite numeric values"
+                "ValueModel.evaluate_batch must return finite numeric state scores"
             ) from exc
-        if not math.isfinite(value):
-            raise RuntimeError("ValueModel.evaluate_batch must return finite numeric values")
-        normalized.append(value)
+        if not math.isfinite(state_score):
+            raise RuntimeError(
+                "ValueModel.evaluate_batch must return finite numeric state scores"
+            )
+        normalized.append(state_score)
     return normalized
+
+
+def _validated_values(values: Sequence[Any], *, expected: int) -> list[float]:
+    """Compatibility alias for callers of the former internal helper name."""
+
+    return _validated_state_scores(values, expected=expected)
 
 
 def _client_unusable(client: Any) -> bool:

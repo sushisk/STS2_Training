@@ -8,6 +8,12 @@ Feature schema v2 deliberately excludes remaining-depth and remaining-time featu
 v3 replay can reconstruct the student beam width, but its recorded depth/time budget belongs
 to the wider teacher search. Keeping those fields in the learned vector would therefore give
 the same feature name different train/runtime semantics.
+
+The schema-v2 feature *labels* retain their historical ``value``/``policy_*`` spellings so
+existing learned-pruner artifacts remain loadable. Runtime variables and node access use the
+canonical terminology: ``state_score`` for resolved-state quality, ``action_score`` for the
+pre-simulation action score, and the downstream learned ranking output is a
+``frontier_score``.
 """
 
 from __future__ import annotations
@@ -19,6 +25,9 @@ from sts2_training.decision.stable_pruner import StablePruneContext, StablePrune
 
 
 PRUNER_FEATURE_SCHEMA_VERSION = 2
+# These labels are artifact schema, not preferred Python variable names. Renaming them
+# requires a deliberate feature-schema/artifact migration rather than a terminology-only
+# refactor.
 PRUNER_FEATURE_NAMES = (
     "node_value",
     "frontier_value_max",
@@ -61,62 +70,70 @@ def stable_pruner_feature_matrix(
     if not frontier:
         return []
 
-    values = [float(node.value) for node in frontier]
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError("stable pruner node values must be finite")
-    value_max = max(values)
-    value_min = min(values)
-    value_mean = sum(values) / len(values)
-    variance = sum((value - value_mean) ** 2 for value in values) / len(values)
-    value_std = math.sqrt(max(0.0, variance))
+    state_scores = [float(node.state_score) for node in frontier]
+    if not all(math.isfinite(state_score) for state_score in state_scores):
+        raise ValueError("stable pruner node state_scores must be finite")
+    state_score_max = max(state_scores)
+    state_score_min = min(state_scores)
+    state_score_mean = sum(state_scores) / len(state_scores)
+    variance = sum(
+        (state_score - state_score_mean) ** 2 for state_score in state_scores
+    ) / len(state_scores)
+    state_score_std = math.sqrt(max(0.0, variance))
 
-    global_rank = _stable_descending_rank(values)
+    global_rank = _stable_descending_rank(state_scores)
     groups: dict[str | None, list[int]] = {}
     for index, node in enumerate(frontier):
         groups.setdefault(node.root_action_id, []).append(index)
 
     group_stats: dict[str | None, tuple[float, float, dict[int, int]]] = {}
     for root_action_id, indices in groups.items():
-        group_values = [values[index] for index in indices]
-        group_max = max(group_values)
-        group_mean = sum(group_values) / len(group_values)
-        local_ranks = _stable_descending_rank(group_values)
+        group_state_scores = [state_scores[index] for index in indices]
+        group_state_score_max = max(group_state_scores)
+        group_state_score_mean = sum(group_state_scores) / len(group_state_scores)
+        local_ranks = _stable_descending_rank(group_state_scores)
         group_stats[root_action_id] = (
-            group_max,
-            group_mean,
+            group_state_score_max,
+            group_state_score_mean,
             {index: local_ranks[position] for position, index in enumerate(indices)},
         )
 
     rows: list[tuple[float, ...]] = []
     for index, node in enumerate(frontier):
         group_indices = groups[node.root_action_id]
-        group_max, group_mean, local_ranks = group_stats[node.root_action_id]
+        group_state_score_max, group_state_score_mean, local_ranks = group_stats[
+            node.root_action_id
+        ]
         group_size = len(group_indices)
-        policy_score = _finite_optional(node.policy_score)
+        action_score = _finite_optional(node.action_score)
         rows.append(
             (
-                values[index],
-                value_max,
-                value_min,
-                value_mean,
-                value_std,
-                value_max - values[index],
-                0.0 if value_std == 0.0 else (values[index] - value_mean) / value_std,
+                state_scores[index],
+                state_score_max,
+                state_score_min,
+                state_score_mean,
+                state_score_std,
+                state_score_max - state_scores[index],
+                (
+                    0.0
+                    if state_score_std == 0.0
+                    else (state_scores[index] - state_score_mean) / state_score_std
+                ),
                 _rank_fraction(global_rank[index], len(frontier)),
                 float(group_size),
                 group_size / len(frontier),
-                group_max,
-                group_mean,
-                group_max - values[index],
+                group_state_score_max,
+                group_state_score_mean,
+                group_state_score_max - state_scores[index],
                 _rank_fraction(local_ranks[index], group_size),
                 float(node.depth),
                 float(node.combat_depth),
                 float(node.continuation_steps),
                 1.0 if node.terminal else 0.0,
-                1.0 if node.policy_rank is None else 0.0,
-                0.0 if node.policy_rank is None else float(node.policy_rank),
-                1.0 if policy_score is None else 0.0,
-                0.0 if policy_score is None else policy_score,
+                1.0 if node.action_rank is None else 0.0,
+                0.0 if node.action_rank is None else float(node.action_rank),
+                1.0 if action_score is None else 0.0,
+                0.0 if action_score is None else action_score,
                 1.0 if node.post_coverage_rank is None else 0.0,
                 0.0 if node.post_coverage_rank is None else float(node.post_coverage_rank),
                 1.0 if node.candidate_source == "structural_coverage" else 0.0,
@@ -130,9 +147,13 @@ def stable_pruner_feature_matrix(
     return rows
 
 
-def _stable_descending_rank(values: Sequence[float]) -> list[int]:
-    order = sorted(range(len(values)), key=lambda index: values[index], reverse=True)
-    ranks = [0] * len(values)
+def _stable_descending_rank(state_scores: Sequence[float]) -> list[int]:
+    order = sorted(
+        range(len(state_scores)),
+        key=lambda index: state_scores[index],
+        reverse=True,
+    )
+    ranks = [0] * len(state_scores)
     for rank, index in enumerate(order):
         ranks[index] = rank
     return ranks

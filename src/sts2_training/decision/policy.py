@@ -2,10 +2,10 @@
 
 `PolicyModel` defines the learned-policy seam. `PriorHeuristicPolicy` is the model-free
 bootstrap implementation. Wire/schema normalization is shared with Value through
-`CombatObservation`; policy-specific code only applies action-ranking judgments.
-Structural branch-retention constraints are applied separately by the Combat engine's
-candidate-coverage layer so replacing this policy with a learned model does not change
-Beam topology.
+`CombatObservation`; policy-specific code only applies pre-simulation ``action_score``
+ranking judgments. Structural branch-retention constraints are applied separately by the
+Combat engine's candidate-coverage layer so replacing this policy with a learned model
+does not change Beam topology.
 """
 
 from __future__ import annotations
@@ -59,9 +59,28 @@ _RARITY_SCORE = {
 
 @dataclass(frozen=True)
 class ActionCandidate:
-    """One action a `PolicyModel` proposes for beam search to branch on."""
+    """One action a `PolicyModel` proposes, with its optional ``action_score``."""
 
     action_id: str
+    action_score: float | None = None
+
+    @property
+    def action_rank(self) -> int | None:
+        """Policy candidates acquire a concrete rank only after proposal ordering."""
+
+        return None
+
+    @property
+    def post_coverage_rank(self) -> int | None:
+        """Raw policy candidates have no structural-coverage rank yet."""
+
+        return None
+
+    @property
+    def candidate_source(self) -> str | None:
+        """Raw policy candidates have no structural-coverage provenance yet."""
+
+        return None
 
 
 @dataclass(frozen=True)
@@ -77,6 +96,10 @@ class PolicyModel:
     Structural coverage is deliberately not part of this contract. The candidate layer
     may add required branch types after ranking so learned policies remain drop-in
     replacements for the heuristic prior.
+
+    Implementations may populate ``ActionCandidate.action_score`` with the cheap scalar
+    used for this pre-simulation ranking. The field is optional so policies that expose
+    only an ordering remain valid.
 
     ``oracle_provenance`` is the optional configuration-lineage seam used by budgeted
     teacher collection. Implementations should return JSON-serializable metadata that
@@ -114,7 +137,7 @@ class PriorHeuristicPolicy(PolicyModel):
     and normalized enemy attack intent, and uses only canonical v1 `choice_card`
     semantics/`optionId` identity for card-choice quality. Unknown, malformed, future, or
     inconsistent choice metadata remains neutral. `rng`, when supplied, randomizes only
-    equal-score ties.
+    equal-action-score ties.
     """
 
     def __init__(self, rng: random.Random | None = None) -> None:
@@ -161,47 +184,50 @@ class PriorHeuristicPolicy(PolicyModel):
                 available, masked_emulator_dto
             ),
         )
-        scored: list[tuple[float, float, int, JsonObject]] = []
+        scored_actions: list[tuple[float, float, int, JsonObject]] = []
         for index, action in enumerate(available):
-            score = _score_action(action, masked_emulator_dto, context)
+            action_score = _action_score(action, masked_emulator_dto, context)
             tie_break = self._rng.random() if self._rng is not None else 0.0
-            scored.append((score, tie_break, index, action))
+            scored_actions.append((action_score, tie_break, index, action))
 
         if self._rng is None:
-            scored.sort(key=lambda row: (-row[0], row[2]))
+            scored_actions.sort(key=lambda row: (-row[0], row[2]))
         else:
-            scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
+            scored_actions.sort(key=lambda row: (-row[0], -row[1], row[2]))
 
+        # Keep the naming refactor behavior-neutral: the heuristic has always used this
+        # scalar only to order candidates. Persisted policy_score context therefore stays
+        # absent unless a PolicyModel explicitly chooses to expose ActionCandidate.action_score.
         return [
             ActionCandidate(action_id=action["action_id"])
-            for _, _, _, action in scored[:top_k]
+            for _, _, _, action in scored_actions[:top_k]
         ]
 
 
-def _score_action(
+def _action_score(
     action: JsonObject,
     dto: Mapping[str, Any],
     context: _CombatContext,
 ) -> float:
     action_type = action.get("action_type")
-    score = _ACTION_TYPE_BASE_SCORE.get(action_type, -10.0)
+    action_score = _ACTION_TYPE_BASE_SCORE.get(action_type, -10.0)
 
     if action_type == CARD_ACTION_TYPE:
-        return score + _score_playable_card(action, context)
+        return action_score + _score_playable_card(action, context)
     if action_type == _POTION_ACTION_TYPE:
-        return score + _score_potion(action, context)
+        return action_score + _score_potion(action, context)
     if action_type == _SYSTEM_ACTION_TYPE:
-        return score + _score_end_turn(context)
+        return action_score + _score_end_turn(context)
     if action_type == _CHOICE_TARGET_ACTION_TYPE:
-        return score + _score_target(action, context.observation)
+        return action_score + _score_target(action, context.observation)
     if action_type == CHOICE_CARD_ACTION_TYPE:
         action_id = action.get("action_id")
         if isinstance(action_id, str):
-            return score + context.choice_card_scores.get(action_id, 0.0)
-        return score
+            return action_score + context.choice_card_scores.get(action_id, 0.0)
+        return action_score
     if action_type in (CHOICE_CONFIRM_ACTION_TYPE, CHOICE_SKIP_ACTION_TYPE):
-        return score + _score_choice_completion(action_type, dto)
-    return score
+        return action_score + _score_choice_completion(action_type, dto)
+    return action_score
 
 
 def _score_playable_card(action: JsonObject, context: _CombatContext) -> float:
@@ -213,76 +239,76 @@ def _score_playable_card(action: JsonObject, context: _CombatContext) -> float:
     card_id = _string(params.get("cardId")) or _string(card.get("id"))
     target_type = _string(params.get("targetType")) or _string(card.get("targetType"))
 
-    score = _CARD_TYPE_SCORE.get(card_type, 0.0) + _RARITY_SCORE.get(rarity, 0.0)
+    action_score = _CARD_TYPE_SCORE.get(card_type, 0.0) + _RARITY_SCORE.get(rarity, 0.0)
     if card.get("upgraded") is True:
-        score += 2.0
+        action_score += 2.0
     upgrade_level = _finite_number(card.get("upgradeLevel"))
     if upgrade_level is not None and upgrade_level > 1:
-        score += min(2.0, 0.5 * (upgrade_level - 1.0))
+        action_score += min(2.0, 0.5 * (upgrade_level - 1.0))
 
     cost = _finite_number(params.get("cost"))
     if cost is None:
         cost = _finite_number(card.get("cost"))
     if cost is not None:
-        score += max(0.0, 2.0 - cost) * 1.5
+        action_score += max(0.0, 2.0 - cost) * 1.5
         if observation.energy is not None and cost > observation.energy:
-            score -= 100.0
+            action_score -= 100.0
 
     danger = min(1.0, observation.danger_ratio)
     if card_type == "Skill":
-        score += 12.0 * danger
+        action_score += 12.0 * danger
     elif card_type == "Power":
-        score += 7.0 * (1.0 - danger) - 10.0 * danger
+        action_score += 7.0 * (1.0 - danger) - 10.0 * danger
     elif card_type == "Attack":
-        score += 4.0 * (1.0 - danger)
+        action_score += 4.0 * (1.0 - danger)
 
     if card_id is not None and card_id.startswith("DEFEND"):
-        score += 10.0 * danger
+        action_score += 10.0 * danger
 
     enemies_alive = len(observation.alive_enemies)
     if target_type == "AllEnemies" and enemies_alive > 1:
-        score += 3.0 * min(3, enemies_alive - 1)
+        action_score += 3.0 * min(3, enemies_alive - 1)
 
-    return score
+    return action_score
 
 
 def _score_potion(action: JsonObject, context: _CombatContext) -> float:
     observation = context.observation
     danger = min(1.0, observation.danger_ratio)
-    score = 30.0 * danger
+    action_score = 30.0 * danger
     if observation.lethal_threat:
-        score += 15.0
+        action_score += 15.0
 
     params = _mapping(action.get("parameters"))
     target_type = _string(params.get("targetType"))
     enemies_alive = len(observation.alive_enemies)
     if target_type == "AllEnemies" and enemies_alive > 1:
-        score += 3.0 * min(3, enemies_alive - 1)
+        action_score += 3.0 * min(3, enemies_alive - 1)
 
     potion = _potion_for(action, observation)
     rarity = _string(potion.get("rarity"))
     if rarity == "Rare":
-        score -= 4.0
+        action_score -= 4.0
     elif rarity == "Uncommon":
-        score -= 2.0
-    return score
+        action_score -= 2.0
+    return action_score
 
 
 def _score_end_turn(context: _CombatContext) -> float:
     observation = context.observation
-    score = 0.0
+    action_score = 0.0
     if context.playable_cards == 0:
-        score += 30.0
+        action_score += 30.0
     if observation.energy is not None:
         if observation.energy <= 0:
-            score += 20.0
+            action_score += 20.0
         elif context.playable_cards > 0:
-            score -= min(12.0, 4.0 * observation.energy)
+            action_score -= min(12.0, 4.0 * observation.energy)
     if observation.incoming_damage <= 0:
-        score += 5.0
+        action_score += 5.0
     if observation.lethal_threat:
-        score -= 35.0
-    return score
+        action_score -= 35.0
+    return action_score
 
 
 def _score_target(action: JsonObject, observation: CombatObservation) -> float:

@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.decision.beam_search import BeamSearchResult, BeamSearchStats
-from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION, oracle_collection_record
+from sts2_training.decision.oracle_log import (
+    ORACLE_RECORD_SCHEMA_VERSION,
+    ORACLE_VALUE_MASK_VERSION,
+    oracle_collection_record,
+)
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
     OracleProvenance,
@@ -48,17 +52,28 @@ class OracleProvenanceLogTest(unittest.TestCase):
                 teacher_value_metadata={"checkpoint": "value-v7", "config_hash": "abc"},
             ),
         )
-
+        dto = {
+            "mask_version": ORACLE_VALUE_MASK_VERSION,
+            "dto_version": "emulator-test",
+            "legal_actions": [],
+        }
         record = oracle_collection_record(
-            {
-                "decision_point_id": "d-root",
-                "masked_emulator_dto": {"legal_actions": []},
-            },
+            {"decision_point_id": "d-root", "masked_emulator_dto": dto},
             result,
+            instance_id="inst-1",
+            decision_index=0,
+            runtime_transition={
+                "chosen_action_id": "a",
+                "chosen_action": {"action_id": "a"},
+                "next_decision_point_id": "d-next",
+                "commit_response_metadata": {"decision_point_id": "d-next"},
+                "next_masked_emulator_dto": dto,
+            },
         )
 
-        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 4)
-        self.assertEqual(record["record_schema_version"], 4)
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 6)
+        self.assertEqual(record["record_schema_version"], 6)
+        self.assertEqual(record["root_value_samples"], [])
         self.assertEqual(
             record["provenance"]["teacher_value_metadata"]["checkpoint"],
             "value-v7",

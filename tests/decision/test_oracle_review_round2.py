@@ -7,7 +7,10 @@ from sts2_training.decision.beam_search import (
     BeamSearchResult,
     BeamSearchStats,
 )
-from sts2_training.decision.oracle_log import oracle_collection_record
+from sts2_training.decision.oracle_log import (
+    ORACLE_VALUE_MASK_VERSION,
+    oracle_collection_record,
+)
 from sts2_training.decision.oracle_search import (
     BudgetedOracleCollector,
     OracleCollectionResult,
@@ -145,12 +148,23 @@ class OracleEffectiveBudgetMetadataTest(unittest.TestCase):
                 teacher_value_class="test.Value",
             ),
         )
+        dto = {
+            "mask_version": ORACLE_VALUE_MASK_VERSION,
+            "dto_version": "emulator-test",
+            "legal_actions": [],
+        }
         record = oracle_collection_record(
-            {
-                "decision_point_id": "d-root",
-                "masked_emulator_dto": {"legal_actions": []},
-            },
+            {"decision_point_id": "d-root", "masked_emulator_dto": dto},
             result,
+            instance_id="inst",
+            decision_index=0,
+            runtime_transition={
+                "chosen_action_id": "a",
+                "chosen_action": {"action_id": "a"},
+                "next_decision_point_id": "d-next",
+                "commit_response_metadata": {"decision_point_id": "d-next"},
+                "next_masked_emulator_dto": dto,
+            },
         )
 
         self.assertEqual(record["search_trace"][0]["time_budget_ms"], 5000.0)
