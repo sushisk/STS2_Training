@@ -46,19 +46,20 @@ class BeamSearchConfig:
     timeout_s: float | None = ...
 
 class BeamSearchEngine:
-    def __init__(self, client, policy: PolicyModel | None = None, value_fn: ValueModel | None = None, *, config: BeamSearchConfig | None = None, stable_pruner: StableFrontierPruner | None = None, trace_collector: SearchTraceCollector | None = None)
-    async def search(self, decision: Mapping[str, Any], *, deadline: float | None = None) -> BeamSearchResult
+    def __init__(self, client: Any, *, policy: PolicyModel, value_fn: ValueModel, config: BeamSearchConfig | None = None, stable_pruner: StableFrontierPruner | None = None, trace_collector: SearchTraceCollector | None = None) -> None
+    async def search(self, instance_id: str, root_decision: Mapping[str, Any], *, timeout_s: float) -> BeamSearchResult
 ```
 
 ```python
 class PolicyModel:
-    def propose(self, dto: Mapping[str, Any], *, top_k: int) -> list[ActionCandidate]
-    def propose_batch(self, dtos: Sequence[Mapping[str, Any]], *, top_k: int) -> list[list[ActionCandidate]]
+    def propose(self, legal_actions: Sequence[Mapping[str, Any]], masked_emulator_dto: Mapping[str, Any], *, top_k: int) -> list[ActionCandidate]
+    def propose_batch(self, requests: Sequence[tuple[Sequence[Mapping[str, Any]], Mapping[str, Any]]], *, top_k: int) -> list[list[ActionCandidate]]
     def oracle_provenance(self) -> Mapping[str, Any]
 
 class ValueModel:
-    def evaluate(self, dtos: Sequence[Mapping[str, Any]]) -> list[float]
-    def exact_terminal_utility(self, dto: Mapping[str, Any]) -> float | None
+    def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float
+    def evaluate_batch(self, dtos: Sequence[Mapping[str, Any]]) -> list[float]
+    def exact_terminal_utility(self, masked_emulator_dto: Mapping[str, Any]) -> float | None
     def oracle_provenance(self) -> Mapping[str, Any]
 ```
 
@@ -83,13 +84,15 @@ best_event_option(client, decision, *, timeout_s: float = ...) -> Mapping[str, A
 ```python
 import asyncio
 
-from sts2_training.api import AsyncTrainingApiClient
+from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.decision import BeamSearchConfig, CombatDecisionEngine
 
 
 async def choose_once(instance_id: str) -> None:
-    async with AsyncTrainingApiClient() as client:
-        decision = await client.get_decision(instance_id, "root")
+    connection = TcpConnection(host="127.0.0.1", port=8765)
+    async with connection:
+        client = AsyncTrainingApiClient(connection)
+        decision = await client.get_decision(instance_id, "root", timeout_s=30.0)
         engine = CombatDecisionEngine(
             client,
             beam_config=BeamSearchConfig(beam_width=8, top_k_actions=4, max_depth=3),
@@ -99,6 +102,7 @@ async def choose_once(instance_id: str) -> None:
             instance_id,
             decision["decision_point_id"],
             outcome.chosen_action_id,
+            timeout_s=30.0,
         )
 
 

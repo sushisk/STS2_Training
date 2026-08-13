@@ -35,17 +35,17 @@
 
 ```python
 class AsyncTrainingApiClient(ApiContract):
-    def __init__(self, transport: RlTransport | None = None, *, host="127.0.0.1", port=8765, ...)
-    async def start_instance(self, instance_config: Mapping[str, Any], *, timeout_s: float = ...) -> str
-    async def get_decision(self, instance_id: str, branch_id: str = "root", *, timeout_s: float = ...) -> dict[str, Any]
-    async def commit_action(self, instance_id: str, decision_point_id: str, action_id: str, *, timeout_s: float = ...) -> dict[str, Any]
+    def __init__(self, connection: TcpConnection, *, selection_logger: SelectionEventLogger | None = None) -> None
+    async def start_instance(self, instance_config: Mapping[str, object], *, timeout_s: float) -> str
+    async def get_decision(self, instance_id: str, branch_id: str = "root", *, timeout_s: float) -> dict[str, Any]
+    async def commit_action(self, instance_id: str, decision_point_id: str, action_id: str, *, timeout_s: float) -> dict[str, Any]
     async def emulate_action(...)
     async def emulate_actions(...)
     async def cancel_branches(...)
     async def release_branches(...)
     async def get_branch_status(...)
     async def close_instance(...)
-    async def retry_request(retry_request: RetryRequest, *, timeout_s: float = ...) -> dict[str, Any]
+    async def retry_request(retry_request: RetryRequest, *, timeout_s: float) -> dict[str, Any] | str
 ```
 
 ```python
@@ -70,23 +70,26 @@ class RetryRequest:
 ```python
 import asyncio
 
-from sts2_training.api import AsyncTrainingApiClient
+from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 
 
 async def main() -> None:
-    async with AsyncTrainingApiClient(host="127.0.0.1", port=8765) as client:
+    connection = TcpConnection(host="127.0.0.1", port=8765)
+    async with connection:
+        client = AsyncTrainingApiClient(connection)
         instance_id = await client.start_instance({
             "instance_type": "whole_run",
             "seed": 123,
-        })
-        decision = await client.get_decision(instance_id, "root")
+        }, timeout_s=30.0)
+        decision = await client.get_decision(instance_id, "root", timeout_s=30.0)
         action = decision["masked_emulator_dto"]["legal_actions"][0]
         await client.commit_action(
             instance_id,
             decision["decision_point_id"],
             action["action_id"],
+            timeout_s=30.0,
         )
-        await client.close_instance(instance_id)
+        await client.close_instance(instance_id, timeout_s=10.0)
 
 
 asyncio.run(main())

@@ -22,7 +22,7 @@ Training は canonical `pendingChoice.choiceSemantics` を消費し、prompt tex
 | `event_choice_heuristic.py` | confirmed lethal event option を除外する safety filter |
 | `heuristic_selector.py` | 上記を統合する `HeuristicCombatSelector` |
 
-`action_classification.available_actions()` は `available is False` の action を除外する。各 type helper は order を保って filter し、`group_by_action_type()` は available action を `action_type` ごとの dict にする。
+`action_classification.available_actions()` は `is_available is not False` の action だけを残す。つまり `is_available` が明示的に `False` の action だけを除外し、field がない action や `None`/`0`/空文字など他の falsy value は除外しない。各 type helper は order を保って filter し、`group_by_action_type()` は available action を `action_type` ごとの dict にする。
 
 `RewardCardSelectionPolicy` は Protocol で、`RandomRewardCardSelectionPolicy` と `CardDataRewardCardSelectionPolicy` がある。後者は sts2log.com card stats export 由来の `skada_score` を参照する。
 
@@ -52,7 +52,7 @@ choice_option_id(action) -> str | None
 
 ```python
 class HeuristicCombatSelector:
-    def select(self, masked_emulator_dto: Mapping[str, Any], *, context: Mapping[str, Any] | None = None) -> dict[str, Any]
+    def select(self, legal_actions: Sequence[Mapping[str, Any]], masked_emulator_dto: Mapping[str, Any] | None = None) -> dict[str, Any]
 
 class NoAvailableActionError(RuntimeError):
     ...
@@ -65,13 +65,14 @@ from sts2_training.selection import HeuristicCombatSelector
 
 masked_emulator_dto = {
     "legal_actions": [
-        {"action_id": "a", "action_type": "choice_skip", "available": True},
-        {"action_id": "b", "action_type": "choice_reward_card", "available": False},
+        {"action_id": "a", "action_type": "choice_skip", "is_available": True},
+        {"action_id": "b", "action_type": "choice_reward_card", "is_available": False},
     ]
 }
+legal_actions = masked_emulator_dto["legal_actions"]
 
 selector = HeuristicCombatSelector()
-action = selector.select(masked_emulator_dto)
+action = selector.select(legal_actions, masked_emulator_dto)
 assert action["action_id"] == "a"
 ```
 

@@ -12,7 +12,7 @@ Oracle collection は、runtime policy が訪れた decision state ごとに、�
 
 ## 2. Architecture
 
-`OracleCollectionConfig` は teacher search budget と student/runtime target budget を分ける。root actions は既定で exhaustive に評価され、`policy_limited_root=True` の場合だけ policy-limited collection になり、未評価 legal action は censored/no target として扱う。
+`OracleCollectionConfig` は teacher search budget と student/runtime target budget を分ける。root actions は既定で `exhaustive_root_actions=True` により available action 全件を teacher policy に要求して評価する。`exhaustive_root_actions=False` にすると root も通常の policy/top-k 制限に従うため、未提案の legal action は評価対象にならない。
 
 target semantics は次の通りである。
 
@@ -35,26 +35,24 @@ target semantics は次の通りである。
 ```python
 @dataclass(frozen=True)
 class OracleCollectionConfig:
-    beam_width: int
-    top_k_actions: int
-    max_depth: int
-    target_beam_width: int | None = None
+    beam_config: BeamSearchConfig = field(default_factory=lambda: BeamSearchConfig(beam_width=32, top_k_actions=8, max_depth=4))
+    target_beam_width: int = 8
     exhaustive_root_actions: bool = True
-    time_budget_ms: int | None = None
+    rng_sampling: str = "independent"
 
 class BudgetedOracleCollector:
     @classmethod
-    def from_beam_engine(cls, engine: BeamSearchEngine, *, config: OracleCollectionConfig) -> "BudgetedOracleCollector"
-    async def collect(self, decision: Mapping[str, Any], *, deadline: float | None = None) -> OracleCollectionResult
+    def from_beam_engine(cls, engine: BeamSearchEngine, *, config: OracleCollectionConfig | None = None, stable_pruner: StableFrontierPruner | None = None) -> "BudgetedOracleCollector"
+    async def collect(self, instance_id: str, root_decision: Mapping[str, Any], *, timeout_s: float) -> OracleCollectionResult
 ```
 
 ```python
-oracle_collection_record(... ) -> dict[str, Any]
-oracle_episode_result_record(... ) -> dict[str, Any]
+oracle_collection_record(root_decision, result, *, instance_id, decision_index, runtime_transition, training_commit=None) -> dict[str, Any]
+oracle_episode_result_record(*, instance_id, decisions_collected, final_dto, final_decision_metadata, completed, termination_reason, elapsed_s) -> dict[str, Any]
 
 class OracleJsonlWriter:
-    def write(self, record: Mapping[str, Any]) -> None
-    def write_episode_result(self, record: Mapping[str, Any]) -> None
+    def write(self, root_decision, result, *, instance_id, decision_index, runtime_transition, training_commit=None) -> dict[str, Any]
+    def write_episode_result(self, *, instance_id, decisions_collected, final_dto, final_decision_metadata, completed, termination_reason, elapsed_s) -> dict[str, Any]
 ```
 
 ```python

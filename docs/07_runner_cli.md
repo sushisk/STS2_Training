@@ -31,19 +31,19 @@ CLI は大きく、from-scratch Whole Run を始める `start_new_run.py`、scen
 ## 3. API
 
 ```python
-def build_engine(client, *, search_mode: str | None = None, beam_config: BeamSearchConfig | None = None, stable_pruner: StableFrontierPruner | None = None) -> CombatDecisionEngine
+def build_engine(client, *, engine: CombatDecisionEngine | None = None, search_mode: str | BeamSearchConfig | None = None, beam_max_depth: int | None = None) -> CombatDecisionEngine
 
 @dataclass(frozen=True)
 class EpisodeResult:
     instance_id: str
-    decisions: int
-    terminal: bool
-    final_response: dict[str, Any] | None
+    decisions_made: int
+    final_dto: dict[str, Any]
+    elapsed_s: float
 
 class EpisodeRunner:
-    async def run(self) -> EpisodeResult
+    async def run(self, instance_id: str, *, decision_timeout_s: float, max_decisions: int | None = None, close_timeout_s: float = 10.0) -> EpisodeResult
 
-async def start_and_run(client, instance_config, *, engine=None, max_decisions=None, ...) -> EpisodeResult
+async def start_and_run(client, instance_config, *, start_timeout_s: float = 30.0, decision_timeout_s: float = 30.0, max_decisions: int | None = None, engine=None, search_mode=None, beam_max_depth=None) -> EpisodeResult
 ```
 
 ```python
