@@ -34,7 +34,10 @@ from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.engine import CombatDecisionEngine, DecisionOutcome
 from sts2_training.decision.learned_pruner import LinearStableFrontierPruner
 from sts2_training.decision.search_modes import resolve_search_mode
-from sts2_training.decision.stable_pruner import StableFrontierPruner, ValueTopKPruner
+from sts2_training.decision.stable_pruner import (
+    StableFrontierPruner,
+    StateScoreTopKPruner,
+)
 from sts2_training.runner._cli import add_common_arguments, configure_logging
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario
 from sts2_training.selection.heuristic_selector import NoAvailableActionError
@@ -167,7 +170,7 @@ class StablePrunerABRunner:
             for arm in order:
                 pruner: StableFrontierPruner
                 if arm == "baseline":
-                    pruner = ValueTopKPruner()
+                    pruner = StateScoreTopKPruner()
                 else:
                     pruner = self._learned_pruner
                 arm_results[arm] = await self._run_arm(arm=arm, seed=seed, pruner=pruner)
