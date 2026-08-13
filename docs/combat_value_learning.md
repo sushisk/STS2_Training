@@ -18,8 +18,9 @@ confused is easy, so names are fixed here:
 
 - **`action_score`** — scores a candidate action *before* its result is known (cheap, no
   simulation required). Used to shortlist which legal actions are worth simulating at all.
-  Current implementation: `PolicyModel`/`PriorHeuristicPolicy` (`decision/policy.py`),
-  exposed today as `policy_score`/`policy_rank`. Not yet learned.
+  The bootstrap implementation is `PriorHeuristicPolicy` (`decision/policy.py`), while the
+  learned implementation is `LinearActionScorePolicy` (`decision/learned_policy.py`),
+  trained from `oracle_targets.root_actions[]` on the `agent/action-score-learning` PR.
 - **`state_score`** — scores one resolved (simulated) board state in isolation, with no
   reference to how it was reached. Current implementation: `ValueModel.evaluate()`
   (`decision/value.py`); this is the function PR #59 trains from Oracle v6 data.
