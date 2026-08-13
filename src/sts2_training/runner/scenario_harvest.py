@@ -1,30 +1,8 @@
-"""Harvest `CombatScenario` JSON specs (Combat starting states) from collected
-self-play JSONL logs, for the combat-search-learning pipeline's `--scenario` input
-(see `oracle_collection.py`, `docs/combat_search_learning_plan.md`).
+"""Harvest `CombatScenario` JSON specs from collected self-play JSONL logs.
 
-Mirrors STS2_RL's `Combat/battle_emulator.py::build_scenario_from_state()` field
-mapping (the canonical `masked_emulator_dto` -> `CombatScenario` conversion used
-in-process for restore/lookahead), but in pure Python producing the on-disk JSON
-spec shape `oracle_collection.py`'s `_scenario_from_json()` already loads
-(`CombatScenario(**data)`, `EnemyScenario(**enemy)`). Every pile (`hand` and the
-`drawPile`/`discardPile`/`exhaustPile` multisets, mask_version >= 1.2) goes through
-the `extra` escape hatch as `hand_cards`/`draw_pile_cards`/`discard_pile_cards`/
-`exhaust_pile_cards`/`orbs`/`orb_slots`, matching `build_scenario_from_spec()`'s
-accepted structured input - card identity (upgrade level, enchantment, Mad Science
-tinker-time state) is preserved for all four piles; only pile ORDER is genuinely lost
-(Hidden Information, masked server-side before this module ever sees it).
-
-`player_powers`/enemy `powers` always drop the three GOD MODE powers
-(`STRENGTH_POWER`/`BUFFER_POWER`/`REGEN_POWER`) regardless of whether the source
-file was already processed by `god_mode_correction` - this module is the sole
-place responsible for that when harvesting directly from raw (uncorrected) logs,
-so it does not rely on file-level correction having already run.
-
-A "combat start" is the first `stable`-boundary decision (turn 1, round 1) after
-entering a room whose `currentRoomType` is `CombatRoom` - detected by watching the
-`(column, row)` room-context change, not by boundary transition alone, since a
-room can be re-entered in principle. A snapshot with a live `pendingChoice` or no
-living enemies is skipped as unsafe/incomplete to harvest.
+The v0.8 wire contract is a hard cutover paired with masked_emulator_dto mask_version
+1.2. Card state is preserved for hand and masked pile multisets; pile order alone is
+intentionally unavailable.
 """
 
 from __future__ import annotations
@@ -37,49 +15,31 @@ from pathlib import Path
 from typing import Any
 
 JsonObject = dict[str, Any]
-
-# Mirrors god_mode_correction.GOD_MODE_POWER_IDS - kept separate rather than
-# imported so this module has no dependency on that tool's presence/API shape.
 _GOD_MODE_POWER_IDS = frozenset({"STRENGTH_POWER", "BUFFER_POWER", "REGEN_POWER"})
-_MIN_MASK_VERSION = (1, 2)
+_MASK_VERSION = "1.2"
 
 __all__ = ["dto_to_scenario_spec", "harvest_scenarios_from_jsonl", "main"]
 
 
-def _parse_mask_version(value: Any) -> tuple[int, ...] | None:
-    """Parse dotted numeric mask versions without treating e.g. 1.10 as float 1.1."""
-    if not isinstance(value, (str, int, float)):
-        return None
-    parts = str(value).split(".")
-    if not parts or any(not part.isdigit() for part in parts):
-        return None
-    return tuple(int(part) for part in parts)
-
-
 def _require_supported_mask_version(dto: JsonObject) -> None:
-    """Reject DTOs whose pile shape predates the full-card-identity multiset contract."""
+    """Accept only the mask version paired with this hard-cutover wire DTO."""
     raw_version = dto.get("mask_version")
-    version = _parse_mask_version(raw_version)
-    if version is None or version < _MIN_MASK_VERSION:
+    if raw_version != _MASK_VERSION:
         raise ValueError(
-            "scenario_harvest requires masked_emulator_dto mask_version >= 1.2; "
-            f"got {raw_version!r}. Older/missing versions use a different pile multiset "
-            "shape and cannot be restored without losing card state."
+            "scenario_harvest requires masked_emulator_dto mask_version exactly '1.2'; "
+            f"got {raw_version!r}. Other versions are a different wire contract and "
+            "must not be interpreted optimistically."
         )
 
 
 def _card_instance(card: JsonObject) -> JsonObject:
-    """Build a `{"card_id","is_upgraded",...}` structured card instance from any DTO
-    card dict - both a `hand` entry and a `drawPile`/`discardPile`/`exhaustPile`
-    multiset record (API/masking.py's `_multiset_of`, mask_version >= 1.2) share this
-    shape (id/upgraded/upgradeLevel/tinkerTimeType/tinkerTimeRider/enchantment), so one
-    function builds a scenario-ready instance from either."""
+    """Build one full-fidelity structured card instance from a public card record."""
     instance: JsonObject = {
         "card_id": card["id"],
         "is_upgraded": bool(card.get("upgraded", False)),
     }
     upgrade_level = card.get("upgradeLevel")
-    if upgrade_level:
+    if upgrade_level is not None:
         instance["upgrade_level"] = int(upgrade_level)
     if card.get("tinkerTimeType"):
         instance["tinker_time_type"] = card["tinkerTimeType"]
@@ -87,10 +47,13 @@ def _card_instance(card: JsonObject) -> JsonObject:
         instance["tinker_time_rider"] = card["tinkerTimeRider"]
     enchantment = card.get("enchantment")
     if enchantment:
-        instance["enchantment"] = {
+        scenario_enchantment: JsonObject = {
             "id": enchantment["id"],
             "amount": enchantment.get("amount", 1),
         }
+        if enchantment.get("status") is not None:
+            scenario_enchantment["status"] = enchantment["status"]
+        instance["enchantment"] = scenario_enchantment
     return instance
 
 
@@ -115,10 +78,7 @@ def _power_stacks(powers: Any) -> list[JsonObject]:
 
 
 def _expand_multiset_cards(multiset: Any) -> list[JsonObject]:
-    """Expand a masked-pile multiset (API/masking.py's `_multiset_of`, mask_version
-    >= 1.2) into full-fidelity `_card_instance` records, repeated `count` times each.
-    Pile order is genuinely Hidden Information and stays lost - per-card upgrade level
-    and enchantment state are recovered (mask_version < 1.2 exposed neither)."""
+    """Expand a mask_version 1.2 pile multiset while preserving per-card state."""
     result: list[JsonObject] = []
     for entry in multiset or []:
         if not isinstance(entry, dict):
@@ -144,14 +104,7 @@ def _enemy_scenario(enemy: JsonObject) -> JsonObject | None:
 
 
 def dto_to_scenario_spec(dto: JsonObject, *, seed: int) -> JsonObject | None:
-    """Convert one combat-start `masked_emulator_dto` into an on-disk scenario spec.
-
-    Requires `mask_version >= 1.2`, the first masked-pile representation that carries
-    full per-card identity instead of the legacy `{card_id: count}` shape. Returns
-    `None` when the snapshot isn't safe/complete to harvest (a live `pendingChoice`,
-    or no living enemies - a state that should already be terminal/transitioning rather
-    than a real starting point).
-    """
+    """Convert one mask_version 1.2 combat-start DTO into a scenario spec."""
     _require_supported_mask_version(dto)
     if dto.get("pendingChoice"):
         return None
@@ -185,13 +138,6 @@ def dto_to_scenario_spec(dto: JsonObject, *, seed: int) -> JsonObject | None:
     if dto.get("stars") is not None:
         spec["stars"] = int(dto["stars"])
 
-    # "hand" is exposed as a full ordered list of card dicts; "drawPile"/"discardPile"/
-    # "exhaustPile" are masked down to per-distinct-instance multisets (API/masking.py's
-    # _multiset_of, mask_version >= 1.2) - pile ORDER is genuinely lost either way
-    # (Hidden Information), but upgrade/enchantment state is preserved for both via the
-    # upgrade-preserving *_cards extra fields; plain draw_pile/discard_pile/exhaust_pile
-    # stay empty (never both populated for the same pile - see CombatScenario.HandCards
-    # / GameInstance.ResolveCardSpecs's doc comments).
     extra: JsonObject = {}
     hand_cards = [_card_instance(c) for c in dto.get("hand") or []]
     if hand_cards:
@@ -210,9 +156,7 @@ def dto_to_scenario_spec(dto: JsonObject, *, seed: int) -> JsonObject | None:
         extra["orb_slots"] = int(orb_slots)
     orbs = dto.get("orbs")
     if orbs:
-        extra["orbs"] = [
-            {"orb_id": orb["id"]} for orb in orbs if orb.get("id") is not None
-        ]
+        extra["orbs"] = [{"orb_id": orb["id"]} for orb in orbs if orb.get("id") is not None]
     if dto.get("stepIndex") is not None:
         extra["step_index"] = int(dto["stepIndex"])
     if extra:
@@ -235,14 +179,7 @@ def _room_key(dto: JsonObject) -> Any:
 
 
 def is_completed_run_log(path: Path) -> bool:
-    """Whether `path` ends with a valid `self_play_run_result` record.
-
-    Mirrors `god_mode_correction._is_god_mode_run_result`'s validity check (a
-    `self_play_run_result` with `god_mode: true`), generalized to also accept a
-    non-god-mode successful run (`god_mode` absent/false is fine as long as the
-    terminal record is present) - completeness, not god-mode-ness, is what decides
-    whether every detected combat in the file is safe to harvest.
-    """
+    """Whether path ends with a valid self_play_run_result record."""
     last_record: JsonObject | None = None
     with path.open(encoding="utf-8") as fh:
         for line in fh:
@@ -254,8 +191,6 @@ def is_completed_run_log(path: Path) -> bool:
 
 
 def harvest_scenarios_auto(path: Path, *, rng: random.Random | None = None) -> list[JsonObject]:
-    """Harvest scenarios from `path`, excluding the final combat iff the run never
-    completed - see `is_completed_run_log`."""
     return harvest_scenarios_from_jsonl(
         path, exclude_final_combat=not is_completed_run_log(path), rng=rng
     )
@@ -264,12 +199,6 @@ def harvest_scenarios_auto(path: Path, *, rng: random.Random | None = None) -> l
 def harvest_scenarios_from_jsonl(
     path: Path, *, exclude_final_combat: bool, rng: random.Random | None = None
 ) -> list[JsonObject]:
-    """Harvest every combat-start scenario spec found in one collected JSONL log.
-
-    `exclude_final_combat=True` drops the last detected combat start - for a run
-    whose log ends mid-failure, that final combat is the one that failed and must
-    not be treated as a valid, resolvable starting state.
-    """
     rng = rng if rng is not None else random.Random()
     combat_start_dtos: list[JsonObject] = []
     last_room_key: Any = None
@@ -330,17 +259,11 @@ def main(argv: list[str] | None = None) -> int:
             output_path.write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
         total_scenarios += len(specs)
 
-    print(
-        json.dumps(
-            {
-                "files_processed": len(input_paths),
-                "incomplete_files": incomplete_files,
-                "scenarios_written": total_scenarios,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    print(json.dumps({
+        "files_processed": len(input_paths),
+        "incomplete_files": incomplete_files,
+        "scenarios_written": total_scenarios,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
