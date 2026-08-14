@@ -1,8 +1,9 @@
-"""Validate and fingerprint Oracle teacher provenance used for pruner training/eval.
+"""Validate and fingerprint Oracle teacher provenance used for training/eval.
 
 Oracle targets are labels produced by a concrete Policy/Value/search configuration. Mixing
-records from different teachers silently changes the supervised objective, so callers must
-opt in explicitly when that is intentional. The complete provenance payload is retained in
+records from different teachers or target-generation budgets silently changes the
+supervised objective, so callers must opt in explicitly when that is intentional. The
+complete provenance payload and normalized label-generation config are retained in
 summaries so trained artifacts and evaluation reports remain auditable.
 """
 
@@ -18,7 +19,7 @@ from typing import Any
 
 from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION
 
-TEACHER_PROVENANCE_SUMMARY_SCHEMA_VERSION = 1
+TEACHER_PROVENANCE_SUMMARY_SCHEMA_VERSION = 2
 _REQUIRED_PROVENANCE_FIELDS = (
     "teacher_policy_class",
     "teacher_inner_policy_class",
@@ -36,12 +37,30 @@ _METADATA_FIELDS = (
     "teacher_inner_policy_metadata",
     "teacher_value_metadata",
 )
+_TARGET_GENERATION_FIELDS = (
+    "oracle_beam_width",
+    "target_beam_width",
+    "top_k_actions",
+    "max_depth",
+    "max_continuation_steps",
+    "time_budget_ms",
+    "exhaustive_root_actions",
+    "pruner_name",
+    "pruner_version",
+    "rng_sampling",
+)
+_SHARED_SEARCH_IDENTITY_FIELDS = (
+    "pruner_name",
+    "pruner_version",
+    "rng_sampling",
+)
 
 
 @dataclass(frozen=True)
 class OracleTeacherProvenanceEntry:
     fingerprint_sha256: str
     provenance: dict[str, Any]
+    target_generation: dict[str, Any]
     record_count: int
     source_files: tuple[str, ...]
 
@@ -51,6 +70,7 @@ class OracleTeacherProvenanceEntry:
             "record_count": self.record_count,
             "source_files": list(self.source_files),
             "provenance": self.provenance,
+            "target_generation": self.target_generation,
         }
 
 
@@ -87,7 +107,7 @@ def inspect_oracle_teacher_provenance(
     *,
     allow_mixed_teachers: bool = False,
 ) -> OracleTeacherProvenanceSummary:
-    """Inspect Oracle v3 JSONL and reject accidental teacher mixing by default."""
+    """Inspect Oracle JSONL and reject accidental teacher/budget mixing by default."""
 
     normalized_paths = tuple(Path(path) for path in paths)
     if not normalized_paths:
@@ -111,15 +131,30 @@ def inspect_oracle_teacher_provenance(
                         f"{path}:{line_number}: expected Oracle record schema "
                         f"v{ORACLE_RECORD_SCHEMA_VERSION}, got {schema_version!r}"
                     )
-                provenance = _validated_provenance(
-                    record.get("provenance"), source=f"{path}:{line_number}"
+                source = f"{path}:{line_number}"
+                provenance = _validated_provenance(record.get("provenance"), source=source)
+                target_generation = _validated_target_generation(
+                    record.get("oracle_targets"), source=source
                 )
-                canonical = _canonical_json(provenance, source=f"{path}:{line_number}.provenance")
+                _require_shared_search_identity_matches(
+                    provenance,
+                    target_generation,
+                    source=source,
+                )
+                fingerprint_payload = {
+                    "provenance": provenance,
+                    "target_generation": target_generation,
+                }
+                canonical = _canonical_json(
+                    fingerprint_payload,
+                    source=f"{source}.teacher_fingerprint",
+                )
                 fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
                 entry = by_fingerprint.setdefault(
                     fingerprint,
                     {
                         "provenance": provenance,
+                        "target_generation": target_generation,
                         "record_count": 0,
                         "source_files": set(),
                     },
@@ -135,14 +170,16 @@ def inspect_oracle_teacher_provenance(
     if len(fingerprints) > 1 and not allow_mixed_teachers:
         short = ", ".join(value[:12] for value in fingerprints)
         raise ValueError(
-            "mixed Oracle teacher provenance detected; pass allow_mixed_teachers=True "
-            f"only when intentional (teachers={short})"
+            "mixed Oracle teacher provenance or target-generation config detected; pass "
+            "allow_mixed_teachers=True only when intentional "
+            f"(teachers={short})"
         )
 
     teachers = tuple(
         OracleTeacherProvenanceEntry(
             fingerprint_sha256=fingerprint,
             provenance=dict(by_fingerprint[fingerprint]["provenance"]),
+            target_generation=dict(by_fingerprint[fingerprint]["target_generation"]),
             record_count=int(by_fingerprint[fingerprint]["record_count"]),
             source_files=tuple(sorted(by_fingerprint[fingerprint]["source_files"])),
         )
@@ -176,7 +213,23 @@ def teacher_provenance_matches(
         if not isinstance(value, str) or not value:
             return False
         fingerprints.append(value)
-    return tuple(sorted(fingerprints)) == tuple(sorted(evaluation_summary.teacher_fingerprints))
+
+    artifact_schema = artifact_summary.get("schema_version", 1)
+    if artifact_schema == 1:
+        # Pre-v2 summaries fingerprinted only record["provenance"]. Preserve held-out
+        # compatibility for existing artifacts while new artifacts fail closed on budget
+        # mismatches through the v2 combined fingerprint.
+        evaluation_fingerprints = tuple(
+            sorted(
+                _legacy_provenance_fingerprint(entry.provenance)
+                for entry in evaluation_summary.teachers
+            )
+        )
+    elif artifact_schema == TEACHER_PROVENANCE_SUMMARY_SCHEMA_VERSION:
+        evaluation_fingerprints = tuple(sorted(evaluation_summary.teacher_fingerprints))
+    else:
+        return False
+    return tuple(sorted(fingerprints)) == evaluation_fingerprints
 
 
 def require_matching_teacher_provenance(
@@ -192,12 +245,12 @@ def require_matching_teacher_provenance(
         return matches
     if artifact_summary is None:
         raise ValueError(
-            "learned-pruner artifact does not record Oracle teacher provenance; retrain "
-            "with the current trainer or pass allow_teacher_mismatch=True explicitly"
+            "learned artifact does not record Oracle teacher provenance; retrain with the "
+            "current trainer or pass allow_teacher_mismatch=True explicitly"
         )
     raise ValueError(
-        "evaluation Oracle teacher provenance does not match the teacher set recorded "
-        "in the learned-pruner artifact; pass allow_teacher_mismatch=True only when intentional"
+        "evaluation Oracle teacher provenance does not match the teacher/search-budget set "
+        "recorded in the learned artifact; pass allow_teacher_mismatch=True only when intentional"
     )
 
 
@@ -214,6 +267,43 @@ def _validated_provenance(value: Any, *, source: str) -> dict[str, Any]:
     if not isinstance(normalized, dict):
         raise AssertionError("validated provenance must normalize to a dict")
     return normalized
+
+
+def _validated_target_generation(value: Any, *, source: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{source}: oracle_targets must be an object")
+    metadata = value.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"{source}: oracle_targets.metadata must be an object")
+    missing = [field for field in _TARGET_GENERATION_FIELDS if field not in metadata]
+    if missing:
+        raise ValueError(
+            f"{source}: oracle_targets.metadata missing target-generation fields: {missing!r}"
+        )
+    selected = {field: metadata[field] for field in _TARGET_GENERATION_FIELDS}
+    normalized = _json_value(selected, source=f"{source}.oracle_targets.metadata")
+    if not isinstance(normalized, dict):
+        raise AssertionError("validated target-generation config must normalize to a dict")
+    return normalized
+
+
+def _require_shared_search_identity_matches(
+    provenance: Mapping[str, Any],
+    target_generation: Mapping[str, Any],
+    *,
+    source: str,
+) -> None:
+    for field in _SHARED_SEARCH_IDENTITY_FIELDS:
+        if provenance.get(field) != target_generation.get(field):
+            raise ValueError(
+                f"{source}: provenance.{field} does not match "
+                f"oracle_targets.metadata.{field}"
+            )
+
+
+def _legacy_provenance_fingerprint(provenance: Mapping[str, Any]) -> str:
+    canonical = _canonical_json(provenance, source="legacy teacher provenance")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _canonical_json(value: Any, *, source: str) -> str:

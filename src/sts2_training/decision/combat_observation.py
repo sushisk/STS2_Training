@@ -24,6 +24,7 @@ class EnemyObservation:
     attack_damage: float
     attack_repeats: float
     powers: tuple[Mapping[str, Any], ...]
+    block: float = 0.0
 
     @property
     def incoming_attack(self) -> float:
@@ -134,6 +135,15 @@ class CombatObservation:
                     attack_damage=max(0.0, damage),
                     attack_repeats=max(0.0, repeats),
                     powers=powers,
+                    block=max(
+                        0.0,
+                        _number(
+                            enemy.get("block"),
+                            default=0.0,
+                            field=f"enemies[{position}].block",
+                            strict=strict,
+                        ),
+                    ),
                 )
             )
 

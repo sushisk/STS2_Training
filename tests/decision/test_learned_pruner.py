@@ -249,6 +249,18 @@ def test_oracle_jsonl_keeps_no_target_nodes_but_pairwise_training_excludes_them(
             }
         ],
         "oracle_targets": {
+            "metadata": {
+                "oracle_beam_width": 3,
+                "target_beam_width": 2,
+                "top_k_actions": 3,
+                "max_depth": 4,
+                "max_continuation_steps": 8,
+                "time_budget_ms": 100.0,
+                "exhaustive_root_actions": True,
+                "pruner_name": "value_top_k",
+                "pruner_version": "1",
+                "rng_sampling": "independent",
+            },
             "stable_nodes": [
                 _target("n1", 20.0, source="terminal", baseline=True, oracle=True),
                 _target(
@@ -264,7 +276,7 @@ def test_oracle_jsonl_keeps_no_target_nodes_but_pairwise_training_excludes_them(
                     "censored": True,
                     "censor_reason": "oracle_pruned_before_followup",
                 },
-            ]
+            ],
         },
     }
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
