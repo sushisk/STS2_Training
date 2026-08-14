@@ -51,3 +51,13 @@ waves, transport overhead, and receipt of the complete response frame. Do not tr
 `timeout_s` as a CPU-processing budget for post-frame JSON/DTO/audit work. Beam or other
 wide-frontier callers should chunk to `max_emulate_actions_items` and should still budget
 `timeout_s` for the number of worker waves in each chunk.
+
+## Shared result queue ownership
+
+Under v0.7's single in-flight/global-handler-lock model, a result whose `request_id` is not
+owned by the current `BranchManager.poll()` can only be a stale/late result from a request
+that was already cancelled or timed out. `poll()` discards such a stale result and keeps
+waiting for the result owned by the current poll. A regression test fixes this behavior.
+Concurrent independent polls remain outside the v0.7 contract; removing the global
+serialization would require an explicit result-routing/ownership design rather than
+relying on stale-result discard.
