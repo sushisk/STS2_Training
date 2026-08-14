@@ -41,6 +41,12 @@ class CombatActionScoreTrainingExample:
     def decision_key(self) -> tuple[str, str, int]:
         return (self.source_path, self.instance_id, self.decision_index)
 
+    @property
+    def node_score(self) -> float:
+        """Canonical name for the Oracle node score persisted as ``estimated_q``."""
+
+        return self.estimated_q
+
 
 @dataclass(frozen=True)
 class PairwiseActionScoreExample:
@@ -88,12 +94,13 @@ def load_combat_action_score_examples(
     allow_mixed_teachers: bool = False,
     require_exhaustive_root_actions: bool = True,
 ) -> tuple[list[CombatActionScoreTrainingExample], CombatActionScoreDatasetStats]:
-    """Load usable pre-action candidates and their Oracle ``estimated_q`` labels.
+    """Load usable pre-action candidates and their Oracle ``node_score`` labels.
 
-    ``no_target`` actions and actions with any unresolved RNG outcome are excluded rather
-    than converting a censored aggregate into a fabricated target. Fully resolved
-    value-bootstrap/mixed targets remain usable with explicit lower sample weights, matching
-    the existing ValueModel treatment of approximate Oracle labels.
+    Oracle v6 persists the aggregate node score under the compatibility key
+    ``estimated_q``. ``no_target`` actions and actions with any unresolved RNG outcome are
+    excluded rather than converting a censored aggregate into a fabricated target. Fully
+    resolved value-bootstrap/mixed targets remain usable with explicit lower sample
+    weights, matching the existing ValueModel treatment of approximate Oracle labels.
     """
 
     weights = {
@@ -183,7 +190,7 @@ def load_combat_action_score_examples(
                     raise ValueError(f"{source}.action.action_id does not match action_id")
                 evaluated = _bool(raw.get("evaluated"), f"{source}.evaluated")
                 target_source = _string(raw.get("target_source"), f"{source}.target_source")
-                estimated_q = raw.get("estimated_q")
+                raw_node_score = raw.get("estimated_q")
                 censored = _bool(raw.get("censored"), f"{source}.censored")
                 if censored:
                     censored_actions += 1
@@ -195,7 +202,7 @@ def load_combat_action_score_examples(
                 )
 
                 if target_source == "no_target":
-                    if estimated_q is not None:
+                    if raw_node_score is not None:
                         raise ValueError(f"{source}: no_target action must have null estimated_q")
                     no_target_actions += 1
                     continue
@@ -203,7 +210,7 @@ def load_combat_action_score_examples(
                     raise ValueError(f"{source}: unsupported target_source {target_source!r}")
                 if not evaluated:
                     raise ValueError(f"{source}: labeled action must have evaluated=true")
-                value = _finite_float(estimated_q, f"{source}.estimated_q")
+                node_score = _finite_float(raw_node_score, f"{source}.estimated_q")
                 if not _all_rng_outcomes_resolved(raw.get("rng_outcomes"), source=source):
                     unresolved_actions += 1
                     continue
@@ -217,7 +224,7 @@ def load_combat_action_score_examples(
                         action_id=action_id,
                         action=dict(action),
                         features=combat_action_score_features(dto, action),
-                        estimated_q=value,
+                        estimated_q=node_score,
                         target_source=target_source,
                         sample_weight=weights[target_source],
                         censored=censored,
@@ -243,7 +250,7 @@ def build_pairwise_action_score_examples(
     *,
     tie_tolerance: float = 1e-9,
 ) -> list[PairwiseActionScoreExample]:
-    """Convert per-action Q estimates into symmetric within-decision ranking examples."""
+    """Convert per-action Oracle node scores into symmetric within-decision rankings."""
 
     if not math.isfinite(tie_tolerance) or tie_tolerance < 0.0:
         raise ValueError("tie_tolerance must be a finite non-negative number")
@@ -254,7 +261,7 @@ def build_pairwise_action_score_examples(
     pairs: list[PairwiseActionScoreExample] = []
     for decision_key, group in by_decision.items():
         for left, right in combinations(group, 2):
-            difference = left.estimated_q - right.estimated_q
+            difference = left.node_score - right.node_score
             if abs(difference) <= tie_tolerance:
                 continue
             winner, loser = (left, right) if difference > 0.0 else (right, left)
@@ -296,13 +303,13 @@ def _all_rng_outcomes_resolved(value: Any, *, source: str) -> bool:
         if not isinstance(outcome, Mapping):
             raise ValueError(f"{field}: outcome must be an object")
         target_source = _string(outcome.get("target_source"), f"{field}.target_source")
-        raw_value = outcome.get("value")
-        if target_source == "no_target" or raw_value is None:
+        raw_node_score = outcome.get("value")
+        if target_source == "no_target" or raw_node_score is None:
             resolved = False
             continue
         if target_source not in {"terminal", "value_bootstrap"}:
             raise ValueError(f"{field}: unsupported target_source {target_source!r}")
-        _finite_float(raw_value, f"{field}.value")
+        _finite_float(raw_node_score, f"{field}.value")
     return resolved
 
 
