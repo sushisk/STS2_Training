@@ -1,11 +1,10 @@
 """Oracle collection extension that persists only root-action ValueModel inputs.
 
 The normal Oracle trace intentionally avoids embedding every branch DTO because doing so
-would make training logs grow with the full Beam tree. This module captures only the
-first fresh resolved stable/terminal states for each root-action RNG outcome and joins one
-such raw RL DTO to each root-action RNG outcome's deeper Oracle target. For ordinary
-roots that state is normally at combat depth 1; for continuation roots it can remain at
-combat depth 0 because continuation actions do not advance combat depth.
+would make training logs grow with the full Beam tree. This module captures only resolved
+stable/terminal states at combat depth 1 (the states that ValueModel can actually score
+for a root action) and joins one such raw RL DTO to each root-action RNG outcome's deeper
+Oracle target.
 
 Canonical score terminology distinguishes the isolated ValueModel ``state_score`` from
 the attributed search-tree ``node_score`` used as a training target. The v6 JSON field
@@ -90,12 +89,11 @@ class RootValueOracleCollectionResult:
 
 
 class _RootValueCapturingOracleEngine(_OracleBeamSearchEngine):
-    """Keep raw DTOs only for root-relative resolved states, never the whole Beam tree."""
+    """Keep raw DTOs only for resolved root-action states, never the whole Beam tree."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._root_state_dtos: dict[str, dict[str, Any]] = {}
-        self._root_state_combat_depths: dict[tuple[str, int], int] = {}
 
     @property
     def root_state_dtos(self) -> Mapping[str, Mapping[str, Any]]:
@@ -103,20 +101,17 @@ class _RootValueCapturingOracleEngine(_OracleBeamSearchEngine):
 
     def _score_frontier(self, item_meta, branch_results, depth=None):  # type: ignore[override]
         result = super()._score_frontier(item_meta, branch_results, depth)
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit = result
+        next_beam, newly_finished, _state_score_ms, _hit_depth, _hit_limit = result
         search_id = self._current_search_id()
         if search_id is None:
             return result
 
         for node in (*next_beam, *newly_finished):
-            if node.root_action_id is None or is_continuation_decision(node.masked_emulator_dto):
-                continue
-            key = (node.root_action_id, node.rng_id)
-            root_state_combat_depth = self._root_state_combat_depths.setdefault(
-                key,
-                node.combat_depth,
-            )
-            if node.combat_depth != root_state_combat_depth:
+            if (
+                node.root_action_id is None
+                or node.combat_depth != 1
+                or is_continuation_decision(node.masked_emulator_dto)
+            ):
                 continue
             node_id = f"{search_id}:{node.branch_id}"
             self._root_state_dtos.setdefault(
@@ -194,37 +189,27 @@ def build_root_action_value_samples(
     *,
     root_state_dtos: Mapping[str, Mapping[str, Any]],
 ) -> tuple[RootActionValueSample, ...]:
-    """Join root-relative post-state DTOs to deeper Oracle RNG node-score targets.
+    """Join root-action raw DTOs to the matching deeper Oracle RNG node-score targets.
 
-    At most one sample is emitted per root-action RNG outcome. Candidate root states are
-    restricted to the minimum fresh resolved ``combat_depth`` retained for each
-    ``(root_action_id, rng_id)``. This is combat depth 1 for ordinary roots and can be 0
-    for a continuation root because continuation actions do not advance combat depth.
-    When continuations produce more than one root-relative stable state, the state on the
-    path to ``best_node_id`` is selected. A censored/no-target outcome is retained for
-    auditability with a null target. A non-terminal ``value_bootstrap`` whose best node is
-    the root state itself is also converted to ``no_target`` because it contains no
-    deeper-search supervision. Terminal post-states normalize their absent next-decision
-    ID to ``None``.
+    At most one sample is emitted per root-action RNG outcome. When continuations produce
+    more than one combat-depth-1 stable state, the state on the path to ``best_node_id``
+    is selected. A censored/no-target outcome is retained for auditability with a null
+    target. A non-terminal ``value_bootstrap`` whose best node is the root state itself is
+    also converted to ``no_target`` because it contains no deeper-search supervision.
+    Terminal post-states normalize their absent next-decision ID to ``None``.
     """
 
     resolved = [event for event in events if isinstance(event, ResolvedNodeTrace)]
     resolved_by_id = {node.node_id: node for node in resolved}
-    retained_by_key: dict[tuple[str, int], list[ResolvedNodeTrace]] = defaultdict(list)
+    candidates_by_key: dict[tuple[str, int], list[ResolvedNodeTrace]] = defaultdict(list)
     for node in resolved:
         if (
             node.root_action_id is not None
+            and node.combat_depth == 1
             and node.state_score_is_fresh
             and node.node_id in root_state_dtos
         ):
-            retained_by_key[(node.root_action_id, node.rng_id)].append(node)
-
-    candidates_by_key: dict[tuple[str, int], list[ResolvedNodeTrace]] = {}
-    for key, nodes in retained_by_key.items():
-        root_state_combat_depth = min(node.combat_depth for node in nodes)
-        candidates_by_key[key] = [
-            node for node in nodes if node.combat_depth == root_state_combat_depth
-        ]
+            candidates_by_key[(node.root_action_id, node.rng_id)].append(node)
 
     samples: list[RootActionValueSample] = []
     for action_target in targets.root_actions:
@@ -241,7 +226,7 @@ def build_root_action_value_samples(
             if dto is None:
                 continue
 
-            target_node_score = outcome.value
+            target_node_score = outcome.node_score
             target_source = outcome.target_source
             terminal_reached = outcome.terminal_reached
             censored = outcome.censored
