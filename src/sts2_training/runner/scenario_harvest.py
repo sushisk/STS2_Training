@@ -301,7 +301,7 @@ def harvest_scenario_records_from_jsonl(
         combat_start_dtos = combat_start_dtos[:-1]
 
     source_sha = _file_sha256(path)
-    completed = run_result is not None
+    completed = is_completed_run_log(path)
     god_mode_raw = None if run_result is None else run_result.get("god_mode")
     god_mode = god_mode_raw if isinstance(god_mode_raw, bool) else None
     if god_mode is True:
@@ -311,7 +311,7 @@ def harvest_scenario_records_from_jsonl(
     elif god_mode is False:
         collection_mode = "normal_policy"
         dataset_role = "normal_policy"
-        promotion_eligible = True
+        promotion_eligible = completed
     else:
         collection_mode = "unknown"
         dataset_role = "unknown"
