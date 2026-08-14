@@ -6,15 +6,15 @@
 
 ## 1. 概要
 
-`StableFrontierPruner` は ordered stable frontier から survivor index を選ぶ public seam である。baseline は `ValueTopKPruner`、learned runtime は `LinearStableFrontierPruner`、RL exploration は `PlackettLuceLinearStableFrontierPruner` を使う。
+`StableFrontierPruner` は、`BeamSearchEngine` が作った ordered stable frontier から survivor index を選ぶ public seam である。baseline は `ValueTopKPruner`、learned runtime は `LinearStableFrontierPruner`、RL exploration は `PlackettLuceLinearStableFrontierPruner` を使う。
 
 learned pruner の current contract は artifact schema `2`、feature schema `2`、node-view schema `1`。resource-aware RL trajectory は schema `3` で、paired baseline/learned outcome に terminal HP と potion retention を加えた reward を保存する。
 
 ## 2. Architecture
 
-`StablePruneNodeView` は `value`、`root_action_id`、depth、terminal、action type、policy rank/score、post-coverage rank、candidate source などを持つ immutable view である。`StablePruneContext` は search/prune step、beam width、depth budget、remaining time を持つ。`pruner_features.py` はこれらから 30 個の schema-v2 feature を作る。
+`StablePruneNodeView` schema は `STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION = 1`。`value`、`root_action_id`、depth、terminal、action type、policy rank/score、post-coverage rank、candidate source などを持つ immutable view である。`StablePruneContext` は search/prune step、beam width、depth budget、remaining time を持つ。`pruner_features.py` の `PRUNER_FEATURE_SCHEMA_VERSION = 2` は 30 個の feature を固定する。
 
-`pruner_training_data.py` は Oracle JSONL から supervised pairwise examples を作る。`pruner_rl.py` は behavior artifact SHA、frontier score、sampled survivor order、selection log probability などを記録する。Oracle target/provenance は [04_oracle.md](04_oracle.md) を参照する。
+`pruner_training_data.py` は Oracle JSONL から supervised pairwise examples を作る。`pruner_rl.py` は behavior artifact SHA と selection log probability を含む `PrunerRLStep` を記録する。Oracle target/provenance は [04_oracle.md](04_oracle.md) を参照する。
 
 resource evaluator は version `1` で、terminal snapshot を `CombatResourceSnapshot(hp, max_hp, potion_count, initial_potion_count)` として固定する。`potions` は slot array のため `null` を empty slot として許可し、non-null mapping の数だけを current potion count とする。
 
@@ -32,24 +32,49 @@ reward = outcome_delta
 
 outcome は victory/win=`1.0`、defeat/loss=`0.0`。どちらかが不明なら reward は作らない。resource quality は `[0, 1]` なので resource term は `[-0.25, 0.25]` に収まり、terminal win/loss の outcome delta `±1` を resource term 単独で反転しない。
 
-`ResourceCapturingABRunner` は paired A/B の terminal DTO を arm ごとに capture し、scenario 開始時の occupied potion 数を共通 denominator にして terminal resource fields を付与する。capture state は runner instance が所有する。
-
-RL updater は behavior artifact/schema、node-view schema、sampled index order、temperature/sampler seed、selection log probability、paired result/reward decomposition、resource evaluator constants を検証し、意味の違う trajectory を fail closed で拒否する。
+`ResourceCapturingABRunner` は paired A/B の terminal DTO を arm ごとに capture し、scenario 開始時の occupied potion 数を共通 denominator にして terminal resource fields を付与する。capture state は runner instance が所有する。v3 updater の reward contract は `validate_reward_record()` から resource field と outcome/cost decomposition を再検証する。
 
 ## 3. API
 
 ```python
 class StableFrontierPruner:
-    def select(self, frontier, *, k: int, context: StablePruneContext) -> list[int]
+    name = "stable_frontier_pruner"
+    version = "1"
+    def select(
+        self,
+        frontier: Sequence[StablePruneNodeView],
+        *,
+        k: int,
+        context: StablePruneContext,
+    ) -> list[int]
 
+class ValueTopKPruner(StableFrontierPruner):
+    name = "value_top_k"
+    version = "1"
+```
+
+```python
+stable_pruner_feature_matrix(
+    frontier: Sequence[StablePruneNodeView],
+    *,
+    context: StablePruneContext,
+) -> list[tuple[float, ...]]
+```
+
+```python
 class LinearStableFrontierPruner(StableFrontierPruner):
     @classmethod
     def from_weights_file(cls, path: str | Path) -> "LinearStableFrontierPruner"
     def frontier_scores(self, frontier, *, context) -> list[float]
+    def select(self, frontier, *, k: int, context) -> list[int]
 
 class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
     @classmethod
     def from_weights_file(cls, path, *, temperature=1.0, seed=0, collector=None)
+    def select(self, frontier, *, k: int, context) -> list[int]
+
+plackett_luce_log_probability(scores, sampled_indices, *, temperature) -> float
+plackett_luce_logprob_gradient(scores, feature_rows, sampled_indices, *, temperature, scale) -> tuple[float, ...]
 ```
 
 ```python
@@ -60,19 +85,18 @@ class CombatResourceSnapshot:
     potion_count: int
     initial_potion_count: int
 
-combat_resource_snapshot(dto, *, initial_potion_count: int) -> CombatResourceSnapshot
+combat_resource_snapshot(
+    dto: Mapping[str, Any],
+    *,
+    initial_potion_count: int,
+) -> CombatResourceSnapshot
 combat_resource_quality(snapshot: CombatResourceSnapshot) -> float
 paired_pruner_reward(
-    pair,
+    pair: Any,
     *,
     node_cost_weight: float = 0.0,
     beam_ms_cost_weight: float = 0.0,
 ) -> PairedPrunerReward | None
-```
-
-```python
-plackett_luce_log_probability(scores, sampled_indices, *, temperature) -> float
-plackett_luce_logprob_gradient(scores, feature_rows, sampled_indices, *, temperature, scale) -> tuple[float, ...]
 ```
 
 ## 4. 使用例
