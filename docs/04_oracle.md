@@ -37,7 +37,13 @@ scenario harvest は `HARVEST_MANIFEST_SCHEMA_VERSION = 1`。split は `source_r
 ```python
 @dataclass(frozen=True)
 class OracleCollectionConfig:
-    beam_config: BeamSearchConfig
+    beam_config: BeamSearchConfig = field(
+        default_factory=lambda: BeamSearchConfig(
+            beam_width=32,
+            top_k_actions=8,
+            max_depth=4,
+        )
+    )
     target_beam_width: int = 8
     exhaustive_root_actions: bool = True
     rng_sampling: str = "independent"
