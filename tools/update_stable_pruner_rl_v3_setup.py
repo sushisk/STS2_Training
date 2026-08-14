@@ -1,0 +1,3 @@
+import update_stable_pruner_rl_v2_impl as impl
+from sts2_training.runner.stable_pruner_rl_reward_validation import validate_reward_record
+impl._validate_reward_contract = validate_reward_record
