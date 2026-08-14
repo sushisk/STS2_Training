@@ -2,59 +2,75 @@
 
 ## 0. 文章の目的
 
-この文書は `decision/stable_pruner.py`、`learned_pruner.py`、`pruner_features.py`、`pruner_training_data.py`、`pruner_rl.py` の実装 contract を説明する。対象は stable/resolved frontier の survivor 選択だけであり、Beam Search 全体は [02_decision_core.md](02_decision_core.md) を参照する。
+この文書は `decision/stable_pruner.py`、`learned_pruner.py`、`pruner_features.py`、`pruner_training_data.py`、`pruner_rl.py` と runner 側の stable-pruner RL trajectory / reward を説明する。Beam Search 全体は [02_decision_core.md](02_decision_core.md)、実行入口は [07_runner_cli.md](07_runner_cli.md) を参照する。
 
 ## 1. 概要
 
-`StableFrontierPruner` は、`BeamSearchEngine` が作った ordered stable frontier から残す node index を選ぶ public seam である。入力は immutable な `StablePruneNodeView` と `StablePruneContext` のみで、`BeamNode`、DTO payload、branch id、rng id、action payload、Whole Run capacity state は渡されない。
+`StableFrontierPruner` は ordered stable frontier から survivor index を選ぶ public seam である。baseline は `ValueTopKPruner`、learned runtime は `LinearStableFrontierPruner`、RL exploration は `PlackettLuceLinearStableFrontierPruner` を使う。
 
-baseline は `ValueTopKPruner` で、`state_score` 降順に top K を返す。learned runtime は `LinearStableFrontierPruner` で、artifact schema v2 と feature schema v2 を検証してから dependency-free に `frontier_score` を計算する。RL exploration は `PlackettLuceLinearStableFrontierPruner` が同じ linear score から ordered sample without replacement を行う。
+learned pruner の current contract は artifact schema `2`、feature schema `2`、node-view schema `1`。resource-aware RL trajectory は schema `3` で、paired baseline/learned outcome に terminal HP と potion retention を加えた reward を保存する。
 
 ## 2. Architecture
 
-`StablePruneNodeView` schema は `STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION = 1` である。フィールドは `value`、`root_action_id`、`depth`、`combat_depth`、`continuation_steps`、`terminal`、`action_type`、`policy_rank`、`policy_score`、`post_coverage_rank`、`candidate_source`。canonical property として `state_score`、`action_rank`、`action_score` を持つ。
+`StablePruneNodeView` は `value`、`root_action_id`、depth、terminal、action type、policy rank/score、post-coverage rank、candidate source などを持つ immutable view である。`StablePruneContext` は search/prune step、beam width、depth budget、remaining time を持つ。`pruner_features.py` はこれらから 30 個の schema-v2 feature を作る。
 
-`StablePruneContext` は `search_id`、`prune_step_id`、`phase`、`beam_width`、`max_depth`、`depths_completed`、`remaining_time_ms` を保持する。runtime の通常呼び出しでは `k == context.beam_width` である。
+`pruner_training_data.py` は Oracle JSONL から supervised pairwise examples を作る。`pruner_rl.py` は behavior artifact SHA、frontier score、sampled survivor order、selection log probability などを記録する。Oracle target/provenance は [04_oracle.md](04_oracle.md) を参照する。
 
-`pruner_features.py` の `PRUNER_FEATURE_SCHEMA_VERSION = 2` は 30 個の feature を固定する。内容は node state score、frontier-relative value stats/rank、root action group stats、depth/terminal、policy rank/score missingness、post coverage rank、candidate source、coarse action type、beam width、frontier size である。
+resource evaluator は version `1` で、terminal snapshot を `CombatResourceSnapshot(hp, max_hp, potion_count, initial_potion_count)` として固定する。`potions` は slot array のため `null` を empty slot として許可し、non-null mapping の数だけを current potion count とする。
 
-`pruner_training_data.py` は Oracle JSONL から `PrunerFrontierTrainingExample` と pairwise examples を作る。`no_target` は pairwise label に使わず、terminal/value_bootstrap には configurable weight を付ける。`pruner_rl.py` は behavior artifact SHA と selection log probability を含む `PrunerRLStep` を記録する。
+```text
+hp_fraction = clamp(hp / max_hp, 0, 1)
+potion_fraction = 1                                           if initial_potion_count == 0
+                  clamp(potion_count / initial_potion_count)  otherwise
+resource_quality = 0.8 * hp_fraction + 0.2 * potion_fraction
+
+reward = outcome_delta
+       + 0.25 * resource_quality_delta
+       - node_cost_weight * nodes_expanded_delta
+       - beam_ms_cost_weight * beam_ms_delta
+```
+
+outcome は victory/win=`1.0`、defeat/loss=`0.0`。どちらかが不明なら reward は作らない。resource quality は `[0, 1]` なので resource term は `[-0.25, 0.25]` に収まり、terminal win/loss の outcome delta `±1` を resource term 単独で反転しない。
+
+`ResourceCapturingABRunner` は paired A/B の terminal DTO を arm ごとに capture し、scenario 開始時の occupied potion 数を共通 denominator にして terminal resource fields を付与する。capture state は runner instance が所有する。
+
+RL updater は behavior artifact/schema、node-view schema、sampled index order、temperature/sampler seed、selection log probability、paired result/reward decomposition、resource evaluator constants を検証し、意味の違う trajectory を fail closed で拒否する。
 
 ## 3. API
 
 ```python
 class StableFrontierPruner:
-    name = "stable_frontier_pruner"
-    version = "1"
-    def select(self, frontier: Sequence[StablePruneNodeView], *, k: int, context: StablePruneContext) -> list[int]
+    def select(self, frontier, *, k: int, context: StablePruneContext) -> list[int]
 
-class ValueTopKPruner(StableFrontierPruner):
-    name = "value_top_k"
-    version = "1"
-```
-
-```python
-stable_pruner_feature_matrix(
-    frontier: Sequence[StablePruneNodeView],
-    *,
-    context: StablePruneContext,
-) -> list[tuple[float, ...]]
-```
-
-```python
 class LinearStableFrontierPruner(StableFrontierPruner):
     @classmethod
     def from_weights_file(cls, path: str | Path) -> "LinearStableFrontierPruner"
     def frontier_scores(self, frontier, *, context) -> list[float]
-    def select(self, frontier, *, k: int, context) -> list[int]
-```
 
-```python
 class PlackettLuceLinearStableFrontierPruner(StableFrontierPruner):
     @classmethod
     def from_weights_file(cls, path, *, temperature=1.0, seed=0, collector=None)
-    def select(self, frontier, *, k: int, context) -> list[int]
+```
 
+```python
+@dataclass(frozen=True)
+class CombatResourceSnapshot:
+    hp: float
+    max_hp: float
+    potion_count: int
+    initial_potion_count: int
+
+combat_resource_snapshot(dto, *, initial_potion_count: int) -> CombatResourceSnapshot
+combat_resource_quality(snapshot: CombatResourceSnapshot) -> float
+paired_pruner_reward(
+    pair,
+    *,
+    node_cost_weight: float = 0.0,
+    beam_ms_cost_weight: float = 0.0,
+) -> PairedPrunerReward | None
+```
+
+```python
 plackett_luce_log_probability(scores, sampled_indices, *, temperature) -> float
 plackett_luce_logprob_gradient(scores, feature_rows, sampled_indices, *, temperature, scale) -> tuple[float, ...]
 ```
@@ -62,32 +78,26 @@ plackett_luce_logprob_gradient(scores, feature_rows, sampled_indices, *, tempera
 ## 4. 使用例
 
 ```python
-from sts2_training.decision import (
-    LinearStableFrontierPruner,
-    StablePruneContext,
-    StablePruneNodeView,
+from sts2_training.runner.combat_resource_reward import (
+    combat_resource_quality,
+    combat_resource_snapshot,
 )
 
-frontier = [
-    StablePruneNodeView(3.0, "a", 1, 1, 0, False, "card", 0, 1.2, 0, "policy"),
-    StablePruneNodeView(2.5, "b", 1, 1, 0, False, "system", 1, 0.4, 1, "policy"),
-]
-context = StablePruneContext(
-    search_id="s1",
-    prune_step_id="p1",
-    phase="stable",
-    beam_width=1,
-    max_depth=3,
-    depths_completed=1,
-    remaining_time_ms=None,
+snapshot = combat_resource_snapshot(
+    {
+        "hp": 60,
+        "maxHp": 80,
+        "potions": [{"slot": 0, "potion_id": "A"}, None, None],
+    },
+    initial_potion_count=2,
 )
-
-pruner = LinearStableFrontierPruner.from_weights_file(
-    "tools/output/stable_pruner_weights.json"
-)
-survivor_indices = pruner.select(frontier, k=1, context=context)
+quality = combat_resource_quality(snapshot)
 ```
+
+stable-pruner の学習/RL/A-B 実行例は [07_runner_cli.md](07_runner_cli.md) を参照する。
 
 ## 5. 補足説明
 
-古い docs には Oracle v3/v4 という説明が残っているが、現在の `oracle_log.py` は `ORACLE_RECORD_SCHEMA_VERSION = 6` である。learned pruner 側の current contract は artifact schema `2`、feature schema `2`、node-view schema `1`。実行 CLI と学習 workflow は [07_runner_cli.md](07_runner_cli.md)、Oracle target の意味は [04_oracle.md](04_oracle.md) を参照する。
+current contract は learned-pruner artifact schema `2`、feature schema `2`、node-view schema `1`、RL trajectory schema `3`、resource evaluator version `1`。trajectory v3 は terminal resource fields と evaluator metadata を含むため、v2 trajectory を v3 として読み替えず再 collection する。
+
+resource reward の係数は evaluator contract の一部である。意味を変える場合は evaluator/trajectory の versioning と updater validation を同時に更新する。Beam/Value/Policy の score semantics は [02_decision_core.md](02_decision_core.md)、Oracle supervised target は [04_oracle.md](04_oracle.md) を参照する。
