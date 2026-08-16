@@ -126,6 +126,50 @@ class ResolvedNodeTrace:
 
 
 @dataclass(frozen=True)
+class BranchFaultTrace:
+    """A proposed branch whose `emulate_actions` result never became a Beam node.
+
+    Recorded at the exact point `BeamSearchEngine._score_frontier` would otherwise drop
+    the branch silently - whenever the frontier still has other branches that did resolve,
+    nothing else in the search loop notices this branch's fate. `status`/`fault_kind`/
+    `detail` are echoed verbatim from the RL `emulate_actions` branch result (RL's own
+    Search Coordinator already classifies `fault_kind`; this trace does not reclassify it),
+    with ``fault_kind=None`` when the branch result carried no fault_kind at all (e.g. it
+    was simply absent from the batch response).
+    """
+
+    search_id: str
+    node_id: str
+    parent_node_id: str
+    branch_id: str
+    parent_branch_id: str
+    root_action_id: str | None
+    rng_id: int
+    depth: int
+    combat_depth: int
+    continuation_steps: int
+    action_id: str
+    action_type: str | None
+    action: JsonObject | None
+    policy_rank: int | None
+    policy_score: float | None
+    post_coverage_rank: int | None
+    candidate_source: str | None
+    status: str
+    fault_kind: str | None
+    detail: str | None
+    event_type: str = field(default="branch_fault", init=False)
+
+    @property
+    def action_rank(self) -> int | None:
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        return self.policy_score
+
+
+@dataclass(frozen=True)
 class StablePruneNodeTrace:
     node_id: str
     parent_node_id: str
@@ -289,6 +333,7 @@ SearchTraceEvent: TypeAlias = (
     SearchTraceStart
     | PolicyProposalTrace
     | ResolvedNodeTrace
+    | BranchFaultTrace
     | StablePruneTrace
     | SearchTraceEnd
 )

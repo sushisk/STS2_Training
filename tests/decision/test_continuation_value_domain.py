@@ -65,8 +65,8 @@ class ContinuationValueDomainTest(unittest.TestCase):
             }
         }
 
-        next_beam, finished, _ms, _depth, _limit = engine._score_frontier(  # noqa: SLF001
-            [(parent, ActionCandidate("pick"), "b1", 1)], branch_results
+        next_beam, finished, _ms, _depth, _limit, _faulted = engine._score_frontier(  # noqa: SLF001
+            [(parent, ActionCandidate("pick"), "b1", 1)], branch_results, search_id="s"
         )
 
         self.assertEqual(value.batches, [])
@@ -108,8 +108,8 @@ class ContinuationValueDomainTest(unittest.TestCase):
             }
         }
 
-        next_beam, finished, _ms, hit_depth, _limit = engine._score_frontier(  # noqa: SLF001
-            [(parent, ActionCandidate("confirm"), "b1", 1)], branch_results
+        next_beam, finished, _ms, hit_depth, _limit, _faulted = engine._score_frontier(  # noqa: SLF001
+            [(parent, ActionCandidate("confirm"), "b1", 1)], branch_results, search_id="s"
         )
 
         self.assertEqual(value.batches, [[stable_dto]])

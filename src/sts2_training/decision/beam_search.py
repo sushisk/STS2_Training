@@ -40,6 +40,7 @@ from sts2_training.decision.combat_decision import (
 )
 from sts2_training.decision.policy import PolicyModel
 from sts2_training.decision.search_trace import (
+    BranchFaultTrace,
     PolicyCandidateTrace,
     PolicyProposalTrace,
     SearchTraceCollector,
@@ -146,6 +147,7 @@ class BeamSearchStats:
     depths_completed: int = 0
     nodes_expanded: int = 0
     branches_created: int = 0
+    branches_faulted: int = 0
     policy_ms: float = 0.0
     emulate_actions_ms: float = 0.0
     value_ms: float = 0.0
@@ -385,8 +387,10 @@ class BeamSearchEngine:
                     state_score_ms,
                     hit_max_depth,
                     hit_continuation_limit,
-                ) = self._score_frontier(item_meta, branch_results)
+                    branches_faulted,
+                ) = self._score_frontier(item_meta, branch_results, search_id=search_id)
                 stats.value_ms += state_score_ms
+                stats.branches_faulted += branches_faulted
                 stats.nodes_expanded += len(branch_results)
                 if (
                     branch_results
@@ -833,7 +837,9 @@ class BeamSearchEngine:
         item_meta: Sequence[tuple[BeamNode, Any, str, int]],
         branch_results: Mapping[str, Any],
         depth: int | None = None,
-    ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool]:
+        *,
+        search_id: str,
+    ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool, int]:
         del depth
         cfg = self.config
         resolved: list[
@@ -847,15 +853,39 @@ class BeamSearchEngine:
                 Any,
             ]
         ] = []
+        branches_faulted = 0
         for node, candidate, branch_id, rng_id in item_meta:
             result = branch_results.get(branch_id)
             if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
+                self._record_branch_fault(
+                    search_id,
+                    node,
+                    candidate,
+                    branch_id,
+                    rng_id,
+                    status=result.get("status") if isinstance(result, Mapping) else None,
+                    fault_kind=result.get("fault_kind") if isinstance(result, Mapping) else None,
+                    detail=result.get("error") if isinstance(result, Mapping) else None,
+                )
+                branches_faulted += 1
                 continue
             dto = result.get("masked_emulator_dto")
             if isinstance(dto, Mapping):
                 resolved.append(
                     (node, candidate, branch_id, rng_id, result, dto, result.get("status"))
                 )
+            else:
+                self._record_branch_fault(
+                    search_id,
+                    node,
+                    candidate,
+                    branch_id,
+                    rng_id,
+                    status="invalid_masked_emulator_dto",
+                    fault_kind=None,
+                    detail=None,
+                )
+                branches_faulted += 1
 
         state_score_entries = [
             entry
@@ -951,7 +981,74 @@ class BeamSearchEngine:
             else:
                 next_beam.append(new_node)
 
-        return next_beam, newly_finished, state_score_ms, hit_max_depth, hit_continuation_limit
+        return (
+            next_beam,
+            newly_finished,
+            state_score_ms,
+            hit_max_depth,
+            hit_continuation_limit,
+            branches_faulted,
+        )
+
+    def _record_branch_fault(
+        self,
+        search_id: str,
+        node: BeamNode,
+        candidate: Any,
+        branch_id: str,
+        rng_id: int,
+        *,
+        status: str | None,
+        fault_kind: str | None,
+        detail: str | None,
+    ) -> None:
+        """Log and trace a branch whose `emulate_actions` result never resolved.
+
+        Called from the exact spots that would otherwise `continue` past the fault with
+        no record at all - the only way this class of failure stays invisible when some
+        other branch in the same frontier happens to succeed.
+        """
+
+        status_label = status if isinstance(status, str) and status else "missing_result"
+        action_type = action_type_for_id(node.masked_emulator_dto, candidate.action_id)
+        action = _action_for_id(node.masked_emulator_dto, candidate.action_id)
+        log_level = logging.INFO if fault_kind == "validation_rejection" else logging.WARNING
+        _LOG.log(
+            log_level,
+            "beam search branch %s (parent=%s, action_id=%s, action_type=%s) did not "
+            "resolve: status=%s fault_kind=%s detail=%s",
+            branch_id,
+            node.branch_id,
+            candidate.action_id,
+            action_type,
+            status_label,
+            fault_kind,
+            detail,
+        )
+        self._record_trace(
+            BranchFaultTrace(
+                search_id=search_id,
+                node_id=f"{search_id}:{branch_id}",
+                parent_node_id=f"{search_id}:{node.branch_id}",
+                branch_id=branch_id,
+                parent_branch_id=node.branch_id,
+                root_action_id=node.root_action_id or candidate.action_id,
+                rng_id=rng_id,
+                depth=node.depth + 1,
+                combat_depth=node.combat_depth,
+                continuation_steps=node.continuation_steps,
+                action_id=candidate.action_id,
+                action_type=action_type,
+                action=None if action is None else dict(action),
+                policy_rank=candidate.action_rank,
+                policy_score=candidate.action_score,
+                post_coverage_rank=candidate.post_coverage_rank,
+                candidate_source=candidate.candidate_source,
+                status=status_label,
+                fault_kind=fault_kind,
+                detail=detail,
+            )
+        )
 
     async def _release_unneeded_whole_run_branches(
         self,

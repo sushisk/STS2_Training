@@ -12,6 +12,7 @@ from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine
 from sts2_training.decision.policy import PriorHeuristicPolicy
+from sts2_training.decision.search_trace import BranchFaultTrace, InMemorySearchTraceCollector
 from sts2_training.decision.value import HeuristicValueFunction
 
 
@@ -233,6 +234,53 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.best_root_action_id, "strike")
         self.assertEqual(result.reason, "max_depth")
         self.assertEqual(result.stats.branches_created, 2)
+
+    async def test_branch_fault_is_counted_even_when_a_sibling_branch_succeeds(self) -> None:
+        # Before branches_faulted existed, a fault on one candidate ("strike") was
+        # completely invisible whenever a sibling candidate ("end") still resolved -
+        # the search finished normally with zero record that anything had failed.
+        client, connection = await self._client()
+        connection.emulate_results = {
+            ("root", "strike"): {
+                "status": "faulted",
+                "error": "boom",
+                "fault_kind": "action_fault",
+            },
+            ("root", "end"): {"status": "completed", "decision_point_id": "d-b2", "masked_emulator_dto": _alive_dto()},
+        }
+        engine = self._engine(client, max_depth=1)
+
+        result = await engine.search("inst-001", _root_decision(_COMBAT_ACTIONS), timeout_s=5.0)
+
+        self.assertEqual(result.best_root_action_id, "end")
+        self.assertEqual(result.stats.branches_created, 2)
+        self.assertEqual(result.stats.branches_faulted, 1)
+
+    async def test_branch_fault_is_traced_with_its_status_and_fault_kind(self) -> None:
+        client, connection = await self._client()
+        connection.emulate_results = {
+            ("root", "strike"): {
+                "status": "faulted",
+                "error": "boom",
+                "fault_kind": "action_fault",
+            },
+            ("root", "end"): {"status": "completed", "decision_point_id": "d-b2", "masked_emulator_dto": _alive_dto()},
+        }
+        engine = self._engine(client, max_depth=1)
+        collector = InMemorySearchTraceCollector()
+        engine.trace_collector = collector
+
+        await engine.search("inst-001", _root_decision(_COMBAT_ACTIONS), timeout_s=5.0)
+
+        fault_events = [event for event in collector.events if isinstance(event, BranchFaultTrace)]
+        self.assertEqual(len(fault_events), 1)
+        fault = fault_events[0]
+        self.assertEqual(fault.action_id, "strike")
+        self.assertEqual(fault.root_action_id, "strike")
+        self.assertEqual(fault.parent_branch_id, "root")
+        self.assertEqual(fault.status, "faulted")
+        self.assertEqual(fault.fault_kind, "action_fault")
+        self.assertEqual(fault.detail, "boom")
 
     async def test_multi_depth_finds_a_deferred_win(self) -> None:
         client, connection = await self._client()

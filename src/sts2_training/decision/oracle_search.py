@@ -264,11 +264,12 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
             )
         return result
 
-    def _score_frontier(self, item_meta, branch_results, depth=None):  # type: ignore[override]
-        result = super()._score_frontier(item_meta, branch_results, depth)
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit = result
-        search_id = self._current_search_id()
-        if search_id is not None and self.trace_collector is not None:
+    def _score_frontier(self, item_meta, branch_results, depth=None, *, search_id: str):  # type: ignore[override]
+        result = super()._score_frontier(
+            item_meta, branch_results, depth, search_id=search_id
+        )
+        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit, _branches_faulted = result
+        if self.trace_collector is not None:
             finished_object_ids = {id(node) for node in newly_finished}
             for node in (*next_beam, *newly_finished):
                 continuation = is_continuation_decision(node.masked_emulator_dto)
@@ -338,14 +339,6 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                     )
                 )
         return result
-
-    def _current_search_id(self) -> str | None:
-        collector = self.trace_collector
-        events = getattr(collector, "events", ())
-        for event in reversed(events):
-            if isinstance(event, SearchTraceStart):
-                return event.search_id
-        return None
 
 
 class BudgetedOracleCollector:
