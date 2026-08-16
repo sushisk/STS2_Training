@@ -526,6 +526,7 @@ class BeamSearchEngine:
                 depths_completed=result.stats.depths_completed,
                 nodes_expanded=result.stats.nodes_expanded,
                 branches_created=result.stats.branches_created,
+                branches_faulted=result.stats.branches_faulted,
             )
         )
         return result
