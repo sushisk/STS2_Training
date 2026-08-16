@@ -378,7 +378,7 @@ class BeamSearchEngine:
                     reason = "active_branch_capacity"
                     break
 
-                branch_results, fatal_reason = await self._emulate_depth_batch(
+                branch_results, emulated_item_meta, fatal_reason = await self._emulate_depth_batch(
                     instance_id, items, item_meta, all_branch_ids, stats, search_deadline
                 )
                 (
@@ -388,7 +388,9 @@ class BeamSearchEngine:
                     hit_max_depth,
                     hit_continuation_limit,
                     branches_faulted,
-                ) = self._score_frontier(item_meta, branch_results, search_id=search_id)
+                ) = self._score_frontier(
+                    emulated_item_meta, branch_results, search_id=search_id
+                )
                 stats.value_ms += state_score_ms
                 stats.branches_faulted += branches_faulted
                 stats.nodes_expanded += len(branch_results)
@@ -793,7 +795,11 @@ class BeamSearchEngine:
         all_branch_ids: list[str],
         stats: BeamSearchStats,
         deadline: float,
-    ) -> tuple[dict[str, Any], str | None]:
+    ) -> tuple[
+        dict[str, Any],
+        list[tuple[BeamNode, CandidateProposal, str, int]],
+        str | None,
+    ]:
         cfg = self.config
         batch_size = cfg.max_batch_size
         server_limit = _server_batch_limit(self._client)
@@ -801,10 +807,11 @@ class BeamSearchEngine:
             batch_size = min(batch_size, server_limit)
 
         branch_results: dict[str, Any] = {}
+        emulated_item_meta: list[tuple[BeamNode, CandidateProposal, str, int]] = []
         for start in range(0, len(items), batch_size):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return branch_results, "time_budget"
+                return branch_results, emulated_item_meta, "time_budget"
             chunk_items = items[start : start + batch_size]
             chunk_meta = item_meta[start : start + batch_size]
             t0 = time.monotonic()
@@ -825,12 +832,17 @@ class BeamSearchEngine:
                     if isinstance(fault_kind, str) and fault_kind
                     else type(exc).__name__
                 )
-                return branch_results, f"emulate_actions_rejected:{detail}"
+                return (
+                    branch_results,
+                    emulated_item_meta,
+                    f"emulate_actions_rejected:{detail}",
+                )
             stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
             all_branch_ids.extend(meta[2] for meta in chunk_meta)
             stats.branches_created += len(chunk_meta)
+            emulated_item_meta.extend(chunk_meta)
             branch_results.update(response.get("branch_results") or {})
-        return branch_results, None
+        return branch_results, emulated_item_meta, None
 
     def _score_frontier(
         self,
@@ -1012,6 +1024,9 @@ class BeamSearchEngine:
         status_label = status if isinstance(status, str) and status else "missing_result"
         action_type = action_type_for_id(node.masked_emulator_dto, candidate.action_id)
         action = _action_for_id(node.masked_emulator_dto, candidate.action_id)
+        is_continuation_action = action_type in CONTINUATION_ACTION_TYPES
+        combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
+        continuation_steps = node.continuation_steps + 1 if is_continuation_action else 0
         log_level = logging.INFO if fault_kind == "validation_rejection" else logging.WARNING
         _LOG.log(
             log_level,
@@ -1035,8 +1050,8 @@ class BeamSearchEngine:
                 root_action_id=node.root_action_id or candidate.action_id,
                 rng_id=rng_id,
                 depth=node.depth + 1,
-                combat_depth=node.combat_depth,
-                continuation_steps=node.continuation_steps,
+                combat_depth=combat_depth,
+                continuation_steps=continuation_steps,
                 action_id=candidate.action_id,
                 action_type=action_type,
                 action=None if action is None else dict(action),
