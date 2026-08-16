@@ -19,6 +19,8 @@ from _paired_rl_helpers import stop_paired_rl as _stop_paired_rl
 
 pytestmark = pytest.mark.integration
 
+_FORBIDDEN_INSTANCE_ID_KEYS = frozenset({"cardInstanceId", "card_instance_id"})
+
 
 def _acrobatics_config() -> dict:
     """Mirror Emulator #25's duplicate-CardId case with a normal mixed hand.
@@ -79,26 +81,44 @@ def _find_card_action(decision: dict, card_id: str) -> dict:
     )
 
 
+def _assert_no_instance_identity(value: object, *, path: str = "masked_emulator_dto") -> None:
+    """Fail if Emulator-only concrete card identity leaks anywhere into Training DTOs."""
+
+    if isinstance(value, dict):
+        leaked_keys = _FORBIDDEN_INSTANCE_ID_KEYS.intersection(value)
+        assert not leaked_keys, (
+            f"Training-visible concrete card identity leaked at {path}: "
+            f"{sorted(leaked_keys)!r}"
+        )
+        for key, child in value.items():
+            _assert_no_instance_identity(child, path=f"{path}.{key}")
+        return
+
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _assert_no_instance_identity(child, path=f"{path}[{index}]")
+
+
 def _visible_choice_card_ids_without_instance_identity(decision: dict) -> list[str]:
     """Return Training-visible card ids and enforce the RL-internal identity boundary.
 
     Emulator #25 emits ``cardInstanceId`` at its visible card-choice boundary so RL #64
     can reconstruct the exact concrete replay prefix. RL must consume that token before
     building ``masked_emulator_dto``. Training therefore sees the card candidates but
-    never receives persistent concrete-copy identity.
+    never receives persistent concrete-copy identity anywhere in the masked DTO.
     """
 
     masked = decision["masked_emulator_dto"]
+    _assert_no_instance_identity(masked)
+
     pending_choice = masked.get("pendingChoice") or {}
     options = pending_choice.get("options") or []
     assert len(options) == 4, options
-    for option in options:
-        assert "cardInstanceId" not in option, option
-        assert "card_instance_id" not in option, option
 
     card_ids: list[str] = []
     choice_actions = [
-        action for action in _available_actions(decision)
+        action
+        for action in _available_actions(decision)
         if action.get("action_type") == "choice_card"
     ]
     assert len(choice_actions) == 4, choice_actions
@@ -106,8 +126,6 @@ def _visible_choice_card_ids_without_instance_identity(decision: dict) -> list[s
         parameters = action.get("parameters") or {}
         card_id = parameters.get("cardId")
         assert isinstance(card_id, str) and card_id
-        assert "cardInstanceId" not in parameters, parameters
-        assert "card_instance_id" not in parameters, parameters
         card_ids.append(card_id)
 
     return card_ids
