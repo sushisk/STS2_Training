@@ -10,8 +10,8 @@ import unittest
 
 from sts2_training.api.async_client import AsyncTrainingApiClient
 from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
-from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchEngine
-from sts2_training.decision.policy import PriorHeuristicPolicy
+from sts2_training.decision.beam_search import BeamNode, BeamSearchConfig, BeamSearchEngine
+from sts2_training.decision.policy import ActionCandidate, PriorHeuristicPolicy
 from sts2_training.decision.search_trace import BranchFaultTrace, InMemorySearchTraceCollector
 from sts2_training.decision.value import HeuristicValueFunction
 
@@ -278,9 +278,56 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fault.action_id, "strike")
         self.assertEqual(fault.root_action_id, "strike")
         self.assertEqual(fault.parent_branch_id, "root")
+        self.assertEqual(fault.depth, 1)
+        self.assertEqual(fault.combat_depth, 1)
+        self.assertEqual(fault.continuation_steps, 0)
         self.assertEqual(fault.status, "faulted")
         self.assertEqual(fault.fault_kind, "action_fault")
         self.assertEqual(fault.detail, "boom")
+
+    async def test_continuation_branch_fault_trace_uses_child_depth_coordinates(self) -> None:
+        client, _connection = await self._client()
+        engine = self._engine(client, max_depth=2)
+        collector = InMemorySearchTraceCollector()
+        engine.trace_collector = collector
+        parent = BeamNode(
+            branch_id="b-parent",
+            parent_branch_id="root",
+            rng_id=7,
+            decision_point_id="d-choice",
+            masked_emulator_dto={
+                "mask_version": MASK_VERSION,
+                "legal_actions": [
+                    {"action_id": "pick", "action_type": "choice_card", "is_available": True}
+                ],
+            },
+            depth=2,
+            value=3.0,
+            root_action_id="play-card",
+            combat_depth=1,
+            continuation_steps=2,
+        )
+        branch_results = {
+            "b-child": {
+                "status": "faulted",
+                "error": "boom",
+                "fault_kind": "action_fault",
+            }
+        }
+
+        _next_beam, _finished, _ms, _depth, _limit, branches_faulted = engine._score_frontier(  # noqa: SLF001
+            [(parent, ActionCandidate("pick"), "b-child", 7)],
+            branch_results,
+            search_id="s",
+        )
+
+        self.assertEqual(branches_faulted, 1)
+        fault_events = [event for event in collector.events if isinstance(event, BranchFaultTrace)]
+        self.assertEqual(len(fault_events), 1)
+        fault = fault_events[0]
+        self.assertEqual(fault.depth, 3)
+        self.assertEqual(fault.combat_depth, 1)
+        self.assertEqual(fault.continuation_steps, 3)
 
     async def test_multi_depth_finds_a_deferred_win(self) -> None:
         client, connection = await self._client()
@@ -390,11 +437,16 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
         # 1st chunk ([c1, c2], containing the eventual winner c1) already succeeded.
         connection.reject_emulate_actions_from_call = 2
         engine = self._engine(client, max_depth=1, top_k_actions=3, max_batch_size=2)
+        collector = InMemorySearchTraceCollector()
+        engine.trace_collector = collector
 
         result = await engine.search("inst-001", _root_decision(three_actions), timeout_s=5.0)
 
         self.assertEqual(result.best_root_action_id, "c1")
         self.assertTrue(result.reason.startswith("emulate_actions_rejected"))
+        self.assertEqual(result.stats.branches_created, 2)
+        self.assertEqual(result.stats.branches_faulted, 0)
+        self.assertFalse(any(isinstance(event, BranchFaultTrace) for event in collector.events))
         # Two emulate_actions requests were SENT (the 2nd rejected), but only the first
         # chunk's branches actually exist on RL's side - cleanup must target only those.
         emulate_calls = [m for m in connection.messages if m["operation"] == "emulate_actions"]
@@ -407,11 +459,16 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
         client, connection = await self._client()
         connection.reject_emulate_actions = True
         engine = self._engine(client, max_depth=1)
+        collector = InMemorySearchTraceCollector()
+        engine.trace_collector = collector
 
         result = await engine.search("inst-001", _root_decision(_COMBAT_ACTIONS), timeout_s=5.0)
 
         self.assertIsNone(result.best_root_action_id)
         self.assertTrue(result.reason.startswith("emulate_actions_rejected"))
+        self.assertEqual(result.stats.branches_created, 0)
+        self.assertEqual(result.stats.branches_faulted, 0)
+        self.assertFalse(any(isinstance(event, BranchFaultTrace) for event in collector.events))
         # A rejected batch admits no Branches on RL's side - nothing to clean up.
         self.assertEqual(connection.cancel_calls, [])
         self.assertEqual(connection.release_calls, [])
