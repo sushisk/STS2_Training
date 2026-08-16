@@ -77,7 +77,9 @@ def _find_card_action(decision: dict, card_id: str) -> dict:
             continue
         if (action.get("parameters") or {}).get("cardId") == card_id:
             return action
-    raise AssertionError(f"missing playable card {card_id!r}: {_available_actions(decision)!r}")
+    raise AssertionError(
+        f"missing playable card {card_id!r}: {_available_actions(decision)!r}"
+    )
 
 
 def _visible_choice_identities(decision: dict) -> list[tuple[str, str]]:
@@ -89,7 +91,10 @@ def _visible_choice_identities(decision: dict) -> list[tuple[str, str]]:
         card_id = parameters.get("cardId")
         card_instance_id = parameters.get("cardInstanceId")
         assert isinstance(card_id, str) and card_id
-        assert isinstance(card_instance_id, str) and _CARD_INSTANCE_ID.fullmatch(card_instance_id)
+        assert (
+            isinstance(card_instance_id, str)
+            and _CARD_INSTANCE_ID.fullmatch(card_instance_id)
+        )
         identities.append((card_id, card_instance_id))
     return identities
 
@@ -112,15 +117,15 @@ async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
         )
         identities = _visible_choice_identities(pending)
         assert len(identities) == 4, identities
-        assert len({instance_id for _card_id, instance_id in identities}) == 4, identities
-        assert {card_id for card_id, _instance_id in identities} >= {
+        assert len({public_id for _card_id, public_id in identities}) == 4, identities
+        assert {card_id for card_id, _public_id in identities} >= {
             "NEUTRALIZE",
             "DEFEND_SILENT",
             "STRIKE_SILENT",
         }
         defend_instance_ids = [
-            instance_id
-            for card_id, instance_id in identities
+            public_id
+            for card_id, public_id in identities
             if card_id == "DEFEND_SILENT"
         ]
         assert len(defend_instance_ids) == 2, identities
@@ -128,7 +133,7 @@ async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
 
         # Training intentionally does not derive, decode, or compare these opaque
         # cardv-* values with Snapshot InstanceId. The only identity assertion here is
-        # public-domain stability/distinctness at the already-visible choice boundary.
+        # public-domain shape/distinctness at the already-visible choice boundary.
         collector = RootValueLoggingOracleCollector(
             client,
             policy=PriorHeuristicPolicy(),
@@ -159,7 +164,8 @@ async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
         root_proposals = [
             event
             for event in collected.trace
-            if isinstance(event, PolicyProposalTrace) and event.parent_branch_id == "root"
+            if isinstance(event, PolicyProposalTrace)
+            and event.parent_branch_id == "root"
         ]
         assert len(root_proposals) == 1
         rng_ids = {candidate.rng_id for candidate in root_proposals[0].candidates}
