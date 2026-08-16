@@ -53,7 +53,7 @@ from sts2_training.decision.stable_pruner import (
     StableFrontierPruner,
     StablePruneContext,
     StablePruneNodeView,
-    ValueTopKPruner,
+    StateScoreTopKPruner,
 )
 from sts2_training.decision.value import ValueModel
 
@@ -212,7 +212,7 @@ class BeamSearchEngine:
         self._policy = policy
         self._value_fn = value_fn
         self.config = config or BeamSearchConfig()
-        self._stable_pruner = stable_pruner or ValueTopKPruner()
+        self._stable_pruner = stable_pruner or StateScoreTopKPruner()
         self._trace_collector = trace_collector
         self._allocator = BranchIdAllocator()
 

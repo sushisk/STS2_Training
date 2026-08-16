@@ -13,6 +13,7 @@ from sts2_training.decision.stable_pruner import (
     StableFrontierPruner,
     StablePruneContext,
     StablePruneNodeView,
+    StateScoreTopKPruner,
     ValueTopKPruner,
 )
 from sts2_training.decision.value import ValueModel
@@ -48,7 +49,7 @@ class _FixedIndexPruner(StableFrontierPruner):
 
 def _stable_node(
     branch_id: str,
-    value: float,
+    state_score: float,
     *,
     root_action_id: str = "root-action",
     depth: int = 2,
@@ -72,7 +73,7 @@ def _stable_node(
             ]
         },
         depth=depth,
-        value=value,
+        value=state_score,
         root_action_id=root_action_id,
         combat_depth=combat_depth,
         continuation_steps=continuation_steps,
@@ -154,6 +155,8 @@ class StablePrunePublicContractTest(unittest.TestCase):
         self.assertIs(decision.StablePruneNodeView, StablePruneNodeView)
         self.assertIs(decision.StablePruneContext, StablePruneContext)
         self.assertIs(decision.StableFrontierPruner, StableFrontierPruner)
+        self.assertIs(decision.StateScoreTopKPruner, StateScoreTopKPruner)
+        self.assertIs(ValueTopKPruner, StateScoreTopKPruner)
 
     def test_view_is_immutable(self) -> None:
         view = StablePruneNodeView(
@@ -184,7 +187,10 @@ class StablePrunePublicContractTest(unittest.TestCase):
 
         self.assertEqual([node.branch_id for node in selected], ["c", "a"])
         assert pruner.frontier is not None
-        self.assertEqual([view.value for view in pruner.frontier], [1.0, 2.0, 3.0])
+        self.assertEqual(
+            [view.state_score for view in pruner.frontier],
+            [1.0, 2.0, 3.0],
+        )
         for view in pruner.frontier:
             self.assertIsInstance(view, StablePruneNodeView)
             for private_name in (
@@ -311,33 +317,33 @@ class StablePrunePublicContractTest(unittest.TestCase):
         self.assertEqual([node.kept for node in traces[1].nodes], [True, False, True])
         self.assertNotEqual(traces[0].selected_node_views(), traces[1].selected_node_views())
 
-    def test_continuation_inherited_value_is_rejected_before_pruner_call(self) -> None:
+    def test_continuation_inherited_state_score_is_rejected_before_pruner_call(self) -> None:
         pruner = _FixedIndexPruner([0])
         with self.assertRaisesRegex(RuntimeError, "continuation"):
             _prune(_engine(pruner), [_continuation_node()])
         self.assertEqual(pruner.calls, 0)
 
-    def test_value_top_k_returns_stable_ordered_indices(self) -> None:
-        views = (
+    def test_state_score_top_k_returns_stable_ordered_indices(self) -> None:
+        nodes = (
             _stable_node("a", 5.0),
             _stable_node("b", 5.0),
             _stable_node("c", 8.0),
         )
         public_views = tuple(
             StablePruneNodeView(
-                value=node.value,
+                value=node.state_score,
                 root_action_id=node.root_action_id,
                 depth=node.depth,
                 combat_depth=node.combat_depth,
                 continuation_steps=node.continuation_steps,
                 terminal=node.terminal,
                 action_type=node.action_type,
-                policy_rank=node.policy_rank,
-                policy_score=node.policy_score,
+                policy_rank=node.action_rank,
+                policy_score=node.action_score,
                 post_coverage_rank=node.post_coverage_rank,
                 candidate_source=node.candidate_source,
             )
-            for node in views
+            for node in nodes
         )
         context = StablePruneContext(
             search_id="search",
@@ -350,7 +356,7 @@ class StablePrunePublicContractTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            ValueTopKPruner().select(public_views, k=3, context=context),
+            StateScoreTopKPruner().select(public_views, k=3, context=context),
             [2, 0, 1],
         )
 

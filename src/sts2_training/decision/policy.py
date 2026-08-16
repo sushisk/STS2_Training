@@ -32,7 +32,7 @@ _SYSTEM_ACTION_TYPE = "system"
 _POTION_ACTION_TYPE = "potion"
 _CHOICE_TARGET_ACTION_TYPE = "choice_target"
 
-_ACTION_TYPE_BASE_SCORE: dict[str, float] = {
+_ACTION_TYPE_BASE_ACTION_SCORE: dict[str, float] = {
     _CHOICE_TARGET_ACTION_TYPE: 80.0,
     CARD_ACTION_TYPE: 60.0,
     CHOICE_CARD_ACTION_TYPE: 55.0,
@@ -42,7 +42,7 @@ _ACTION_TYPE_BASE_SCORE: dict[str, float] = {
     _SYSTEM_ACTION_TYPE: 10.0,
 }
 
-_CARD_TYPE_SCORE = {
+_CARD_TYPE_ACTION_SCORE = {
     "Attack": 8.0,
     "Skill": 7.0,
     "Power": 6.0,
@@ -50,7 +50,7 @@ _CARD_TYPE_SCORE = {
     "Status": -35.0,
 }
 
-_RARITY_SCORE = {
+_RARITY_ACTION_SCORE = {
     "Rare": 3.0,
     "Uncommon": 1.5,
     "Common": 0.5,
@@ -132,12 +132,12 @@ class PolicyModel:
 class PriorHeuristicPolicy(PolicyModel):
     """Cheap, state-aware action prior used before a learned policy exists.
 
-    The scorer consumes the shared normalized `CombatObservation`. It favors cards that
-    fit current danger, promotes potions under pressure, ranks targets using killability
-    and normalized enemy attack intent, and uses only canonical v1 `choice_card`
-    semantics/`optionId` identity for card-choice quality. Unknown, malformed, future, or
-    inconsistent choice metadata remains neutral. `rng`, when supplied, randomizes only
-    equal-action-score ties.
+    The action scorer consumes the shared normalized `CombatObservation`. It favors cards
+    that fit current danger, promotes potions under pressure, ranks targets using
+    killability and normalized enemy attack intent, and uses only canonical v1
+    `choice_card` semantics/`optionId` identity for card-choice quality. Unknown,
+    malformed, future, or inconsistent choice metadata remains neutral. `rng`, when
+    supplied, randomizes only equal-action-score ties.
     """
 
     def __init__(self, rng: random.Random | None = None) -> None:
@@ -210,27 +210,27 @@ def _action_score(
     context: _CombatContext,
 ) -> float:
     action_type = action.get("action_type")
-    action_score = _ACTION_TYPE_BASE_SCORE.get(action_type, -10.0)
+    action_score = _ACTION_TYPE_BASE_ACTION_SCORE.get(action_type, -10.0)
 
     if action_type == CARD_ACTION_TYPE:
-        return action_score + _score_playable_card(action, context)
+        return action_score + _playable_card_action_score(action, context)
     if action_type == _POTION_ACTION_TYPE:
-        return action_score + _score_potion(action, context)
+        return action_score + _potion_action_score(action, context)
     if action_type == _SYSTEM_ACTION_TYPE:
-        return action_score + _score_end_turn(context)
+        return action_score + _end_turn_action_score(context)
     if action_type == _CHOICE_TARGET_ACTION_TYPE:
-        return action_score + _score_target(action, context.observation)
+        return action_score + _target_action_score(action, context.observation)
     if action_type == CHOICE_CARD_ACTION_TYPE:
         action_id = action.get("action_id")
         if isinstance(action_id, str):
             return action_score + context.choice_card_scores.get(action_id, 0.0)
         return action_score
     if action_type in (CHOICE_CONFIRM_ACTION_TYPE, CHOICE_SKIP_ACTION_TYPE):
-        return action_score + _score_choice_completion(action_type, dto)
+        return action_score + _choice_completion_action_score(action_type, dto)
     return action_score
 
 
-def _score_playable_card(action: JsonObject, context: _CombatContext) -> float:
+def _playable_card_action_score(action: JsonObject, context: _CombatContext) -> float:
     observation = context.observation
     params = _mapping(action.get("parameters"))
     card = _hand_card_for(action, observation)
@@ -239,7 +239,9 @@ def _score_playable_card(action: JsonObject, context: _CombatContext) -> float:
     card_id = _string(params.get("cardId")) or _string(card.get("id"))
     target_type = _string(params.get("targetType")) or _string(card.get("targetType"))
 
-    action_score = _CARD_TYPE_SCORE.get(card_type, 0.0) + _RARITY_SCORE.get(rarity, 0.0)
+    action_score = _CARD_TYPE_ACTION_SCORE.get(card_type, 0.0) + _RARITY_ACTION_SCORE.get(
+        rarity, 0.0
+    )
     if card.get("upgraded") is True:
         action_score += 2.0
     upgrade_level = _finite_number(card.get("upgradeLevel"))
@@ -272,7 +274,7 @@ def _score_playable_card(action: JsonObject, context: _CombatContext) -> float:
     return action_score
 
 
-def _score_potion(action: JsonObject, context: _CombatContext) -> float:
+def _potion_action_score(action: JsonObject, context: _CombatContext) -> float:
     observation = context.observation
     danger = min(1.0, observation.danger_ratio)
     action_score = 30.0 * danger
@@ -294,7 +296,7 @@ def _score_potion(action: JsonObject, context: _CombatContext) -> float:
     return action_score
 
 
-def _score_end_turn(context: _CombatContext) -> float:
+def _end_turn_action_score(context: _CombatContext) -> float:
     observation = context.observation
     action_score = 0.0
     if context.playable_cards == 0:
@@ -311,7 +313,7 @@ def _score_end_turn(context: _CombatContext) -> float:
     return action_score
 
 
-def _score_target(action: JsonObject, observation: CombatObservation) -> float:
+def _target_action_score(action: JsonObject, observation: CombatObservation) -> float:
     params = _mapping(action.get("parameters"))
     hp = max(0.0, _finite_number(params.get("hp")) or 0.0)
     block = max(0.0, _finite_number(params.get("block")) or 0.0)
@@ -328,7 +330,7 @@ def _score_target(action: JsonObject, observation: CombatObservation) -> float:
     return 20.0 * (1.0 - min(1.0, effective_hp_ratio)) + min(25.0, incoming * 0.75)
 
 
-def _score_choice_completion(action_type: str, dto: Mapping[str, Any]) -> float:
+def _choice_completion_action_score(action_type: str, dto: Mapping[str, Any]) -> float:
     pending = _mapping(dto.get("pendingChoice"))
     selected = _finite_number(pending.get("selectedCount")) or 0.0
     min_select = _finite_number(pending.get("minSelect")) or 0.0

@@ -59,6 +59,7 @@ from sts2_training.decision.stable_pruner import (
     StableFrontierPruner,
     StablePruneContext,
     StablePruneNodeView,
+    StateScoreTopKPruner,
     ValueTopKPruner,
 )
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
@@ -106,6 +107,7 @@ __all__ = [
     "StablePruneNodeTrace",
     "StablePruneNodeView",
     "StablePruneTrace",
+    "StateScoreTopKPruner",
     "ValueModel",
     "ValueTopKPruner",
     "build_oracle_targets",

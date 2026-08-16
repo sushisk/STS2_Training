@@ -164,9 +164,11 @@ class StableFrontierPruner:
         raise NotImplementedError
 
 
-class ValueTopKPruner(StableFrontierPruner):
+class StateScoreTopKPruner(StableFrontierPruner):
     """Exact baseline: stable descending-``state_score`` sort over frontier indices."""
 
+    # Keep the persisted/runtime identity stable. ``value_top_k`` predates the canonical
+    # terminology and may already be present in Oracle provenance and learned artifacts.
     name = "value_top_k"
     version = "1"
 
@@ -186,6 +188,11 @@ class ValueTopKPruner(StableFrontierPruner):
             reverse=True,
         )
         return ranked_indices[:k]
+
+
+# Compatibility import name. New Python code should use ``StateScoreTopKPruner``;
+# keeping this alias avoids changing existing imports or serialized ``name`` metadata.
+ValueTopKPruner = StateScoreTopKPruner
 
 
 def _finite_float(value: object, name: str) -> float:

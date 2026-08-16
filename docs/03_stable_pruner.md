@@ -6,13 +6,13 @@
 
 ## 1. 概要
 
-`StableFrontierPruner` は、`BeamSearchEngine` が作った ordered stable frontier から survivor index を選ぶ public seam である。baseline は `ValueTopKPruner`、learned runtime は `LinearStableFrontierPruner`、RL exploration は `PlackettLuceLinearStableFrontierPruner` を使う。
+`StableFrontierPruner` は、`BeamSearchEngine` が作った ordered stable frontier から survivor index を選ぶ public seam である。baseline は canonical Python 名 `StateScoreTopKPruner`、learned runtime は `LinearStableFrontierPruner`、RL exploration は `PlackettLuceLinearStableFrontierPruner` を使う。旧 import 名 `ValueTopKPruner` と persisted pruner identity `value_top_k` は互換性のため維持する。
 
 learned pruner の current contract は artifact schema `2`、feature schema `2`、node-view schema `1`。resource-aware RL trajectory は schema `3` で、paired baseline/learned outcome に terminal HP と potion retention を加えた reward を保存する。
 
 ## 2. Architecture
 
-`StablePruneNodeView` schema は `STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION = 1`。`value`、`root_action_id`、depth、terminal、action type、policy rank/score、post-coverage rank、candidate source などを持つ immutable view である。`StablePruneContext` は search/prune step、beam width、depth budget、remaining time を持つ。`pruner_features.py` の `PRUNER_FEATURE_SCHEMA_VERSION = 2` は 30 個の feature を固定する。
+`StablePruneNodeView` schema は `STABLE_PRUNE_NODE_VIEW_SCHEMA_VERSION = 1`。`value`、`root_action_id`、depth、terminal、action type、policy rank/score、post-coverage rank、candidate source などを持つ immutable view である。`value` / `policy_rank` / `policy_score` は node-view schema v1 の互換 storage 名であり、Python code では canonical accessor `state_score` / `action_rank` / `action_score` を使う。`StablePruneContext` は search/prune step、beam width、depth budget、remaining time を持つ。`pruner_features.py` の `PRUNER_FEATURE_SCHEMA_VERSION = 2` は 30 個の feature を固定する。
 
 `pruner_training_data.py` は Oracle JSONL から supervised pairwise examples を作る。`pruner_rl.py` は behavior artifact SHA と selection log probability を含む `PrunerRLStep` を記録する。Oracle target/provenance は [04_oracle.md](04_oracle.md) を参照する。
 
@@ -48,9 +48,12 @@ class StableFrontierPruner:
         context: StablePruneContext,
     ) -> list[int]
 
-class ValueTopKPruner(StableFrontierPruner):
+class StateScoreTopKPruner(StableFrontierPruner):
+    # Persisted/runtime identity remains unchanged for compatibility.
     name = "value_top_k"
     version = "1"
+
+ValueTopKPruner = StateScoreTopKPruner  # compatibility import alias
 ```
 
 ```python
