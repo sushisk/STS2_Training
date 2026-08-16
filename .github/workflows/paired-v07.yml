@@ -1,20 +1,17 @@
-name: paired-v07-exact-pair
+name: training-hosted-contract
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  PAIRED_RL_SHA: 20569f1be2f6a0fea1b52636c536ac623dde28ab
-  PAIRED_EMULATOR_SHA: c315f25bab03caeddf4b409bd6b94f917ed1ccd3
-
 jobs:
   training-hosted-contract:
+    # This required job is intentionally repo-local. It is not evidence that a
+    # particular Training/RL/Emulator commit set passed cross-repository integration.
     name: training-hosted-contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -34,67 +31,9 @@ jobs:
       - name: Run hosted unit and contract regression tests
         run: python -m pytest -q -m "not integration"
 
-  exact-pair-acrobatics:
-    name: exact-pair-acrobatics
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out Training PR head
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-
-      - name: Check out paired STS2_RL
-        uses: actions/checkout@v4
-        with:
-          repository: sushisk/STS2_RL
-          ref: 20569f1be2f6a0fea1b52636c536ac623dde28ab
-          path: .paired/STS2_RL
-          persist-credentials: false
-
-      - name: Check out paired STS2_Emulator
-        uses: actions/checkout@v4
-        with:
-          repository: sushisk/STS2_Emulator
-          ref: c315f25bab03caeddf4b409bd6b94f917ed1ccd3
-          path: .paired/STS2_Emulator
-          persist-credentials: false
-
-      - name: Verify exact counterpart commits
-        shell: bash
+      - name: Explain paired validation boundary
+        if: always()
         run: |
-          test "$(git -C .paired/STS2_RL rev-parse HEAD)" = "$PAIRED_RL_SHA"
-          test "$(git -C .paired/STS2_Emulator rev-parse HEAD)" = "$PAIRED_EMULATOR_SHA"
-          printf 'Training=%s\n' "$(git rev-parse HEAD)"
-          printf 'STS2_RL=%s\n' "$(git -C .paired/STS2_RL rev-parse HEAD)"
-          printf 'STS2_Emulator=%s\n' "$(git -C .paired/STS2_Emulator rev-parse HEAD)"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Install Training and CLR bridge dependencies
-        run: python -m pip install -e ".[test]" pythonnet
-
-      - name: Build exact paired Emulator
-        run: dotnet build .paired/STS2_Emulator/Sts2EmulatorPhase1.sln --configuration Debug
-
-      - name: Expose Emulator at RL runtime path
-        shell: bash
-        run: |
-          ln -s "$GITHUB_WORKSPACE/.paired/STS2_Emulator" \
-            "$GITHUB_WORKSPACE/.paired/STS2_RL/C:\STS2_Emulator"
-
-      - name: Run exact-pair Acrobatics replay regression
-        env:
-          STS2_RL_ROOT: ${{ github.workspace }}/.paired/STS2_RL
-        run: |
-          python -m pytest -q \
-            tests/integration/test_paired_acrobatics_exact_instance_replay.py
+          echo "This required check proves only Training repo-local hosted unit/contract regressions."
+          echo "It does not attest an exact Training/RL/Emulator commit set."
+          echo "Before merge, complete the PR's explicit exact-pair checklist against the pinned counterpart heads."
