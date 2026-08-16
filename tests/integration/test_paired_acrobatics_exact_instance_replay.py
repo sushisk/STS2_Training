@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 
 import pytest
 
@@ -19,8 +18,6 @@ from _paired_rl_helpers import start_paired_rl as _start_paired_rl
 from _paired_rl_helpers import stop_paired_rl as _stop_paired_rl
 
 pytestmark = pytest.mark.integration
-
-_CARD_INSTANCE_ID = re.compile(r"cardv-[0-9a-f]{32}\Z")
 
 
 def _acrobatics_config() -> dict:
@@ -82,21 +79,38 @@ def _find_card_action(decision: dict, card_id: str) -> dict:
     )
 
 
-def _visible_choice_identities(decision: dict) -> list[tuple[str, str]]:
-    identities: list[tuple[str, str]] = []
-    for action in _available_actions(decision):
-        if action.get("action_type") != "choice_card":
-            continue
+def _visible_choice_card_ids_without_instance_identity(decision: dict) -> list[str]:
+    """Return Training-visible card ids and enforce the RL-internal identity boundary.
+
+    Emulator #25 emits ``cardInstanceId`` at its visible card-choice boundary so RL #64
+    can reconstruct the exact concrete replay prefix. RL must consume that token before
+    building ``masked_emulator_dto``. Training therefore sees the card candidates but
+    never receives persistent concrete-copy identity.
+    """
+
+    masked = decision["masked_emulator_dto"]
+    pending_choice = masked.get("pendingChoice") or {}
+    options = pending_choice.get("options") or []
+    assert len(options) == 4, options
+    for option in options:
+        assert "cardInstanceId" not in option, option
+        assert "card_instance_id" not in option, option
+
+    card_ids: list[str] = []
+    choice_actions = [
+        action for action in _available_actions(decision)
+        if action.get("action_type") == "choice_card"
+    ]
+    assert len(choice_actions) == 4, choice_actions
+    for action in choice_actions:
         parameters = action.get("parameters") or {}
         card_id = parameters.get("cardId")
-        card_instance_id = parameters.get("cardInstanceId")
         assert isinstance(card_id, str) and card_id
-        assert (
-            isinstance(card_instance_id, str)
-            and _CARD_INSTANCE_ID.fullmatch(card_instance_id)
-        )
-        identities.append((card_id, card_instance_id))
-    return identities
+        assert "cardInstanceId" not in parameters, parameters
+        assert "card_instance_id" not in parameters, parameters
+        card_ids.append(card_id)
+
+    return card_ids
 
 
 async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
@@ -106,34 +120,28 @@ async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
         root = await client.get_decision(instance_id, timeout_s=30.0)
         acrobatics = _find_card_action(root, "ACROBATICS")
 
-        # This is a real committed step, not an emulated branch. Emulator #25 first
-        # publishes the concrete card identities at the resulting visible choice, and
-        # RL #64 is responsible for translating that evidence into replay constraints.
+        # This is a real committed step, not an emulated branch. Emulator #25 publishes
+        # concrete card identity to RL at the resulting choice; RL #64 translates it into
+        # internal replay constraints before masking. Training should see the four normal
+        # candidates but none of the persistent concrete-instance tokens.
         pending = await client.commit_action(
             instance_id,
             root["decision_point_id"],
             acrobatics["action_id"],
             timeout_s=30.0,
         )
-        identities = _visible_choice_identities(pending)
-        assert len(identities) == 4, identities
-        assert len({public_id for _card_id, public_id in identities}) == 4, identities
-        assert {card_id for card_id, _public_id in identities} >= {
+        card_ids = _visible_choice_card_ids_without_instance_identity(pending)
+        assert len(card_ids) == 4, card_ids
+        assert set(card_ids) >= {
             "NEUTRALIZE",
             "DEFEND_SILENT",
             "STRIKE_SILENT",
         }
-        defend_instance_ids = [
-            public_id
-            for card_id, public_id in identities
-            if card_id == "DEFEND_SILENT"
-        ]
-        assert len(defend_instance_ids) == 2, identities
-        assert defend_instance_ids[0] != defend_instance_ids[1], identities
+        assert card_ids.count("DEFEND_SILENT") == 2, card_ids
 
-        # Training intentionally does not derive, decode, or compare these opaque
-        # cardv-* values with Snapshot InstanceId. The only identity assertion here is
-        # public-domain shape/distinctness at the already-visible choice boundary.
+        # Exact-instance replay still has to work even though Training cannot observe the
+        # concrete ids that RL used internally. Multiple RNG hypotheses exercise that
+        # internal pinning through the production Oracle/Beam path.
         collector = RootValueLoggingOracleCollector(
             client,
             policy=PriorHeuristicPolicy(),
@@ -179,8 +187,9 @@ def test_paired_acrobatics_exact_instance_replay_has_no_branch_faults() -> None:
 
     The test is skipped unless STS2_RL_ROOT points at the paired RL checkout. That RL
     checkout must in turn use an Emulator build containing #25 (or the equivalent merged
-    implementation). It exercises the production Training Oracle/Beam path rather than
-    calling RL's CombatInstance directly.
+    implementation). It exercises the production Training Oracle/Beam path and verifies
+    both sides of the privacy-safe contract: RL-internal exact replay succeeds while
+    Training-facing DTOs contain no ``cardInstanceId``.
     """
 
     process, port = _start_paired_rl(pytest.skip)
