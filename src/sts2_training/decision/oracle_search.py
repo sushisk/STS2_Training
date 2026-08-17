@@ -38,6 +38,7 @@ from sts2_training.decision.candidate_coverage import CoverageConstrainedPolicy
 from sts2_training.decision.combat_decision import is_continuation_decision
 from sts2_training.decision.policy import PolicyModel
 from sts2_training.decision.search_trace import (
+    BranchFaultTrace,
     InMemorySearchTraceCollector,
     PolicyProposalTrace,
     ResolvedNodeTrace,
@@ -264,11 +265,12 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
             )
         return result
 
-    def _score_frontier(self, item_meta, branch_results, depth=None):  # type: ignore[override]
-        result = super()._score_frontier(item_meta, branch_results, depth)
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit = result
-        search_id = self._current_search_id()
-        if search_id is not None and self.trace_collector is not None:
+    def _score_frontier(self, item_meta, branch_results, depth=None, *, search_id: str):  # type: ignore[override]
+        result = super()._score_frontier(
+            item_meta, branch_results, depth, search_id=search_id
+        )
+        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit, _branches_faulted = result
+        if self.trace_collector is not None:
             finished_object_ids = {id(node) for node in newly_finished}
             for node in (*next_beam, *newly_finished):
                 continuation = is_continuation_decision(node.masked_emulator_dto)
@@ -338,14 +340,6 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
                     )
                 )
         return result
-
-    def _current_search_id(self) -> str | None:
-        collector = self.trace_collector
-        events = getattr(collector, "events", ())
-        for event in reversed(events):
-            if isinstance(event, SearchTraceStart):
-                return event.search_id
-        return None
 
 
 class BudgetedOracleCollector:
@@ -457,7 +451,9 @@ def build_oracle_targets(
     ValueModel state score, avoiding direct self-imitation of the pruning rule.
     Intermediate states that were subsequently expanded are not treated as final node
     outcomes either. A node with a recorded policy proposal is also not a final leaf when
-    that expansion attempt failed to materialize a resolved child.
+    that expansion attempt failed to materialize a resolved child. Any recorded branch
+    fault makes the affected RNG/stable subtree a ``no_target``: a surviving sibling does
+    not prove that the missing/faulted candidate would have scored worse.
     """
 
     starts = [event for event in events if isinstance(event, SearchTraceStart)]
@@ -476,6 +472,7 @@ def build_oracle_targets(
         raise ValueError("target_beam_width cannot exceed oracle beam_width")
 
     resolved = [event for event in events if isinstance(event, ResolvedNodeTrace)]
+    faults = [event for event in events if isinstance(event, BranchFaultTrace)]
     prune_events = [event for event in events if isinstance(event, StablePruneTrace)]
     proposal_events = [event for event in events if isinstance(event, PolicyProposalTrace)]
     root_proposals = [
@@ -499,12 +496,33 @@ def build_oracle_targets(
     }
     expanded_node_ids = {proposal.parent_node_id for proposal in proposal_events}
 
+    fault_reason_by_root_rng: dict[tuple[str, int], str] = {}
+    fault_depth_by_root_rng: dict[tuple[str, int], int] = {}
+    fault_reason_by_ancestor: dict[str, str] = {}
+    for fault in faults:
+        reason = _branch_fault_censor_reason(fault)
+        if fault.root_action_id is not None:
+            key = (fault.root_action_id, fault.rng_id)
+            fault_reason_by_root_rng.setdefault(key, reason)
+            fault_depth_by_root_rng[key] = max(
+                fault_depth_by_root_rng.get(key, 0),
+                fault.combat_depth,
+            )
+        ancestor_id = fault.parent_node_id
+        seen_ancestor_ids: set[str] = set()
+        while ancestor_id in resolved_by_id and ancestor_id not in seen_ancestor_ids:
+            seen_ancestor_ids.add(ancestor_id)
+            fault_reason_by_ancestor.setdefault(ancestor_id, reason)
+            ancestor_id = resolved_by_id[ancestor_id].parent_node_id
+
     root_targets = _root_action_targets(
         root_proposal,
         resolved,
         children=children,
         oracle_pruned_node_ids=oracle_pruned_node_ids,
         expanded_node_ids=expanded_node_ids,
+        fault_reason_by_root_rng=fault_reason_by_root_rng,
+        fault_depth_by_root_rng=fault_depth_by_root_rng,
         exhaustive_root_actions=exhaustive_root_actions,
         search_reason=end.reason,
     )
@@ -529,7 +547,15 @@ def build_oracle_targets(
                 key=lambda candidate: candidate.state_score,
                 default=None,
             )
-            if best is None:
+            branch_fault_reason = fault_reason_by_ancestor.get(node.node_id)
+            if branch_fault_reason is not None:
+                target_node_score = None
+                target_source = "no_target"
+                terminal_reached = any(candidate.terminal for candidate in leaf_descendants)
+                censored = True
+                censor_reason = branch_fault_reason
+                best_node_id = None
+            elif best is None:
                 target_node_score = None
                 target_source = "no_target"
                 terminal_reached = False
@@ -606,6 +632,8 @@ def _root_action_targets(
     children: Mapping[str, Sequence[str]],
     oracle_pruned_node_ids: set[str],
     expanded_node_ids: set[str],
+    fault_reason_by_root_rng: Mapping[tuple[str, int], str],
+    fault_depth_by_root_rng: Mapping[tuple[str, int], int],
     exhaustive_root_actions: bool,
     search_reason: str,
 ) -> list[RootActionOracleTarget]:
@@ -641,12 +669,17 @@ def _root_action_targets(
             )
             continue
 
-        rng_ids = sorted(
+        resolved_rng_ids = {
             rng_id
             for root_action_id, rng_id in nodes_by_key
             if root_action_id == action_id
-        )
-        if not rng_ids:
+        }
+        fault_rng_ids = {
+            rng_id
+            for root_action_id, rng_id in fault_reason_by_root_rng
+            if root_action_id == action_id
+        }
+        if not resolved_rng_ids and not fault_rng_ids:
             if exhaustive_root_actions:
                 raise RuntimeError(
                     "exhaustive root collection requires every proposed available action "
@@ -668,6 +701,7 @@ def _root_action_targets(
             )
             continue
 
+        rng_ids = sorted(resolved_rng_ids | fault_rng_ids)
         outcomes: list[OracleRngOutcome] = []
         for rng_id in rng_ids:
             nodes = nodes_by_key.get((action_id, rng_id), [])
@@ -679,9 +713,26 @@ def _root_action_targets(
                 and node.node_id not in expanded_node_ids
             ]
             best = max(leaves, key=lambda node: node.state_score, default=None)
-            deepest = max((node.combat_depth for node in nodes), default=0)
+            deepest = max(
+                max((node.combat_depth for node in nodes), default=0),
+                fault_depth_by_root_rng.get((action_id, rng_id), 0),
+            )
             terminal_reached = any(node.terminal for node in leaves)
-            if best is None:
+            branch_fault_reason = fault_reason_by_root_rng.get((action_id, rng_id))
+            if branch_fault_reason is not None:
+                outcomes.append(
+                    OracleRngOutcome(
+                        rng_id=rng_id,
+                        value=None,
+                        target_source="no_target",
+                        terminal_reached=terminal_reached,
+                        deepest_combat_depth=deepest,
+                        censored=True,
+                        censor_reason=branch_fault_reason,
+                        best_node_id=None,
+                    )
+                )
+            elif best is None:
                 censor_reason = (
                     "oracle_pruned_before_followup"
                     if any(
@@ -728,16 +779,32 @@ def _root_action_targets(
         sources = {
             outcome.target_source for outcome in outcomes if outcome.node_score is not None
         }
-        if not node_scores:
+        branch_fault_reason = next(
+            (
+                outcome.censor_reason
+                for outcome in outcomes
+                if outcome.censor_reason is not None
+                and outcome.censor_reason.startswith("branch_fault:")
+            ),
+            None,
+        )
+        if branch_fault_reason is not None:
             target_source = "no_target"
+            estimated_q = None
+        elif not node_scores:
+            target_source = "no_target"
+            estimated_q = None
         elif sources == {"terminal"}:
             target_source = "terminal"
+            estimated_q = fmean(node_scores)
         elif sources == {"value_bootstrap"}:
             target_source = "value_bootstrap"
+            estimated_q = fmean(node_scores)
         else:
             target_source = "mixed"
+            estimated_q = fmean(node_scores)
         censored = any(outcome.censored for outcome in outcomes) or not node_scores
-        censor_reason = next(
+        censor_reason = branch_fault_reason or next(
             (outcome.censor_reason for outcome in outcomes if outcome.censor_reason is not None),
             None,
         )
@@ -746,7 +813,7 @@ def _root_action_targets(
                 action_id=action_id,
                 action=dict(action),
                 evaluated=True,
-                estimated_q=None if not node_scores else fmean(node_scores),
+                estimated_q=estimated_q,
                 rng_outcomes=tuple(outcomes),
                 target_source=target_source,
                 terminal_reached=any(outcome.terminal_reached for outcome in outcomes),
@@ -755,6 +822,11 @@ def _root_action_targets(
             )
         )
     return targets
+
+
+def _branch_fault_censor_reason(fault: BranchFaultTrace) -> str:
+    fault_kind = fault.fault_kind if fault.fault_kind else fault.status
+    return f"branch_fault:{fault_kind}"
 
 
 def _descendant_nodes(

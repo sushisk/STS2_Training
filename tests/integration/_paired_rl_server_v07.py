@@ -41,7 +41,7 @@ def _install_mixed_fault_hook() -> None:
             return admitted
         broken_candidate = replace(
             admitted.candidate,
-            semantic_action=SemanticAction("__paired_forced_worker_fault__", None, None),
+            semantic_action=SemanticAction("__paired_forced_worker_fault__", ""),
         )
         return replace(admitted, candidate=broken_candidate)
 

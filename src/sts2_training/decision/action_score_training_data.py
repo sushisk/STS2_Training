@@ -1,4 +1,4 @@
-"""Load supervised Combat ``action_score`` rankings from Oracle v6 JSONL records."""
+"""Load supervised Combat ``action_score`` rankings from Oracle v7 JSONL records."""
 
 from __future__ import annotations
 

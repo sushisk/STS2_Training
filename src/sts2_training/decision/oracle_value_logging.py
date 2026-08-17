@@ -101,12 +101,11 @@ class _RootValueCapturingOracleEngine(_OracleBeamSearchEngine):
     def root_state_dtos(self) -> Mapping[str, Mapping[str, Any]]:
         return self._root_state_dtos
 
-    def _score_frontier(self, item_meta, branch_results, depth=None):  # type: ignore[override]
-        result = super()._score_frontier(item_meta, branch_results, depth)
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit = result
-        search_id = self._current_search_id()
-        if search_id is None:
-            return result
+    def _score_frontier(self, item_meta, branch_results, depth=None, *, search_id: str):  # type: ignore[override]
+        result = super()._score_frontier(
+            item_meta, branch_results, depth, search_id=search_id
+        )
+        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit, _branches_faulted = result
 
         for node in (*next_beam, *newly_finished):
             if node.root_action_id is None or is_continuation_decision(node.masked_emulator_dto):

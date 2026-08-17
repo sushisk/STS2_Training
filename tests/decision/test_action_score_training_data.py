@@ -118,6 +118,7 @@ class CombatActionScoreTrainingDataTest(unittest.TestCase):
 
     def test_loads_resolved_q_targets_and_excludes_unresolved_or_no_target(self) -> None:
         examples, stats = self._load(_record())
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 7)
         self.assertEqual([example.action_id for example in examples], ["best", "bootstrap"])
         self.assertEqual([example.sample_weight for example in examples], [1.0, 0.5])
         self.assertEqual(stats.root_actions, 4)
@@ -133,6 +134,12 @@ class CombatActionScoreTrainingDataTest(unittest.TestCase):
         self.assertEqual(positive.winner_action_id, "best")
         self.assertEqual(positive.loser_action_id, "bootstrap")
         self.assertEqual(positive.sample_weight, 0.5)
+
+    def test_v6_record_is_rejected_instead_of_being_reinterpreted_as_v7(self) -> None:
+        legacy = _record()
+        legacy["record_schema_version"] = 6
+        with self.assertRaisesRegex(ValueError, "expected Oracle decision schema v7"):
+            self._load(legacy)
 
     def test_board_context_interaction_survives_pairwise_delta(self) -> None:
         record = _record()

@@ -41,7 +41,9 @@ class ResourceCapturingABRunner(StablePrunerABRunner):
             learned_dto=learned,
             initial_potion_count=initial,
         )
-        return SimpleNamespace(**report.__dict__, pairs=(pair,))
+        payload = dict(report.__dict__)
+        payload["pairs"] = (pair,)
+        return SimpleNamespace(**payload)
 
 
 def enrich_pair(

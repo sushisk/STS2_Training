@@ -17,6 +17,7 @@ from sts2_training.decision.oracle_search import (
     OracleTargetMetadata,
     OracleTargets,
 )
+from sts2_training.decision.search_trace import BranchFaultTrace, SearchTraceEnd
 
 
 _DTO_VERSION = "emulator-test"
@@ -53,15 +54,53 @@ class OracleJsonlWriterTest(unittest.TestCase):
             action_type="card",
             action={"action_id": "deep-action", "action_type": "card"},
         )
+        stats = BeamSearchStats(
+            depths_completed=4,
+            nodes_expanded=10,
+            branches_created=11,
+            branches_faulted=1,
+        )
+        fault = BranchFaultTrace(
+            search_id="search-1",
+            node_id="search-1:faulted-branch",
+            parent_node_id="search-1:oracle-parent",
+            branch_id="faulted-branch",
+            parent_branch_id="oracle-parent",
+            root_action_id="play",
+            rng_id=11,
+            depth=4,
+            combat_depth=4,
+            continuation_steps=0,
+            action_id="faulted-action",
+            action_type="card",
+            action={"action_id": "faulted-action", "action_type": "card"},
+            policy_rank=1,
+            policy_score=None,
+            post_coverage_rank=1,
+            candidate_source="policy",
+            status="faulted",
+            fault_kind="replay_mismatch",
+            detail="candidate replay diverged",
+        )
+        end = SearchTraceEnd(
+            search_id="search-1",
+            reason="max_depth",
+            best_root_action_id="play",
+            best_value=12.5,
+            depths_completed=4,
+            nodes_expanded=10,
+            branches_created=11,
+            branches_faulted=1,
+        )
         return OracleCollectionResult(
             search_result=BeamSearchResult(
                 best_root_action_id="play",
                 best_value=12.5,
                 best_node=best_node,
                 reason="max_depth",
-                stats=BeamSearchStats(depths_completed=4, nodes_expanded=10),
+                stats=stats,
             ),
-            trace=(),
+            trace=(fault, end),
             targets=OracleTargets(metadata=metadata, root_actions=(), stable_nodes=()),
             provenance=OracleProvenance(
                 teacher_policy_class="example.CoveragePolicy",
@@ -112,8 +151,12 @@ class OracleJsonlWriterTest(unittest.TestCase):
             )
             parsed = json.loads(path.read_text(encoding="utf-8").strip())
 
-        self.assertEqual(record["record_schema_version"], ORACLE_RECORD_SCHEMA_VERSION)
-        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 6)
+        # v7 is the first decision-record schema that promises persisted branch-fault
+        # events plus the branches_faulted aggregate. Pin the literal as well as the
+        # producer field so a future accidental constant rollback cannot self-validate.
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 7)
+        self.assertEqual(record["record_schema_version"], 7)
+        self.assertEqual(parsed["record_schema_version"], 7)
         self.assertEqual(parsed["instance_id"], "inst-1")
         self.assertEqual(parsed["decision_index"], 0)
         self.assertEqual(parsed["decision_response_metadata"]["server_epoch"], "epoch-1")
@@ -126,6 +169,14 @@ class OracleJsonlWriterTest(unittest.TestCase):
             _DTO_VERSION,
         )
         self.assertEqual(parsed["oracle_targets"]["metadata"]["oracle_beam_width"], 16)
+        self.assertEqual(parsed["oracle_search_result"]["stats"]["branches_created"], 11)
+        self.assertEqual(parsed["oracle_search_result"]["stats"]["branches_faulted"], 1)
+        self.assertEqual(
+            [event["event_type"] for event in parsed["search_trace"]],
+            ["branch_fault", "search_end"],
+        )
+        self.assertEqual(parsed["search_trace"][0]["fault_kind"], "replay_mismatch")
+        self.assertEqual(parsed["search_trace"][1]["branches_faulted"], 1)
         oracle_best = parsed["oracle_search_result"]["best_node"]
         self.assertEqual(oracle_best["branch_id"], "oracle-deep")
         self.assertEqual(oracle_best["value"], 12.5)
@@ -170,6 +221,7 @@ class OracleJsonlWriterTest(unittest.TestCase):
             )
             parsed = json.loads(path.read_text(encoding="utf-8").strip())
 
+        self.assertEqual(parsed["record_schema_version"], 7)
         dto = parsed["masked_emulator_dto"]
         self.assertEqual(dto["hand"][0]["upgradeLevel"], 2)
         self.assertEqual(dto["hand"][0]["enchantment"]["amount"], 3)

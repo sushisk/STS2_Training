@@ -1,4 +1,4 @@
-"""Lossless public Oracle-v6 data loading for future Value-learning consumers.
+"""Lossless public Oracle-v7 data loading for future Value-learning consumers.
 
 Structured supervised/RL loaders intentionally validate and normalize the fields they use.
 This module provides the complementary foundation seam: keep the complete public JSONL
@@ -43,7 +43,7 @@ class RawOracleValueRecord:
 
 @dataclass(frozen=True)
 class RawCombatValueEpisode:
-    """Lossless actual-episode grouping over complete v6/v2 record payloads."""
+    """Lossless actual-episode grouping over complete v7/v2 record payloads."""
 
     instance_id: str
     server_epoch: str | None
@@ -179,8 +179,8 @@ def _validate_known_record(
             raise ValueError(f"{source}: incompatible Oracle decision schema")
         dto = _mapping(payload.get("masked_emulator_dto"), f"{source}.masked_emulator_dto")
         _validate_dto_contract(payload, dto=dto, contract=contract, source=source)
-        # Runtime transition is required by v6. Keep the full object rather than
-        # normalizing it here so producer-added diagnostics remain available downstream.
+        # Runtime transition remains required by v7; it was introduced in v6. Keep the
+        # full object rather than normalizing it here so diagnostics remain available.
         _mapping(payload.get("runtime_transition"), f"{source}.runtime_transition")
     elif record_type == "combat_oracle_episode_result":
         if payload.get("record_schema_version") != ORACLE_EPISODE_RESULT_SCHEMA_VERSION:

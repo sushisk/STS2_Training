@@ -250,7 +250,8 @@ class ExhaustiveRootProposalTest(unittest.TestCase):
 
         engine._score_frontier(
             [(parent, ActionCandidate("a"), "branch", 1)],
-            {
+            search_id="search",
+            branch_results={
                 "branch": {
                     "status": "completed",
                     "decision_point_id": "d-terminal",

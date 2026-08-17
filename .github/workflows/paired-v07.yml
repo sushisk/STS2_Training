@@ -1,4 +1,4 @@
-name: paired-v07-exact-pair
+name: training-hosted-contract
 
 on:
   pull_request:
@@ -10,9 +10,8 @@ permissions:
 
 jobs:
   training-hosted-contract:
-    # This required job is intentionally repo-local. The legacy workflow name is
-    # retained for tooling compatibility, but this job is not evidence that a
-    # particular Training/RL commit pair passed trusted cross-repository integration.
+    # This required job is intentionally repo-local. It is not evidence that a
+    # particular Training/RL/Emulator commit set passed cross-repository integration.
     name: training-hosted-contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -36,5 +35,5 @@ jobs:
         if: always()
         run: |
           echo "This required check proves only Training repo-local hosted unit/contract regressions."
-          echo "It does not attest an exact Training/RL commit pair."
-          echo "Real-Emulator paired validation remains separate and must not be treated as a trusted release gate until it runs through an isolated exact-pair orchestrator."
+          echo "It does not attest an exact Training/RL/Emulator commit set."
+          echo "Before merge, complete the PR's explicit exact-pair checklist against the pinned counterpart heads."
