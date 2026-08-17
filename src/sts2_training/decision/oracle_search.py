@@ -669,7 +669,12 @@ def _root_action_targets(
             for root_action_id, rng_id in nodes_by_key
             if root_action_id == action_id
         }
-        if not resolved_rng_ids:
+        fault_rng_ids = {
+            rng_id
+            for root_action_id, rng_id in fault_reason_by_root_rng
+            if root_action_id == action_id
+        }
+        if not resolved_rng_ids and not fault_rng_ids:
             if exhaustive_root_actions:
                 raise RuntimeError(
                     "exhaustive root collection requires every proposed available action "
@@ -691,11 +696,6 @@ def _root_action_targets(
             )
             continue
 
-        fault_rng_ids = {
-            rng_id
-            for root_action_id, rng_id in fault_reason_by_root_rng
-            if root_action_id == action_id
-        }
         rng_ids = sorted(resolved_rng_ids | fault_rng_ids)
         outcomes: list[OracleRngOutcome] = []
         for rng_id in rng_ids:
