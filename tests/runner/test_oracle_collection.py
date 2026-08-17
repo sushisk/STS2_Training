@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from sts2_training.decision.beam_search import BeamNode, BeamSearchResult, BeamSearchStats
+from sts2_training.decision.beam_search import (
+    AllBranchesFaultedError,
+    BeamNode,
+    BeamSearchResult,
+    BeamSearchStats,
+)
 from sts2_training.decision.oracle_log import ORACLE_VALUE_MASK_VERSION, OracleJsonlWriter
 from sts2_training.decision.oracle_search import (
     OracleCollectionResult,
@@ -117,6 +122,22 @@ class _FailingCommitEngine(_FakeCommitEngine):
     async def decide(self, instance_id, *, timeout_s, decision):
         self.decisions.append(decision["decision_point_id"])
         raise RuntimeError("commit decision failed")
+
+
+class _FaultThenRecoverCommitEngine(_FakeCommitEngine):
+    """Raises AllBranchesFaultedError `fault_count` times, then succeeds normally."""
+
+    def __init__(self, client, *, fault_count: int) -> None:
+        super().__init__(client)
+        self._remaining_faults = fault_count
+        self.attempts = 0
+
+    async def decide(self, instance_id, *, timeout_s, decision):
+        self.attempts += 1
+        if self._remaining_faults > 0:
+            self._remaining_faults -= 1
+            raise AllBranchesFaultedError("all emulate_actions branch results faulted")
+        return await super().decide(instance_id, timeout_s=timeout_s, decision=decision)
 
 
 class _FakeOracle:
@@ -251,6 +272,64 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(output, prefix)
         self.assertEqual(client.closed, ["inst"])
+
+    async def test_recovers_after_fewer_than_max_consecutive_branch_faults(self) -> None:
+        client = _FakeClient()
+        oracle = _FakeOracle()
+        commit_engine = _FaultThenRecoverCommitEngine(client, fault_count=2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            runner = OracleEpisodeRunner(
+                client,
+                oracle=oracle,  # type: ignore[arg-type]
+                commit_engine=commit_engine,  # type: ignore[arg-type]
+                writer=OracleJsonlWriter(path),
+            )
+            result = await runner.run(
+                "inst",
+                oracle_timeout_s=5.0,
+                decision_timeout_s=5.0,
+            )
+
+        # 2 faults then a success is fewer than MAX_CONSECUTIVE_BRANCH_FAULTS (3), so the
+        # decision recovers and the episode completes normally rather than aborting.
+        self.assertEqual(commit_engine.attempts, 3)
+        self.assertTrue(result.completed)
+        self.assertEqual(result.termination_reason, "terminal")
+        self.assertEqual(client.commits, ["a"])
+
+    async def test_aborts_episode_after_max_consecutive_branch_faults(self) -> None:
+        client = _FakeClient()
+        oracle = _FakeOracle()
+        commit_engine = _FaultThenRecoverCommitEngine(client, fault_count=99)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle.jsonl"
+            runner = OracleEpisodeRunner(
+                client,
+                oracle=oracle,  # type: ignore[arg-type]
+                commit_engine=commit_engine,  # type: ignore[arg-type]
+                writer=OracleJsonlWriter(path),
+            )
+            result = await runner.run(
+                "inst",
+                oracle_timeout_s=5.0,
+                decision_timeout_s=5.0,
+            )
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+        # Gives up after exactly MAX_CONSECUTIVE_BRANCH_FAULTS attempts - not an uncaught
+        # crash (no rollback, no exception propagates), and no commit ever happens since
+        # every attempt for this one decision faulted.
+        self.assertEqual(commit_engine.attempts, 3)
+        self.assertEqual(client.commits, [])
+        self.assertFalse(result.completed)
+        self.assertEqual(result.termination_reason, "aborted_repeated_branch_failure")
+        self.assertEqual(result.decisions_collected, 0)
+        # The episode-result record is still written (this is a graceful early stop, not
+        # a rollback) so whatever was already collected stays valid training data.
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["record_type"], "combat_oracle_episode_result")
+        self.assertFalse(records[0]["completed"])
 
     def test_cli_defaults_to_exhaustive_root_and_runtime_target_beam(self) -> None:
         args = _parse_args(["--scenario", "scenario.json", "--output", "oracle.jsonl"])

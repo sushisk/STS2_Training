@@ -63,6 +63,14 @@ _RESOLVED_STATUSES = frozenset({"completed", "partial"})
 _WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
 
 
+class AllBranchesFaultedError(RuntimeError):
+    """Raised when a frontier round's `emulate_actions` batch comes back with zero
+    survivors (every candidate branch faulted) - e.g. a hung/deadlocked RL Branch Worker
+    repeatedly proposed as a top candidate. A dedicated subclass (not a bare RuntimeError)
+    so callers that want to retry/give-up specifically on this condition (as opposed to an
+    unrelated bug) can catch it precisely."""
+
+
 @dataclass
 class BeamSearchConfig:
     beam_width: int = 8
@@ -401,7 +409,7 @@ class BeamSearchEngine:
                     ):
                         reason = "not_beam_searchable"
                         break
-                    raise RuntimeError("all emulate_actions branch results faulted")
+                    raise AllBranchesFaultedError("all emulate_actions branch results faulted")
                 finished.extend(newly_finished)
 
                 continuation_nodes = [
