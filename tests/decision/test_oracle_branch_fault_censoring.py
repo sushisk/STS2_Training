@@ -234,6 +234,7 @@ class OracleBranchFaultCensoringTest(unittest.TestCase):
         self.assertIsNone(root.rng_outcomes[0].value)
         self.assertEqual(root.rng_outcomes[0].target_source, "no_target")
         self.assertTrue(root.rng_outcomes[0].terminal_reached)
+        self.assertEqual(root.rng_outcomes[0].deepest_combat_depth, 2)
         self.assertEqual(
             root.rng_outcomes[0].censor_reason,
             "branch_fault:replay_mismatch",
@@ -286,6 +287,7 @@ class OracleBranchFaultCensoringTest(unittest.TestCase):
         self.assertEqual(root.rng_outcomes[0].target_source, "terminal")
         self.assertIsNone(root.rng_outcomes[1].value)
         self.assertEqual(root.rng_outcomes[1].target_source, "no_target")
+        self.assertEqual(root.rng_outcomes[1].deepest_combat_depth, 1)
         self.assertEqual(
             root.rng_outcomes[1].censor_reason,
             "branch_fault:replay_mismatch",
