@@ -828,20 +828,31 @@ class BeamSearchEngine:
 
         pending_items = list(items)
         pending_meta = list(item_meta)
+        pending_order = list(range(len(item_meta)))
         final_results: dict[str, Any] = {}
-        final_meta: list[tuple[BeamNode, CandidateProposal, str, int]] = []
+        final_meta_by_order: dict[
+            int, tuple[BeamNode, CandidateProposal, str, int]
+        ] = {}
+
+        def ordered_final_meta() -> list[tuple[BeamNode, CandidateProposal, str, int]]:
+            return [final_meta_by_order[index] for index in sorted(final_meta_by_order)]
 
         for attempt_index in range(cfg.max_branch_attempts):
             retry_sources: list[
-                tuple[JsonObject, tuple[BeamNode, CandidateProposal, str, int]]
+                tuple[
+                    JsonObject,
+                    tuple[BeamNode, CandidateProposal, str, int],
+                    int,
+                ]
             ] = []
 
             for start in range(0, len(pending_items), batch_size):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return final_results, final_meta, "time_budget"
+                    return final_results, ordered_final_meta(), "time_budget"
                 chunk_items = pending_items[start : start + batch_size]
                 chunk_meta = pending_meta[start : start + batch_size]
+                chunk_order = pending_order[start : start + batch_size]
                 t0 = time.monotonic()
                 try:
                     response = await self._client.emulate_actions(
@@ -862,7 +873,7 @@ class BeamSearchEngine:
                     )
                     return (
                         final_results,
-                        final_meta,
+                        ordered_final_meta(),
                         f"emulate_actions_rejected:{detail}",
                     )
                 stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
@@ -870,20 +881,22 @@ class BeamSearchEngine:
                 stats.branches_created += len(chunk_meta)
                 chunk_results = response.get("branch_results") or {}
 
-                for item, meta in zip(chunk_items, chunk_meta):
+                for item, meta, logical_order in zip(
+                    chunk_items, chunk_meta, chunk_order
+                ):
                     branch_id = meta[2]
                     result = chunk_results.get(branch_id)
                     if _is_resolved_branch_result(result):
                         final_results[branch_id] = result
-                        final_meta.append(meta)
+                        final_meta_by_order[logical_order] = meta
                         if attempt_index > 0:
                             stats.branch_retry_recoveries += 1
                         continue
                     if attempt_index + 1 >= cfg.max_branch_attempts:
                         final_results[branch_id] = result
-                        final_meta.append(meta)
+                        final_meta_by_order[logical_order] = meta
                         continue
-                    retry_sources.append((item, meta))
+                    retry_sources.append((item, meta, logical_order))
 
             if not retry_sources:
                 break
@@ -891,12 +904,14 @@ class BeamSearchEngine:
             stats.branch_retry_faults += len(retry_sources)
             pending_items = []
             pending_meta = []
-            for item, meta in retry_sources:
+            pending_order = []
+            for item, meta, logical_order in retry_sources:
                 retry_item, retry_meta = self._make_retry_item(item, meta)
                 pending_items.append(retry_item)
                 pending_meta.append(retry_meta)
+                pending_order.append(logical_order)
 
-        return final_results, final_meta, None
+        return final_results, ordered_final_meta(), None
 
     def _score_frontier(
         self,
