@@ -395,7 +395,7 @@ class BeamSearchEngine:
                 stats.branches_faulted += branches_faulted
                 stats.nodes_expanded += len(branch_results)
                 if (
-                    branch_results
+                    emulated_item_meta
                     and not next_beam
                     and not newly_finished
                     and not hit_continuation_limit
