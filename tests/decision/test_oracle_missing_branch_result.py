@@ -51,8 +51,6 @@ class _PartialBranchResultClient:
         return {"branch_results": branch_results}
 
 
-
-
 class _AllMissingBranchResultClient(_PartialBranchResultClient):
     async def emulate_actions(
         self,
@@ -101,8 +99,11 @@ class OracleMissingBranchResultTest(unittest.IsolatedAsyncioTestCase):
 
         collected = await collector.collect("inst-001", root_decision, timeout_s=1.0)
 
-        self.assertEqual(collected.search_result.stats.branches_created, 2)
+        # end resolves once; strike is retried twice and faults on its third/final attempt.
+        self.assertEqual(collected.search_result.stats.branches_created, 4)
         self.assertEqual(collected.search_result.stats.branches_faulted, 1)
+        self.assertEqual(collected.search_result.stats.branch_retry_faults, 2)
+        self.assertEqual(collected.search_result.stats.branch_retry_recoveries, 0)
 
         faults = [event for event in collected.trace if isinstance(event, BranchFaultTrace)]
         self.assertEqual(len(faults), 1)
@@ -114,7 +115,7 @@ class OracleMissingBranchResultTest(unittest.IsolatedAsyncioTestCase):
 
         ends = [event for event in collected.trace if isinstance(event, SearchTraceEnd)]
         self.assertEqual(len(ends), 1)
-        self.assertEqual(ends[0].branches_created, 2)
+        self.assertEqual(ends[0].branches_created, 4)
         self.assertEqual(ends[0].branches_faulted, 1)
 
         targets = {target.action_id: target for target in collected.targets.root_actions}
