@@ -44,6 +44,7 @@ from sts2_training.decision.pruner_training_data import (
 )
 from sts2_training.decision.search_modes import DEFAULT_SEARCH_MODE, SEARCH_MODES, resolve_search_mode
 from sts2_training.decision.search_trace import (
+    BranchFaultTrace,
     InMemorySearchTraceCollector,
     PolicyCandidateTrace,
     PolicyProposalTrace,
@@ -68,6 +69,7 @@ __all__ = [
     "BeamSearchConfig",
     "BeamSearchEngine",
     "BeamSearchResult",
+    "BranchFaultTrace",
     "BudgetedOracleCollector",
     "CombatDecisionEngine",
     "DecisionOutcome",
