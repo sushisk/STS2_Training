@@ -27,6 +27,7 @@ from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.api.contract import ROOT_BRANCH_ID
+from sts2_training.decision.beam_search import AllBranchesFaultedError
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.oracle_log import (
     OracleJsonlWriter,
@@ -39,6 +40,15 @@ from sts2_training.runner._cli import add_common_arguments, configure_logging
 from sts2_training.runner.episode import build_engine
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario
 from sts2_training.selection.heuristic_selector import NoAvailableActionError
+
+
+# A hung/deadlocked RL Branch Worker can keep getting proposed as a top candidate,
+# making the SAME decision's search fail (AllBranchesFaultedError) over and over. Rather
+# than let that propagate as an uncaught crash (which also rolls back this episode's
+# already-written decisions) or silently retry until the outer per-episode wall-clock
+# budget expires, give up on the episode after this many CONSECUTIVE failures of the
+# same decision and terminate it early with the data collected so far intact.
+MAX_CONSECUTIVE_BRANCH_FAULTS = 3
 
 
 @dataclass(frozen=True)
@@ -129,19 +139,36 @@ class OracleEpisodeRunner:
                         decision=decision,
                     )
 
-                oracle_result = await self._oracle.collect(
-                    instance_id,
-                    decision,
-                    timeout_s=oracle_timeout_s,
-                )
+                consecutive_branch_faults = 0
+                decision_aborted = False
+                while True:
+                    try:
+                        oracle_result = await self._oracle.collect(
+                            instance_id,
+                            decision,
+                            timeout_s=oracle_timeout_s,
+                        )
 
-                # Commit with the runtime engine, not the teacher, so the state
-                # distribution remains aligned with the policy/search we intend to improve.
-                outcome = await self._commit_engine.decide(
-                    instance_id,
-                    timeout_s=decision_timeout_s,
-                    decision=decision,
-                )
+                        # Commit with the runtime engine, not the teacher, so the state
+                        # distribution remains aligned with the policy/search we intend
+                        # to improve.
+                        outcome = await self._commit_engine.decide(
+                            instance_id,
+                            timeout_s=decision_timeout_s,
+                            decision=decision,
+                        )
+                    except AllBranchesFaultedError:
+                        consecutive_branch_faults += 1
+                        if consecutive_branch_faults >= MAX_CONSECUTIVE_BRANCH_FAULTS:
+                            decision_aborted = True
+                            break
+                        continue
+                    else:
+                        break
+                if decision_aborted:
+                    completed = False
+                    termination_reason = "aborted_repeated_branch_failure"
+                    break
                 chosen = outcome.chosen_action_id
                 if chosen is None or chosen not in legal_actions:
                     raise NoAvailableActionError(
