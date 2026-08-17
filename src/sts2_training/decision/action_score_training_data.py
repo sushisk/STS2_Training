@@ -1,4 +1,4 @@
-"""Load supervised Combat ``action_score`` rankings from Oracle v6 JSONL records."""
+"""Load supervised Combat ``action_score`` rankings from Oracle v7 JSONL records."""
 
 from __future__ import annotations
 
@@ -320,13 +320,6 @@ def _records(path: Path):
             yield line_number, record
 
 
-def _positive_weight(value: Any, field: str) -> float:
-    number = _finite_float(value, field)
-    if number <= 0.0:
-        raise ValueError(f"{field} must be positive")
-    return number
-
-
 def _mapping(value: Any, field: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field} must be an object")
@@ -335,7 +328,7 @@ def _mapping(value: Any, field: str) -> Mapping[str, Any]:
 
 def _sequence(value: Any, field: str) -> Sequence[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise ValueError(f"{field} must be a sequence")
+        raise ValueError(f"{field} must be an array")
     return value
 
 
@@ -365,17 +358,15 @@ def _nonnegative_int(value: Any, field: str) -> int:
 
 def _finite_float(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be a finite number")
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError(f"{field} must be a finite number")
-    return number
+        raise ValueError(f"{field} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be finite")
+    return result
 
 
-__all__ = [
-    "CombatActionScoreDatasetStats",
-    "CombatActionScoreTrainingExample",
-    "PairwiseActionScoreExample",
-    "build_pairwise_action_score_examples",
-    "load_combat_action_score_examples",
-]
+def _positive_weight(value: float, field: str) -> float:
+    result = _finite_float(value, field)
+    if result <= 0.0:
+        raise ValueError(f"{field} must be positive")
+    return result
