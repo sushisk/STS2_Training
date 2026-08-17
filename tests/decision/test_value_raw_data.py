@@ -116,7 +116,7 @@ class ValueRawDataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oracle-v6.jsonl"
             path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "incompatible Oracle decision schema"):
+            with self.assertRaisesRegex(ValueError, "expected Oracle decision schema v7"):
                 load_oracle_value_raw_records([path])
 
     def test_raw_episode_group_keeps_complete_payloads(self) -> None:
