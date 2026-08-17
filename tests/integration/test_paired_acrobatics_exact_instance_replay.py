@@ -19,16 +19,35 @@ from _paired_rl_helpers import stop_paired_rl as _stop_paired_rl
 
 pytestmark = pytest.mark.integration
 
-# These fields are intentionally outside the Training-visible decision contract. This
-# regression guards that boundary only; it must not use their presence/absence to infer
-# how RL proves or materializes replay correctness internally.
-_FORBIDDEN_REPLAY_PROVENANCE_KEYS = frozenset(
-    {"cardInstanceId", "card_instance_id", "cardsDrawnThisStep"}
+# Replay reconstruction stays RL-internal. These names cover both discarded public
+# protocol designs and the current #64 ReplayPrefix bookkeeping. None belongs in a
+# Training-visible decision DTO.
+_FORBIDDEN_REPLAY_INTERNAL_KEYS = frozenset(
+    {
+        "cardInstanceId",
+        "card_instance_id",
+        "cardsDrawnThisStep",
+        "visibleDrawConstraints",
+        "visible_draw_constraints",
+        "visibleDrawTrackingBlocked",
+        "visible_draw_tracking_blocked",
+        "visibleDrawTrackingError",
+        "visible_draw_tracking_error",
+        "rootRelativeDrawOffset",
+        "root_relative_draw_offset",
+        "observableCardKey",
+        "observable_card_key",
+    }
 )
 
 
 def _acrobatics_config() -> dict:
-    """Reproduce the known mixed-hand Acrobatics path using ordinary public state."""
+    """Reproduce the public Hand-transfer shape used by the current RL #64 regression.
+
+    The duplicate DEFEND_SILENT copies intentionally differ in upgraded state. Current
+    #64 distinguishes replay-relevant public card state structurally; Training must not
+    need a physical-copy identity token to exercise the same scenario.
+    """
 
     return {
         "instance_type": "combat",
@@ -80,35 +99,36 @@ def _find_card_action(decision: dict, card_id: str) -> dict:
     )
 
 
-def _assert_no_replay_provenance_metadata(
+def _assert_no_replay_internal_metadata(
     value: object, *, path: str = "masked_emulator_dto"
 ) -> None:
-    """Fail if replay-provenance-only metadata crosses the Training boundary."""
+    """Fail if replay-only evidence/bookkeeping crosses the Training boundary."""
 
     if isinstance(value, dict):
-        leaked_keys = _FORBIDDEN_REPLAY_PROVENANCE_KEYS.intersection(value)
+        leaked_keys = _FORBIDDEN_REPLAY_INTERNAL_KEYS.intersection(value)
         assert not leaked_keys, (
-            f"Training-visible replay provenance leaked at {path}: "
+            f"Training-visible replay internals leaked at {path}: "
             f"{sorted(leaked_keys)!r}"
         )
         for key, child in value.items():
-            _assert_no_replay_provenance_metadata(child, path=f"{path}.{key}")
+            _assert_no_replay_internal_metadata(child, path=f"{path}.{key}")
         return
 
     if isinstance(value, list):
         for index, child in enumerate(value):
-            _assert_no_replay_provenance_metadata(child, path=f"{path}[{index}]")
+            _assert_no_replay_internal_metadata(child, path=f"{path}[{index}]")
 
 
-def _visible_choice_card_ids(decision: dict) -> list[str]:
-    """Read only normal Training-visible choice semantics."""
+def _training_visible_choice_card_ids(decision: dict) -> list[str]:
+    """Read only ordinary Training-visible legal-action semantics.
+
+    Current RL #64 derives its replay evidence from committed pre/post public Hand and
+    DrawPile state. PendingChoice option ordering/metadata is deliberately not part of
+    that proof, so this regression does not inspect or assert it.
+    """
 
     masked = decision["masked_emulator_dto"]
-    _assert_no_replay_provenance_metadata(masked)
-
-    pending_choice = masked.get("pendingChoice") or {}
-    options = pending_choice.get("options") or []
-    assert len(options) == 4, options
+    _assert_no_replay_internal_metadata(masked)
 
     card_ids: list[str] = []
     choice_actions = [
@@ -131,18 +151,19 @@ async def _exercise_acrobatics_training_boundary(port: int) -> None:
     async with AsyncTrainingApiClient(connection) as client:
         instance_id = await client.start_instance(_acrobatics_config(), timeout_s=30.0)
         root = await client.get_decision(instance_id, timeout_s=30.0)
+        _assert_no_replay_internal_metadata(root["masked_emulator_dto"])
         acrobatics = _find_card_action(root, "ACROBATICS")
 
-        # Commit through the ordinary Training -> RL -> Emulator path. Training checks
-        # only the public decision it receives; whether RL used any special replay path is
-        # deliberately an implementation detail outside this test.
+        # Commit through the ordinary Training -> RL -> Emulator path. RL #64 may derive
+        # Hand-transfer evidence from public pre/post state and record ReplayPrefix
+        # constraints internally; Training receives none of that representation.
         pending = await client.commit_action(
             instance_id,
             root["decision_point_id"],
             acrobatics["action_id"],
             timeout_s=30.0,
         )
-        card_ids = _visible_choice_card_ids(pending)
+        card_ids = _training_visible_choice_card_ids(pending)
         assert len(card_ids) == 4, card_ids
         assert set(card_ids) >= {
             "NEUTRALIZE",
@@ -169,9 +190,9 @@ async def _exercise_acrobatics_training_boundary(port: int) -> None:
         )
         collected = await collector.collect(instance_id, pending, timeout_s=60.0)
 
-        # The Training acceptance boundary is observable search behavior: an admitted /
+        # Training's acceptance boundary is observable search behavior: an admitted /
         # emulated replay failure must surface as a branch fault rather than disappear.
-        # For this known-good paired case, therefore, no such fault should be present.
+        # For this known-good paired path, therefore, no such fault should be present.
         assert collected.search_result.stats.branches_faulted == 0
         replay_mismatches = [
             event
@@ -182,8 +203,8 @@ async def _exercise_acrobatics_training_boundary(port: int) -> None:
         assert replay_mismatches == []
 
         # Multiple hypotheses make the regression exercise more than one search branch.
-        # Their rng_id values are not evidence for replay correctness and are not used to
-        # infer any provenance/transfer/order property.
+        # rng_id is only an exercise dimension here; current #64 explicitly does not use
+        # it as draw provenance or replay-evidence input.
         root_proposals = [
             event
             for event in collected.trace
@@ -200,10 +221,12 @@ async def _exercise_acrobatics_training_boundary(port: int) -> None:
 def test_paired_acrobatics_has_no_branch_faults() -> None:
     """Cross-repo regression for Training's fault-visibility and label-safety boundary.
 
-    The test is skipped unless STS2_RL_ROOT points at the paired RL checkout. It does not
-    reproduce RL's DrawPile transfer/order proof or inspect any replay materialization
-    details. It verifies that the ordinary Training-visible choice remains usable and that
-    the production Oracle/Beam path completes without replay_mismatch branch faults.
+    The historical filename predates #64's current public structural design. The test is
+    skipped unless STS2_RL_ROOT points at the paired RL checkout. It intentionally does
+    not reproduce RL's public Hand/DrawPile structural check, inspect ReplayPrefix
+    constraints, or depend on PendingChoice option order. It verifies only that the
+    ordinary Training-visible decision remains usable and that the production Oracle/Beam
+    path completes without replay_mismatch branch faults.
     """
 
     process, port = _start_paired_rl(pytest.skip)
