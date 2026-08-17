@@ -295,6 +295,82 @@ class OracleBranchFaultCensoringTest(unittest.TestCase):
         self.assertTrue(root.censored)
         self.assertEqual(root.censor_reason, "branch_fault:replay_mismatch")
 
+    def test_all_faulted_root_action_is_censored_in_exhaustive_collection(self) -> None:
+        faults = [
+            _fault(
+                branch_id="a-fault-1",
+                parent_node_id="search:root",
+                parent_branch_id="root",
+                rng_id=1,
+            ),
+            _fault(
+                branch_id="a-fault-2",
+                parent_node_id="search:root",
+                parent_branch_id="root",
+                rng_id=2,
+            ),
+        ]
+        end = SearchTraceEnd(
+            search_id="search",
+            reason="beam_exhausted",
+            best_root_action_id=None,
+            best_value=None,
+            depths_completed=0,
+            nodes_expanded=0,
+            branches_created=2,
+            branches_faulted=2,
+        )
+
+        targets = build_oracle_targets(
+            [_start(), _root_proposal(), *faults, end],
+            target_beam_width=1,
+            exhaustive_root_actions=True,
+        )
+
+        root = targets.root_actions[0]
+        self.assertTrue(root.evaluated)
+        self.assertEqual([outcome.rng_id for outcome in root.rng_outcomes], [1, 2])
+        self.assertTrue(all(outcome.censored for outcome in root.rng_outcomes))
+        self.assertTrue(all(outcome.value is None for outcome in root.rng_outcomes))
+        self.assertIsNone(root.estimated_q)
+        self.assertEqual(root.target_source, "no_target")
+        self.assertTrue(root.censored)
+        self.assertEqual(root.censor_reason, "branch_fault:replay_mismatch")
+
+    def test_all_faulted_root_action_is_evaluated_in_non_exhaustive_collection(self) -> None:
+        fault = _fault(
+            branch_id="a-fault",
+            parent_node_id="search:root",
+            parent_branch_id="root",
+            rng_id=1,
+        )
+        end = SearchTraceEnd(
+            search_id="search",
+            reason="beam_exhausted",
+            best_root_action_id=None,
+            best_value=None,
+            depths_completed=0,
+            nodes_expanded=0,
+            branches_created=1,
+            branches_faulted=1,
+        )
+
+        targets = build_oracle_targets(
+            [_start(), _root_proposal(), fault, end],
+            target_beam_width=1,
+            exhaustive_root_actions=False,
+        )
+
+        root = targets.root_actions[0]
+        self.assertTrue(root.evaluated)
+        self.assertEqual(len(root.rng_outcomes), 1)
+        self.assertIsNone(root.rng_outcomes[0].value)
+        self.assertEqual(root.rng_outcomes[0].censor_reason, "branch_fault:replay_mismatch")
+        self.assertIsNone(root.estimated_q)
+        self.assertEqual(root.target_source, "no_target")
+        self.assertTrue(root.censored)
+        self.assertEqual(root.censor_reason, "branch_fault:replay_mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()
