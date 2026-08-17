@@ -17,3 +17,5 @@ htmlcov/
 
 /data/*
 !/data/external_data/
+
+tools/output/
