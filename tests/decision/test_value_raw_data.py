@@ -95,7 +95,9 @@ class ValueRawDataTest(unittest.TestCase):
             records, contract = load_oracle_value_raw_records([path])
 
         self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 7)
+        self.assertEqual(ORACLE_EPISODE_RESULT_SCHEMA_VERSION, 2)
         self.assertEqual(records[0].payload["record_schema_version"], 7)
+        self.assertEqual(records[2].payload["record_schema_version"], 2)
         self.assertEqual(contract.dto_version, _DTO_VERSION)
         self.assertEqual(len(records), 3)
         self.assertEqual(records[0].payload["future_decision_field"]["producer"], "kept")
@@ -119,6 +121,18 @@ class ValueRawDataTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected Oracle decision schema v7"):
                 load_oracle_value_raw_records([path])
 
+    def test_raw_loader_rejects_non_v2_episode_records(self) -> None:
+        episode = _episode_record()
+        episode["record_schema_version"] = 3
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle-episode-v3.jsonl"
+            path.write_text(
+                json.dumps(_decision_record()) + "\n" + json.dumps(episode) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "expected Oracle episode schema v2"):
+                load_oracle_value_raw_records([path])
+
     def test_raw_episode_group_keeps_complete_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oracle.jsonl"
@@ -128,6 +142,8 @@ class ValueRawDataTest(unittest.TestCase):
             )
             episodes = load_raw_combat_value_episodes([path])
 
+        self.assertEqual(ORACLE_EPISODE_RESULT_SCHEMA_VERSION, 2)
+        self.assertEqual(episodes[0].episode_result.payload["record_schema_version"], 2)
         self.assertEqual(len(episodes), 1)
         self.assertEqual(episodes[0].instance_id, "inst-1")
         self.assertEqual(episodes[0].server_epoch, "epoch-1")
