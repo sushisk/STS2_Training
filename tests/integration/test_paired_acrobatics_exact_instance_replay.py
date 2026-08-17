@@ -19,16 +19,22 @@ from _paired_rl_helpers import stop_paired_rl as _stop_paired_rl
 
 pytestmark = pytest.mark.integration
 
-_FORBIDDEN_INSTANCE_ID_KEYS = frozenset({"cardInstanceId", "card_instance_id"})
+# These names belong to discarded replay-pinning protocol designs. Training must not
+# acquire a dependency on any of them: RL's producer proof and exact Snapshot-instance
+# pinning stay internal regardless of whether a future producer is a card, relic, or
+# potion.
+_FORBIDDEN_REPLAY_PINNING_KEYS = frozenset(
+    {"cardInstanceId", "card_instance_id", "cardsDrawnThisStep"}
+)
 
 
 def _acrobatics_config() -> dict:
-    """Mirror Emulator #25's duplicate-CardId case with a normal mixed hand.
+    """Exercise RL #64's duplicate-CardId structural proof with a normal mixed hand.
 
-    The pre-existing NEUTRALIZE is deliberate: Acrobatics asks the player to discard
-    from the whole post-draw hand, not only from the three cards it just drew. A paired
-    replay fix must therefore remain correct when the visible PendingChoice contains a
-    card that was already in Hand before the real Acrobatics step.
+    Emulator #25 is documentation-only; this scenario intentionally uses the ordinary
+    Emulator runtime contract. The pre-existing NEUTRALIZE matters because Acrobatics
+    asks the player to discard from the whole post-draw hand, not only from the cards it
+    just drew.
     """
 
     return {
@@ -81,35 +87,42 @@ def _find_card_action(decision: dict, card_id: str) -> dict:
     )
 
 
-def _assert_no_instance_identity(value: object, *, path: str = "masked_emulator_dto") -> None:
-    """Fail if Emulator-only concrete card identity leaks anywhere into Training DTOs."""
+def _assert_no_replay_pinning_protocol_metadata(
+    value: object, *, path: str = "masked_emulator_dto"
+) -> None:
+    """Fail if discarded replay-pinning protocol metadata reaches Training.
+
+    This is intentionally producer-agnostic. Training should not need to know whether
+    RL proved a committed transition from a card today or from a relic/potion producer in
+    the future; it consumes the same ordinary masked decision schema either way.
+    """
 
     if isinstance(value, dict):
-        leaked_keys = _FORBIDDEN_INSTANCE_ID_KEYS.intersection(value)
+        leaked_keys = _FORBIDDEN_REPLAY_PINNING_KEYS.intersection(value)
         assert not leaked_keys, (
-            f"Training-visible concrete card identity leaked at {path}: "
+            f"Training-visible replay-pinning metadata leaked at {path}: "
             f"{sorted(leaked_keys)!r}"
         )
         for key, child in value.items():
-            _assert_no_instance_identity(child, path=f"{path}.{key}")
+            _assert_no_replay_pinning_protocol_metadata(child, path=f"{path}.{key}")
         return
 
     if isinstance(value, list):
         for index, child in enumerate(value):
-            _assert_no_instance_identity(child, path=f"{path}[{index}]")
+            _assert_no_replay_pinning_protocol_metadata(child, path=f"{path}[{index}]")
 
 
-def _visible_choice_card_ids_without_instance_identity(decision: dict) -> list[str]:
-    """Return Training-visible card ids and enforce the RL-internal identity boundary.
+def _visible_choice_card_ids_without_replay_pinning_metadata(decision: dict) -> list[str]:
+    """Return normal Training-visible card ids and enforce the cross-repo boundary.
 
-    Emulator #25 emits ``cardInstanceId`` at its visible card-choice boundary so RL #64
-    can reconstruct the exact concrete replay prefix. RL must consume that token before
-    building ``masked_emulator_dto``. Training therefore sees the card candidates but
-    never receives persistent concrete-copy identity anywhere in the masked DTO.
+    RL #64 derives its current Acrobatics pins from already-visible option state plus the
+    Held Stable Snapshot. Emulator #25 adds no identity/provenance token, and Training
+    receives no replay-prefix constraint representation. Future relic/potion producer
+    proofs must preserve this same Training-facing contract.
     """
 
     masked = decision["masked_emulator_dto"]
-    _assert_no_instance_identity(masked)
+    _assert_no_replay_pinning_protocol_metadata(masked)
 
     pending_choice = masked.get("pendingChoice") or {}
     options = pending_choice.get("options") or []
@@ -131,24 +144,24 @@ def _visible_choice_card_ids_without_instance_identity(decision: dict) -> list[s
     return card_ids
 
 
-async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
+async def _exercise_acrobatics_structural_replay_pinning(port: int) -> None:
     connection = TcpConnection(host=_HOST, port=port, connect_timeout_s=5.0)
     async with AsyncTrainingApiClient(connection) as client:
         instance_id = await client.start_instance(_acrobatics_config(), timeout_s=30.0)
         root = await client.get_decision(instance_id, timeout_s=30.0)
         acrobatics = _find_card_action(root, "ACROBATICS")
 
-        # This is a real committed step, not an emulated branch. Emulator #25 publishes
-        # concrete card identity to RL at the resulting choice; RL #64 translates it into
-        # internal replay constraints before masking. Training should see the four normal
-        # candidates but none of the persistent concrete-instance tokens.
+        # This is a real committed step, not an emulated branch. No extra Emulator
+        # identity/provenance field is introduced at the resulting PendingChoice. RL #64
+        # proves the visible drawn tail structurally against its Held Stable Snapshot and
+        # stores exact root-instance pins only in its own ReplayPrefix bookkeeping.
         pending = await client.commit_action(
             instance_id,
             root["decision_point_id"],
             acrobatics["action_id"],
             timeout_s=30.0,
         )
-        card_ids = _visible_choice_card_ids_without_instance_identity(pending)
+        card_ids = _visible_choice_card_ids_without_replay_pinning_metadata(pending)
         assert len(card_ids) == 4, card_ids
         assert set(card_ids) >= {
             "NEUTRALIZE",
@@ -157,9 +170,10 @@ async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
         }
         assert card_ids.count("DEFEND_SILENT") == 2, card_ids
 
-        # Exact-instance replay still has to work even though Training cannot observe the
-        # concrete ids that RL used internally. Multiple RNG hypotheses exercise that
-        # internal pinning through the production Oracle/Beam path.
+        # Multiple RNG hypotheses exercise RL's internal source-agnostic constraint
+        # consumer/materializer through the production Training Oracle/Beam path. From
+        # Training's perspective there is no card/relic/potion provenance protocol to
+        # inspect or branch on.
         collector = RootValueLoggingOracleCollector(
             client,
             policy=PriorHeuristicPolicy(),
@@ -200,18 +214,21 @@ async def _exercise_acrobatics_exact_instance_replay(port: int) -> None:
         await client.close_instance(instance_id, timeout_s=30.0)
 
 
-def test_paired_acrobatics_exact_instance_replay_has_no_branch_faults() -> None:
-    """Cross-repo gate for Training #72 + RL #64 + Emulator #25.
+def test_paired_acrobatics_structural_replay_pinning_has_no_branch_faults() -> None:
+    """Cross-repo gate for Training #72 + RL #64 + documentation-only Emulator #25.
 
-    The test is skipped unless STS2_RL_ROOT points at the paired RL checkout. That RL
-    checkout must in turn use an Emulator build containing #25 (or the equivalent merged
-    implementation). It exercises the production Training Oracle/Beam path and verifies
-    both sides of the privacy-safe contract: RL-internal exact replay succeeds while
-    Training-facing DTOs contain no ``cardInstanceId``.
+    The test is skipped unless STS2_RL_ROOT points at the paired RL checkout. It exercises
+    the production Training Oracle/Beam path and verifies the intended boundary: RL's
+    structural producer proof and exact internal pinning succeed without requiring any
+    replay-pinning-specific identity/provenance field in the Emulator or Training DTO.
+
+    The reproduction is card-based because that is the currently audited producer. The
+    Training contract is deliberately not card-specific: future relic/potion producer
+    proofs should require no Training schema or decision-engine change.
     """
 
     process, port = _start_paired_rl(pytest.skip)
     try:
-        asyncio.run(_exercise_acrobatics_exact_instance_replay(port))
+        asyncio.run(_exercise_acrobatics_structural_replay_pinning(port))
     finally:
         _stop_paired_rl(process)
