@@ -94,6 +94,8 @@ class ValueRawDataTest(unittest.TestCase):
             )
             records, contract = load_oracle_value_raw_records([path])
 
+        self.assertEqual(ORACLE_RECORD_SCHEMA_VERSION, 7)
+        self.assertEqual(records[0].payload["record_schema_version"], 7)
         self.assertEqual(contract.dto_version, _DTO_VERSION)
         self.assertEqual(len(records), 3)
         self.assertEqual(records[0].payload["future_decision_field"]["producer"], "kept")
@@ -107,6 +109,15 @@ class ValueRawDataTest(unittest.TestCase):
         # The loader owns a deep copy rather than sharing mutable producer fixtures.
         decision["future_decision_field"]["producer"] = "mutated"
         self.assertEqual(records[0].payload["future_decision_field"]["producer"], "kept")
+
+    def test_raw_loader_rejects_v6_decision_records(self) -> None:
+        legacy = _decision_record()
+        legacy["record_schema_version"] = 6
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oracle-v6.jsonl"
+            path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incompatible Oracle decision schema"):
+                load_oracle_value_raw_records([path])
 
     def test_raw_episode_group_keeps_complete_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
