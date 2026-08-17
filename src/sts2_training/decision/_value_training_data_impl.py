@@ -1,4 +1,4 @@
-"""Load supervised and actual-trajectory Combat ValueModel data from Oracle v6 JSONL."""
+"""Load supervised and actual-trajectory Combat ValueModel data from Oracle v7 JSONL."""
 
 from __future__ import annotations
 
