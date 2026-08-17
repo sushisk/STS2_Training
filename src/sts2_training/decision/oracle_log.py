@@ -12,11 +12,10 @@ from typing import Any
 from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.decision.oracle_search import OracleCollectionResult
 
-# v6 keeps the Oracle/search teacher payload from v5 and adds enough public runtime
-# context to reconstruct the actual committed Combat trajectory. The logging layer is
-# intentionally information-preserving for bounded public information; deep Beam DTOs
-# remain explicitly excluded because their volume scales with search depth/width.
-ORACLE_RECORD_SCHEMA_VERSION = 6
+# v7 extends the persisted search diagnostics from v6 with explicit branch-fault
+# observability: search_trace may contain BranchFaultTrace events and search summaries
+# carry branches_faulted. The runtime-transition / public DTO contract from v6 is kept.
+ORACLE_RECORD_SCHEMA_VERSION = 7
 ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
 # Value training relies on the full public card-instance identity added by STS2_RL mask
 # v1.2: pile multisets retain upgradeLevel, tinker-time state, and enchantment.
