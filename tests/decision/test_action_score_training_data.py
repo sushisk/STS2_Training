@@ -138,7 +138,7 @@ class CombatActionScoreTrainingDataTest(unittest.TestCase):
     def test_v6_record_is_rejected_instead_of_being_reinterpreted_as_v7(self) -> None:
         legacy = _record()
         legacy["record_schema_version"] = 6
-        with self.assertRaisesRegex(ValueError, "expected Oracle record schema v7"):
+        with self.assertRaisesRegex(ValueError, "expected Oracle decision schema v7"):
             self._load(legacy)
 
     def test_board_context_interaction_survives_pairwise_delta(self) -> None:
