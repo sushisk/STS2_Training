@@ -497,13 +497,16 @@ def build_oracle_targets(
     expanded_node_ids = {proposal.parent_node_id for proposal in proposal_events}
 
     fault_reason_by_root_rng: dict[tuple[str, int], str] = {}
+    fault_depth_by_root_rng: dict[tuple[str, int], int] = {}
     fault_reason_by_ancestor: dict[str, str] = {}
     for fault in faults:
         reason = _branch_fault_censor_reason(fault)
         if fault.root_action_id is not None:
-            fault_reason_by_root_rng.setdefault(
-                (fault.root_action_id, fault.rng_id),
-                reason,
+            key = (fault.root_action_id, fault.rng_id)
+            fault_reason_by_root_rng.setdefault(key, reason)
+            fault_depth_by_root_rng[key] = max(
+                fault_depth_by_root_rng.get(key, 0),
+                fault.combat_depth,
             )
         ancestor_id = fault.parent_node_id
         seen_ancestor_ids: set[str] = set()
@@ -519,6 +522,7 @@ def build_oracle_targets(
         oracle_pruned_node_ids=oracle_pruned_node_ids,
         expanded_node_ids=expanded_node_ids,
         fault_reason_by_root_rng=fault_reason_by_root_rng,
+        fault_depth_by_root_rng=fault_depth_by_root_rng,
         exhaustive_root_actions=exhaustive_root_actions,
         search_reason=end.reason,
     )
@@ -629,6 +633,7 @@ def _root_action_targets(
     oracle_pruned_node_ids: set[str],
     expanded_node_ids: set[str],
     fault_reason_by_root_rng: Mapping[tuple[str, int], str],
+    fault_depth_by_root_rng: Mapping[tuple[str, int], int],
     exhaustive_root_actions: bool,
     search_reason: str,
 ) -> list[RootActionOracleTarget]:
@@ -708,7 +713,10 @@ def _root_action_targets(
                 and node.node_id not in expanded_node_ids
             ]
             best = max(leaves, key=lambda node: node.state_score, default=None)
-            deepest = max((node.combat_depth for node in nodes), default=0)
+            deepest = max(
+                max((node.combat_depth for node in nodes), default=0),
+                fault_depth_by_root_rng.get((action_id, rng_id), 0),
+            )
             terminal_reached = any(node.terminal for node in leaves)
             branch_fault_reason = fault_reason_by_root_rng.get((action_id, rng_id))
             if branch_fault_reason is not None:
