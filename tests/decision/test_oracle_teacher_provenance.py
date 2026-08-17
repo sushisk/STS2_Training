@@ -98,11 +98,12 @@ def test_single_teacher_summary_retains_complete_provenance(tmp_path: Path) -> N
     summary = inspect_oracle_teacher_provenance([first, second])
     payload = summary.to_json()
 
+    assert ORACLE_RECORD_SCHEMA_VERSION == 7
     assert summary.mixed is False
     assert summary.record_count == 2
     assert len(summary.teacher_fingerprints) == 1
     assert payload["schema_version"] == 2
-    assert payload["oracle_record_schema_version"] == ORACLE_RECORD_SCHEMA_VERSION
+    assert payload["oracle_record_schema_version"] == 7
     assert payload["teachers"][0]["provenance"]["teacher_value_metadata"]["checkpoint"] == "value-a"
     assert payload["teachers"][0]["target_generation"]["max_depth"] == 4
     assert payload["teachers"][0]["target_generation"]["pruner_version"] == "1"
@@ -216,10 +217,10 @@ def test_missing_target_generation_metadata_is_rejected(tmp_path: Path) -> None:
 
 
 def test_oracle_current_schema_is_required_for_teacher_provenance_validation(tmp_path: Path) -> None:
-    path = tmp_path / "old.jsonl"
-    _write(path, [_record(_provenance(value_checkpoint="value-a"), schema_version=2)])
+    path = tmp_path / "oracle-v6.jsonl"
+    _write(path, [_record(_provenance(value_checkpoint="value-a"), schema_version=6)])
 
-    with pytest.raises(ValueError, match="expected Oracle record schema"):
+    with pytest.raises(ValueError, match="expected Oracle record schema v7"):
         inspect_oracle_teacher_provenance([path])
 
 
