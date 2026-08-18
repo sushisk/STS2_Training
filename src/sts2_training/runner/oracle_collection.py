@@ -61,33 +61,43 @@ class OracleEpisodeResult:
 
 
 # //WORKING
-# 実装完了:
+# 現在の実装:
 # - BeamSearchConfig.branch_fault_policy=None は既存 runtime Beam の retry 挙動を維持し、
 #   Oracle CLI の teacher Beam config だけ BranchFaultPolicy() を有効化する。
-# - structural fault (Snapshot restore/reference_integrity/dangling or missing instance) は
-#   最初の該当 emulate_actions 応答で retry せず aborted_snapshot_restore_fault にする。
-# - settlement timeout は初回+retry 1回まで。retry 後の同一 frontier で logical timeout が
-#   count>=3 または元 frontier の10%以上なら aborted_settlement_timeout_budget にする。
-# - BranchFaultAbortError は search/signature/count/detail/depth/branch/action/root-action を保持し、
-#   この Runner が runtime decide/commit より前に捕捉するため該当 decision は commit されない。
-# - fatal fault は既存 episode-result schema v2 の optional fault_summary に1件だけ保存する。
-#   永続化時に decisions_collected を現在の zero-based decision_index として summary に付与する。
+# - fault signature は decision/branch_faults.py に集約し、Beam policy と Oracle JSONL が
+#   同じ classifier を使う。旧ログの Snapshot restore/reference_integrity/dangling/missing instance に
+#   加え、現行 STS2_RL の typed fault snapshot_restore_missing_monster_move も structural 扱いする。
+# - structural fault は最初の該当 emulate_actions 応答で retry せず
+#   aborted_snapshot_restore_fault にする。この Runner が runtime decide/commit 前に捕捉するため、
+#   該当 decision の runtime action は commit されない。
+# - settlement timeout は logical branch ごとの timeout 発生回数で初回+retry 1回まで数える。
+#   以前は全体 attempt_index で数えていたため generic fault -> 初回 timeout の順だと timeout retry を
+#   失う edge があったが修正済み。global max_branch_attempts 自体は従来どおり上限として残す。
+# - retry 後に残る同一 frontier の logical settlement timeout が count>=3 または元 frontier の
+#   10%以上なら aborted_settlement_timeout_budget にする。RL の generic task_timeout は別物なので、
+#   settlement 文言を持たない task_timeout をこの budget へ広げない。
+# - fatal fault は episode-result schema v2 の optional fault_summary に1件だけ保存し、
+#   decisions_collected を現在の zero-based decision_index として永続化時に付与する。
 # - non-fatal BranchFaultTrace は target censoring/RNG lineage のため全件を in-memory で維持する。
-#   JSONL では同一 signature の full detail は初回だけ、2件目以降は detail=null とし、
-#   search_end.fault_summaries に count/first-last depth/branch/action type/root action を集約する。
-# 互換性/検証:
-# - episode schema を一度 v3 に上げたところ既存 raw-data v2 contract の3 test が失敗したため、
-#   schema migration は撤回し v2 + optional field にした。以後 hosted contract CI は成功している。
-# - structural 即 abort、timeout retry/回復/閾値、generic fault の従来3 attempt、commit 無し abort、
-#   JSONL detail 集約、BeamSearch.search() からの例外伝播と cancel/release cleanup をテスト済み。
-# - PR 本文も「方針提案のみ」から現在の実装/互換性/検証内容へ更新済み。
+#   JSONL では同一 signature の full detail は初回だけ残し、search_end.fault_summaries に集約する。
+# paired 静的照合:
+# - STS2_RL main (12bc6176e47b6d5659ef7aab6d73925421803092) は wire schema 0.8 / mask 1.2 で
+#   Training と一致する。RL live_combat_session は restored enemy Move 欠落を CLR Step 前に検出し、
+#   snapshot_restore_missing_monster_move を返すため、historical settlement timeout と区別できる。
+# - この typed restore gap は deterministic structural として即 abort、historical な opaque
+#   "Timed out waiting for the next decision point or settlement" だけ transient 1-retry 方針を維持する。
+# 検証状況:
+# - 既存 hosted CI は schema v2 互換化後から成功済み。structural/timeout/generic retry、commit 無し abort、
+#   JSONL aggregation、BeamSearch.search() の例外伝播と cancel/release cleanup を回帰テスト化済み。
+# - 今回、現行 RL typed restore fault の即 abort と generic -> timeout -> success の retry accounting
+#   回帰テストを追加した。最新 head の hosted CI 結果を次に確認する。
 # 次の作業者向け:
-# - repo-local hosted test で確認できる範囲は完了。可能なら実 STS2_RL を使い、Defect combat05 で
-#   decision index 2 付近の structural fault が1回で episode abort することを paired 検証する。
-# - Regent combat01 では isolated settlement timeout が1 retryで回復できること、persistent な場合だけ
-#   count/ratio budget で abort することを実ログで確認する。実 RL が無ければこの PR は review 待ち。
-# - generic fault の console warning は意図的に既存のまま。今回対象の structural/timeout cascade は
-#   _score_frontier の per-branch warning 前に fail-fast するため追加 logging filter は入れていない。
+# - 最新 hosted CI が失敗した場合はこの paired-compat 追加差分から確認する。成功後は PR 本文にも
+#   現行 RL typed fault と per-logical timeout accounting の追補を反映する。
+# - 実 STS2_RL/Emulator が使えるなら Defect/Regent の paired run を行い、typed restore gap は1回で
+#   abort、opaque isolated settlement timeout は1 retry で回復可能であることを実ログ確認する。
+# - generic fault の console warning は意図的に既存のまま。対象 structural/timeout cascade は
+#   _score_frontier の per-branch warning 前に fail-fast/timeout budget で止める。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
