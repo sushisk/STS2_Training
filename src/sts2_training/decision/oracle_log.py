@@ -11,6 +11,7 @@ from typing import Any
 
 from sts2_training.api.contract import SCHEMA_VERSION
 from sts2_training.decision.oracle_search import OracleCollectionResult
+from sts2_training.decision.search_trace import BranchFaultTrace, SearchTraceEnd
 
 # v7 extends the persisted search diagnostics from v6 with explicit branch-fault
 # observability: search_trace may contain BranchFaultTrace events and search summaries
@@ -22,6 +23,14 @@ ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
 # Value training relies on the full public card-instance identity added by STS2_RL mask
 # v1.2: pile multisets retain upgradeLevel, tinker-time state, and enchantment.
 ORACLE_VALUE_MASK_VERSION = "1.2"
+
+_STRUCTURAL_FAULT_MARKERS = (
+    "snapshot restore rejected",
+    "reference_integrity:",
+    "dangling reference",
+    "missing captured instance",
+)
+_SETTLEMENT_TIMEOUT_MARKER = "timed out waiting for the next decision point or settlement"
 
 
 def require_oracle_value_mask_version(
@@ -82,6 +91,98 @@ def response_metadata_without_masked_dto(response: Mapping[str, Any]) -> dict[st
             if key != "masked_emulator_dto"
         }
     )
+
+
+def _fault_trace_signature(event: BranchFaultTrace) -> str:
+    """Return a stable, bounded signature for persisted Oracle fault aggregation."""
+
+    detail = event.detail or ""
+    normalized_detail = detail.lower()
+    normalized_kind = event.fault_kind.lower() if event.fault_kind else ""
+    if normalized_kind in {"reference_integrity", "snapshot_restore"} or any(
+        marker in normalized_detail for marker in _STRUCTURAL_FAULT_MARKERS
+    ):
+        return "snapshot_restore_fault"
+    if _SETTLEMENT_TIMEOUT_MARKER in normalized_detail:
+        return "settlement_timeout"
+
+    kind = normalized_kind or event.status.lower() or "branch_fault"
+    first_line = next(
+        (line.strip().lower() for line in detail.splitlines() if line.strip()),
+        "",
+    )
+    if not first_line:
+        return kind
+    return f"{kind}:{first_line[:160]}"
+
+
+def _serialized_search_trace(events: Sequence[Any]) -> list[dict[str, Any]]:
+    """Serialize trace events while bounding duplicate branch-fault detail volume.
+
+    BranchFaultTrace events remain one-per-logical-fault because Oracle target censoring
+    and lineage auditing depend on their branch/RNG locations. For each fault signature,
+    only the first persisted trace keeps the full ``detail``. SearchTraceEnd receives a
+    bounded aggregate so repeated detail text does not dominate Oracle JSONL size.
+    """
+
+    aggregates: dict[str, dict[str, Any]] = {}
+    payloads: list[dict[str, Any]] = []
+    for event in events:
+        if isinstance(event, BranchFaultTrace):
+            signature = _fault_trace_signature(event)
+            aggregate = aggregates.get(signature)
+            first_occurrence = aggregate is None
+            if first_occurrence:
+                aggregate = {
+                    "fault_signature": signature,
+                    "fault_kind": event.fault_kind,
+                    "count": 0,
+                    "first_detail": event.detail,
+                    "first_depth": event.combat_depth,
+                    "last_depth": event.combat_depth,
+                    "first_branch_id": event.branch_id,
+                    "last_branch_id": event.branch_id,
+                    "action_ids": set(),
+                    "action_types": set(),
+                    "root_action_ids": set(),
+                }
+                aggregates[signature] = aggregate
+            assert aggregate is not None
+            aggregate["count"] += 1
+            aggregate["last_depth"] = event.combat_depth
+            aggregate["last_branch_id"] = event.branch_id
+            aggregate["action_ids"].add(event.action_id)
+            if event.action_type is not None:
+                aggregate["action_types"].add(event.action_type)
+            if event.root_action_id is not None:
+                aggregate["root_action_ids"].add(event.root_action_id)
+
+            payload = _jsonable(event)
+            if not first_occurrence:
+                payload["detail"] = None
+            payloads.append(payload)
+            continue
+
+        payload = _jsonable(event)
+        if isinstance(event, SearchTraceEnd):
+            payload["fault_summaries"] = [
+                {
+                    "fault_signature": aggregate["fault_signature"],
+                    "fault_kind": aggregate["fault_kind"],
+                    "count": aggregate["count"],
+                    "first_detail": aggregate["first_detail"],
+                    "first_depth": aggregate["first_depth"],
+                    "last_depth": aggregate["last_depth"],
+                    "first_branch_id": aggregate["first_branch_id"],
+                    "last_branch_id": aggregate["last_branch_id"],
+                    "action_ids": sorted(aggregate["action_ids"]),
+                    "action_types": sorted(aggregate["action_types"]),
+                    "root_action_ids": sorted(aggregate["root_action_ids"]),
+                }
+                for _, aggregate in sorted(aggregates.items())
+            ]
+        payloads.append(payload)
+    return payloads
 
 
 def _require_root_value_sample_contracts(samples: Any, *, dto_version: str) -> None:
@@ -233,7 +334,7 @@ def oracle_collection_record(
         # cannot leak back into the root-only logging contract.
         "oracle_search_result": _bounded_beam_search_result(result.search_result),
         "oracle_targets": _jsonable(result.targets),
-        "search_trace": [_jsonable(event) for event in result.trace],
+        "search_trace": _serialized_search_trace(result.trace),
         # The actual action committed by the runtime policy/search, plus the exact public
         # post-commit DTO. This is distinct from counterfactual Oracle root samples and
         # makes terminal-return/TD Value learning possible without guessing which branch
