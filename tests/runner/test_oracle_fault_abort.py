@@ -112,7 +112,7 @@ class OracleFaultAbortRunnerTest(unittest.IsolatedAsyncioTestCase):
                 for line in path.read_text(encoding="utf-8").splitlines()
             ]
 
-        self.assertEqual(ORACLE_EPISODE_RESULT_SCHEMA_VERSION, 3)
+        self.assertEqual(ORACLE_EPISODE_RESULT_SCHEMA_VERSION, 2)
         self.assertEqual(oracle.decisions, ["d-root"])
         self.assertEqual(commit_engine.decisions, [])
         self.assertEqual(client.commits, [])
@@ -125,7 +125,7 @@ class OracleFaultAbortRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 1)
         record = records[0]
         self.assertEqual(record["record_type"], "combat_oracle_episode_result")
-        self.assertEqual(record["record_schema_version"], 3)
+        self.assertEqual(record["record_schema_version"], 2)
         self.assertFalse(record["completed"])
         self.assertEqual(record["termination_reason"], "aborted_snapshot_restore_fault")
         self.assertEqual(record["fault_summary"]["search_id"], "search-structural")
