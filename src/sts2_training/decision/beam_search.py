@@ -28,6 +28,11 @@ from typing import Any
 
 from sts2_training.api.contract import ROOT_BRANCH_ID, RequestRejectedError
 from sts2_training.api.transport import TransportError
+from sts2_training.decision.branch_faults import (
+    SETTLEMENT_TIMEOUT_SIGNATURE,
+    SNAPSHOT_RESTORE_FAULT_SIGNATURE,
+    classify_known_branch_fault,
+)
 from sts2_training.decision.candidate_coverage import (
     CandidateProposal,
     propose_batch_with_provenance,
@@ -62,13 +67,6 @@ JsonObject = dict[str, Any]
 _LOG = logging.getLogger(__name__)
 _RESOLVED_STATUSES = frozenset({"completed", "partial"})
 _WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
-_STRUCTURAL_BRANCH_FAULT_MARKERS = (
-    "snapshot restore rejected",
-    "reference_integrity:",
-    "dangling reference",
-    "missing captured instance",
-)
-_SETTLEMENT_TIMEOUT_MARKER = "timed out waiting for the next decision point or settlement"
 
 
 class AllBranchesFaultedError(RuntimeError):
@@ -923,6 +921,7 @@ class BeamSearchEngine:
         final_timeout_faults: list[
             tuple[tuple[BeamNode, CandidateProposal, str, int], Mapping[str, Any]]
         ] = []
+        timeout_fault_counts_by_order: dict[int, int] = {}
 
         def ordered_final_meta() -> list[tuple[BeamNode, CandidateProposal, str, int]]:
             return [final_meta_by_order[index] for index in sorted(final_meta_by_order)]
@@ -976,7 +975,7 @@ class BeamSearchEngine:
                         (meta, result)
                         for meta in chunk_meta
                         for result in [chunk_results.get(meta[2])]
-                        if _branch_fault_signature(result) == "snapshot_restore_fault"
+                        if _branch_fault_signature(result) == SNAPSHOT_RESTORE_FAULT_SIGNATURE
                         and isinstance(result, Mapping)
                     ]
                     if structural_faults:
@@ -984,7 +983,7 @@ class BeamSearchEngine:
                             "aborted_snapshot_restore_fault",
                             _branch_fault_summary(
                                 search_id or "unknown",
-                                "snapshot_restore_fault",
+                                SNAPSHOT_RESTORE_FAULT_SIGNATURE,
                                 structural_faults,
                             ),
                         )
@@ -1002,21 +1001,26 @@ class BeamSearchEngine:
                         continue
 
                     fault_signature = _branch_fault_signature(result)
-                    attempt_limit = cfg.max_branch_attempts
+                    timeout_attempts_exhausted = False
                     if (
                         fault_policy is not None
-                        and fault_signature == "settlement_timeout"
+                        and fault_signature == SETTLEMENT_TIMEOUT_SIGNATURE
                     ):
-                        attempt_limit = min(
-                            attempt_limit,
-                            fault_policy.settlement_timeout_max_attempts,
+                        timeout_fault_count = timeout_fault_counts_by_order.get(logical_order, 0) + 1
+                        timeout_fault_counts_by_order[logical_order] = timeout_fault_count
+                        timeout_attempts_exhausted = (
+                            timeout_fault_count
+                            >= fault_policy.settlement_timeout_max_attempts
                         )
-                    if attempt_index + 1 >= attempt_limit:
+                    global_attempts_exhausted = (
+                        attempt_index + 1 >= cfg.max_branch_attempts
+                    )
+                    if global_attempts_exhausted or timeout_attempts_exhausted:
                         final_results[branch_id] = result
                         final_meta_by_order[logical_order] = meta
                         if (
                             fault_policy is not None
-                            and fault_signature == "settlement_timeout"
+                            and fault_signature == SETTLEMENT_TIMEOUT_SIGNATURE
                             and isinstance(result, Mapping)
                         ):
                             final_timeout_faults.append((meta, result))
@@ -1034,7 +1038,7 @@ class BeamSearchEngine:
                         "aborted_settlement_timeout_budget",
                         _branch_fault_summary(
                             search_id or "unknown",
-                            "settlement_timeout",
+                            SETTLEMENT_TIMEOUT_SIGNATURE,
                             final_timeout_faults,
                         ),
                     )
@@ -1393,19 +1397,13 @@ def _is_resolved_branch_result(result: Any) -> bool:
 
 
 def _branch_fault_signature(result: Any) -> str | None:
-    if not isinstance(result, Mapping) or result.get("status") != "faulted":
+    if not isinstance(result, Mapping):
         return None
-    detail = result.get("error")
-    normalized_detail = detail.lower() if isinstance(detail, str) else ""
-    fault_kind = result.get("fault_kind")
-    normalized_kind = fault_kind.lower() if isinstance(fault_kind, str) else ""
-    if normalized_kind in {"reference_integrity", "snapshot_restore"} or any(
-        marker in normalized_detail for marker in _STRUCTURAL_BRANCH_FAULT_MARKERS
-    ):
-        return "snapshot_restore_fault"
-    if _SETTLEMENT_TIMEOUT_MARKER in normalized_detail:
-        return "settlement_timeout"
-    return None
+    return classify_known_branch_fault(
+        status=result.get("status"),
+        fault_kind=result.get("fault_kind"),
+        detail=result.get("error"),
+    )
 
 
 def _branch_fault_summary(
