@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sts2_training.api.contract import SCHEMA_VERSION
+from sts2_training.decision.branch_faults import classify_known_branch_fault
 from sts2_training.decision.oracle_search import OracleCollectionResult
 from sts2_training.decision.search_trace import BranchFaultTrace, SearchTraceEnd
 
@@ -23,14 +24,6 @@ ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
 # Value training relies on the full public card-instance identity added by STS2_RL mask
 # v1.2: pile multisets retain upgradeLevel, tinker-time state, and enchantment.
 ORACLE_VALUE_MASK_VERSION = "1.2"
-
-_STRUCTURAL_FAULT_MARKERS = (
-    "snapshot restore rejected",
-    "reference_integrity:",
-    "dangling reference",
-    "missing captured instance",
-)
-_SETTLEMENT_TIMEOUT_MARKER = "timed out waiting for the next decision point or settlement"
 
 
 def require_oracle_value_mask_version(
@@ -96,16 +89,16 @@ def response_metadata_without_masked_dto(response: Mapping[str, Any]) -> dict[st
 def _fault_trace_signature(event: BranchFaultTrace) -> str:
     """Return a stable, bounded signature for persisted Oracle fault aggregation."""
 
-    detail = event.detail or ""
-    normalized_detail = detail.lower()
-    normalized_kind = event.fault_kind.lower() if event.fault_kind else ""
-    if normalized_kind in {"reference_integrity", "snapshot_restore"} or any(
-        marker in normalized_detail for marker in _STRUCTURAL_FAULT_MARKERS
-    ):
-        return "snapshot_restore_fault"
-    if _SETTLEMENT_TIMEOUT_MARKER in normalized_detail:
-        return "settlement_timeout"
+    known_signature = classify_known_branch_fault(
+        status=event.status,
+        fault_kind=event.fault_kind,
+        detail=event.detail,
+    )
+    if known_signature is not None:
+        return known_signature
 
+    detail = event.detail or ""
+    normalized_kind = event.fault_kind.lower() if event.fault_kind else ""
     kind = normalized_kind or event.status.lower() or "branch_fault"
     first_line = next(
         (line.strip().lower() for line in detail.splitlines() if line.strip()),
