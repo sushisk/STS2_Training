@@ -61,11 +61,17 @@ class OracleEpisodeResult:
 # - RootValueLoggingOracleCollector.collect() は engine.search() の例外を握り潰さず、この層まで伝播する。
 # - BeamSearchEngine._emulate_depth_batch() は unresolved branch を fault_kind/detail に関係なく
 #   max_branch_attempts まで再試行するため、structural fault の再試行・ログ増幅点は BeamSearch 側にある。
+# - API contract は faulted branch の非空 error だけを必須化し、fault_kind は必須ではない。
+#   structural/timeout 判定は fault_kind 単独ではなく、既知 error signature も使う必要がある。
 # - 最終 unresolved branch は _score_frontier/_record_branch_fault で logical branch ごとに記録され、
 #   SearchTraceEnd は総 branches_faulted 数だけを持つ。fault signature 単位の集約構造はまだない。
+# - search が例外終了すると OracleCollectionResult が返らず、decision record/search_trace は書かれない。
+#   episode result は termination_reason のみなので、集約 fault 情報を永続化するなら schema 拡張が必要。
+# - 既存 runner test は AllBranchesFaultedError 時に whole-search retry なし・runtime commit なし・
+#   episode result 1件だけ、という abort 契約を固定している。structural abort はこの契約を拡張できる。
 # 次の調査箇所:
-# - branch result の fault_kind/detail から snapshot restore/reference_integrity と settlement timeout を
-#   安全に分類できる既存 API 契約・テストを確認し、abort/retry policy の責務境界を確定する。
+# - structural/settlement-timeout の signature 判定を BeamSearch 内のどの helper に閉じ込めるか、
+#   例外 payload と episode-level fault summary の最小 schema を決め、追加テストケースを整理する。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
