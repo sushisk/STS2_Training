@@ -61,29 +61,33 @@ class OracleEpisodeResult:
 
 
 # //WORKING
-# 実装済み/確認済み:
-# - BeamSearchConfig.branch_fault_policy=None は既存 runtime Beam の retry 挙動を維持する。
-#   Oracle CLI の beam config だけ BranchFaultPolicy を有効化している。
+# 実装完了:
+# - BeamSearchConfig.branch_fault_policy=None は既存 runtime Beam の retry 挙動を維持し、
+#   Oracle CLI の teacher Beam config だけ BranchFaultPolicy() を有効化する。
 # - structural fault (Snapshot restore/reference_integrity/dangling or missing instance) は
-#   初回 emulate_actions 応答で retry せず BranchFaultAbortError にして Oracle search を終了する。
-# - settlement timeout は初回+retry 1回まで。retry 後に同一 frontier の logical timeout が
-#   count>=3 または 元 frontier の10%以上なら aborted_settlement_timeout_budget で終了する。
-# - この Runner は Oracle fault abort を runtime decide/commit より前に捕捉するため、該当 decision
-#   の action は commit されない。fatal summary は既存 episode-result schema v2 の optional
-#   fault_summary として1件だけ保存する（初回 CI で v2 pin を確認し、不要な v3 移行は撤回済み）。
-# - non-fatal fault は BranchFaultTrace 自体を残して Oracle target censoring/RNG lineage を維持する。
-#   JSONL 永続化時だけ同一 signature の2件目以降の detail を None にし、search_end の
-#   fault_summaries に count/first-last depth/branch/action type/root action を集約する。
-# 検証状況:
-# - structural 即 abort、timeout 1 retry/回復/閾値、generic fault の従来3 attempt 維持、
-#   runtime commit 無しの episode abort、JSONL detail 集約の専用テストを追加済み。
-# - hosted CI 初回は 758 passed / 3 failed。3件とも episode schema を2→3に上げた回帰だけで、
-#   fault policy の追加テストは通過した。schema は v2 に戻し、再 CI を実行中。
-# 次の作業:
-# - 最新 hosted CI の結果を確認し、失敗があれば回帰を修正する。
-# - JSONL の重複 detail は抑制済みだが、BeamSearch._record_branch_fault の console log は
-#   現時点で各 logical fault を出す。PR 提案 C を console 側にも適用する必要性を確認する。
-# - PR 本文の「実装なし」記述を現状へ更新し、最終差分/互換性をレビューする。
+#   最初の該当 emulate_actions 応答で retry せず aborted_snapshot_restore_fault にする。
+# - settlement timeout は初回+retry 1回まで。retry 後の同一 frontier で logical timeout が
+#   count>=3 または元 frontier の10%以上なら aborted_settlement_timeout_budget にする。
+# - BranchFaultAbortError は search/signature/count/detail/depth/branch/action/root-action を保持し、
+#   この Runner が runtime decide/commit より前に捕捉するため該当 decision は commit されない。
+# - fatal fault は既存 episode-result schema v2 の optional fault_summary に1件だけ保存する。
+#   永続化時に decisions_collected を現在の zero-based decision_index として summary に付与する。
+# - non-fatal BranchFaultTrace は target censoring/RNG lineage のため全件を in-memory で維持する。
+#   JSONL では同一 signature の full detail は初回だけ、2件目以降は detail=null とし、
+#   search_end.fault_summaries に count/first-last depth/branch/action type/root action を集約する。
+# 互換性/検証:
+# - episode schema を一度 v3 に上げたところ既存 raw-data v2 contract の3 test が失敗したため、
+#   schema migration は撤回し v2 + optional field にした。以後 hosted contract CI は成功している。
+# - structural 即 abort、timeout retry/回復/閾値、generic fault の従来3 attempt、commit 無し abort、
+#   JSONL detail 集約、BeamSearch.search() からの例外伝播と cancel/release cleanup をテスト済み。
+# - PR 本文も「方針提案のみ」から現在の実装/互換性/検証内容へ更新済み。
+# 次の作業者向け:
+# - repo-local hosted test で確認できる範囲は完了。可能なら実 STS2_RL を使い、Defect combat05 で
+#   decision index 2 付近の structural fault が1回で episode abort することを paired 検証する。
+# - Regent combat01 では isolated settlement timeout が1 retryで回復できること、persistent な場合だけ
+#   count/ratio budget で abort することを実ログで確認する。実 RL が無ければこの PR は review 待ち。
+# - generic fault の console warning は意図的に既存のまま。今回対象の structural/timeout cascade は
+#   _score_frontier の per-branch warning 前に fail-fast するため追加 logging filter は入れていない。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
