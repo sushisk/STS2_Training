@@ -101,7 +101,7 @@ class OracleBranchFaultPairCompatibilityTest(unittest.IsolatedAsyncioTestCase):
             "fault_kind": "snapshot_restore_missing_monster_move",
             "error": (
                 "Refusing to execute End Turn: living enemies still lack a current Move "
-                "after snapshot restore; known Emulator SnapshotRestorer gap"
+                "after snapshot restore; post-restore invariant violation"
             ),
         }
         client = _SequenceClient([result])
@@ -117,7 +117,7 @@ class OracleBranchFaultPairCompatibilityTest(unittest.IsolatedAsyncioTestCase):
                 [],
                 stats,
                 time.monotonic() + 5.0,
-                search_id="search-current-rl-restore-gap",
+                search_id="search-current-rl-restore-invariant",
             )
 
         self.assertEqual(client.calls, 1)
@@ -173,7 +173,50 @@ class OracleBranchFaultPairCompatibilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(final_meta), 1)
         self.assertEqual(branch_results[final_meta[0][2]]["status"], "completed")
 
-    def test_shared_classifier_matches_current_rl_typed_restore_gap(self) -> None:
+    async def test_first_timeout_at_global_attempt_limit_is_not_persistent_timeout(self) -> None:
+        client = _SequenceClient(
+            [
+                {
+                    "status": "faulted",
+                    "fault_kind": "worker_exception",
+                    "error": "generic transient failure 1",
+                },
+                {
+                    "status": "faulted",
+                    "fault_kind": "worker_exception",
+                    "error": "generic transient failure 2",
+                },
+                {
+                    "status": "faulted",
+                    "fault_kind": "worker_exception",
+                    "error": _SETTLEMENT_TIMEOUT,
+                },
+            ]
+        )
+        engine = _engine(client)
+        items, meta = _item_and_meta()
+        stats = BeamSearchStats()
+
+        branch_results, final_meta, fatal_reason = await engine._emulate_depth_batch(  # noqa: SLF001
+            "inst",
+            items,
+            meta,
+            [],
+            stats,
+            time.monotonic() + 5.0,
+            search_id="search-timeout-at-global-limit",
+        )
+
+        self.assertIsNone(fatal_reason)
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(stats.branch_retry_faults, 2)
+        self.assertEqual(stats.branch_retry_recoveries, 0)
+        self.assertEqual(len(final_meta), 1)
+        final_result = branch_results[final_meta[0][2]]
+        self.assertEqual(final_result["status"], "faulted")
+        self.assertEqual(final_result["error"], _SETTLEMENT_TIMEOUT)
+
+    def test_shared_classifier_matches_current_rl_typed_restore_invariant(self) -> None:
         signature = classify_known_branch_fault(
             status="faulted",
             fault_kind="snapshot_restore_missing_monster_move",
