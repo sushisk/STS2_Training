@@ -1020,6 +1020,7 @@ class BeamSearchEngine:
                         final_meta_by_order[logical_order] = meta
                         if (
                             fault_policy is not None
+                            and timeout_attempts_exhausted
                             and fault_signature == SETTLEMENT_TIMEOUT_SIGNATURE
                             and isinstance(result, Mapping)
                         ):
