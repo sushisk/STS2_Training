@@ -17,8 +17,10 @@ _STRUCTURAL_FAULT_KINDS = frozenset(
     {
         "reference_integrity",
         "snapshot_restore",
-        # Current STS2_RL detects the restored-snapshot monster Move gap before calling
-        # Emulator Step(), avoiding the historical opaque settlement timeout.
+        # Current STS2_Emulator restores EnemySnapshot.Intent.stateId/StateLog and forces
+        # Monster.NextMove. STS2_RL emits this typed fault only when that post-restore
+        # invariant is nevertheless broken, before calling Emulator Step(); treat the
+        # invariant breach as structural rather than falling back to an opaque timeout.
         "snapshot_restore_missing_monster_move",
     }
 )
