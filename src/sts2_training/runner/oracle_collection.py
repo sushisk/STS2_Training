@@ -61,19 +61,29 @@ class OracleEpisodeResult:
 
 
 # //WORKING
-# 現在の実装/調査結果:
-# - BeamSearchConfig.branch_fault_policy=None は既存 runtime Beam の挙動を維持する。
-# - Oracle CLI だけ BranchFaultPolicy を有効化し、structural fault は初回応答で即 abort する。
-# - settlement timeout は fault 種別ごとの attempt limit=2（初回+retry 1回）に制限し、retry 後に
-#   残った logical fault 数 / 元 frontier 件数で count>=3 または ratio>=10% を判定する。
-# - BranchFaultAbortError は search_id、fault signature/count、first detail、depth、branch、action、
-#   root action を bounded summary として保持し、この Runner が runtime decide/commit 前に捕捉する。
-# - abort 時は decision record を作らず、episode-result v3 に fault_summary を1件だけ永続化する。
-#   既存 AllBranchesFaultedError の「whole-search retry なし・commit なし」契約も維持する。
+# 実装済み/確認済み:
+# - BeamSearchConfig.branch_fault_policy=None は既存 runtime Beam の retry 挙動を維持する。
+#   Oracle CLI の beam config だけ BranchFaultPolicy を有効化している。
+# - structural fault (Snapshot restore/reference_integrity/dangling or missing instance) は
+#   初回 emulate_actions 応答で retry せず BranchFaultAbortError にして Oracle search を終了する。
+# - settlement timeout は初回+retry 1回まで。retry 後に同一 frontier の logical timeout が
+#   count>=3 または 元 frontier の10%以上なら aborted_settlement_timeout_budget で終了する。
+# - この Runner は Oracle fault abort を runtime decide/commit より前に捕捉するため、該当 decision
+#   の action は commit されない。fatal summary は既存 episode-result schema v2 の optional
+#   fault_summary として1件だけ保存する（初回 CI で v2 pin を確認し、不要な v3 移行は撤回済み）。
+# - non-fatal fault は BranchFaultTrace 自体を残して Oracle target censoring/RNG lineage を維持する。
+#   JSONL 永続化時だけ同一 signature の2件目以降の detail を None にし、search_end の
+#   fault_summaries に count/first-last depth/branch/action type/root action を集約する。
+# 検証状況:
+# - structural 即 abort、timeout 1 retry/回復/閾値、generic fault の従来3 attempt 維持、
+#   runtime commit 無しの episode abort、JSONL detail 集約の専用テストを追加済み。
+# - hosted CI 初回は 758 passed / 3 failed。3件とも episode schema を2→3に上げた回帰だけで、
+#   fault policy の追加テストは通過した。schema は v2 に戻し、再 CI を実行中。
 # 次の作業:
-# - Runner/JSONL の回帰テストを追加し CI で policy 境界を確認する。
-# - 非 fatal branch fault の重複 detail/stack は従来どおり BranchFaultTrace ごとに残るため、
-#   PR 提案 C の「同一 signature の full detail は初回だけ」に向けた集約方法を次に詰める。
+# - 最新 hosted CI の結果を確認し、失敗があれば回帰を修正する。
+# - JSONL の重複 detail は抑制済みだが、BeamSearch._record_branch_fault の console log は
+#   現時点で各 logical fault を出す。PR 提案 C を console 側にも適用する必要性を確認する。
+# - PR 本文の「実装なし」記述を現状へ更新し、最終差分/互換性をレビューする。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
