@@ -131,10 +131,10 @@ class BranchFaultTrace:
 
     Recorded at the exact point `BeamSearchEngine._score_frontier` would otherwise drop
     the branch silently - whenever the frontier still has other branches that did resolve,
-    nothing else in the search loop notices this branch's fate. ``detail`` normally echoes
-    RL's error text. When Oracle fault aggregation is enabled, only the first trace for a
-    repeated signature retains that full detail; later traces keep lineage/censoring fields
-    but set ``detail=None`` and the search-end event carries the aggregate summary.
+    nothing else in the search loop notices this branch's fate. In memory, ``detail`` keeps
+    the RL error text verbatim for target derivation/audit. Oracle JSONL serialization may
+    persist full detail only for the first repeated signature while retaining every trace's
+    lineage/censoring fields and adding an aggregate to the persisted search-end payload.
     """
 
     search_id: str
@@ -320,8 +320,8 @@ class SearchTraceEnd:
     nodes_expanded: int
     branches_created: int
     branches_faulted: int = 0
-    # Additive v7 diagnostic. Each mapping is bounded and represents one fault signature;
-    # existing constructors/readers remain compatible because the field defaults empty.
+    # Optional additive diagnostic for callers that build an aggregate in memory. Oracle
+    # JSONL serialization also fills the persisted payload without mutating this event.
     fault_summaries: tuple[JsonObject, ...] = ()
     event_type: str = field(default="search_end", init=False)
 
