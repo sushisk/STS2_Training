@@ -131,11 +131,10 @@ class BranchFaultTrace:
 
     Recorded at the exact point `BeamSearchEngine._score_frontier` would otherwise drop
     the branch silently - whenever the frontier still has other branches that did resolve,
-    nothing else in the search loop notices this branch's fate. `status`/`fault_kind`/
-    `detail` are echoed verbatim from the RL `emulate_actions` branch result (RL's own
-    Search Coordinator already classifies `fault_kind`; this trace does not reclassify it),
-    with ``fault_kind=None`` when the branch result carried no fault_kind at all (e.g. it
-    was simply absent from the batch response).
+    nothing else in the search loop notices this branch's fate. ``detail`` normally echoes
+    RL's error text. When Oracle fault aggregation is enabled, only the first trace for a
+    repeated signature retains that full detail; later traces keep lineage/censoring fields
+    but set ``detail=None`` and the search-end event carries the aggregate summary.
     """
 
     search_id: str
@@ -321,6 +320,9 @@ class SearchTraceEnd:
     nodes_expanded: int
     branches_created: int
     branches_faulted: int = 0
+    # Additive v7 diagnostic. Each mapping is bounded and represents one fault signature;
+    # existing constructors/readers remain compatible because the field defaults empty.
+    fault_summaries: tuple[JsonObject, ...] = ()
     event_type: str = field(default="search_end", init=False)
 
     @property
