@@ -182,6 +182,15 @@ class OracleBranchFaultPairCompatibilityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(signature, SNAPSHOT_RESTORE_FAULT_SIGNATURE)
 
+    def test_worker_task_timeout_is_not_settlement_timeout(self) -> None:
+        signature = classify_known_branch_fault(
+            status="faulted",
+            fault_kind="task_timeout",
+            detail="timed out waiting for worker request 123 after 20 seconds",
+        )
+
+        self.assertIsNone(signature)
+
 
 if __name__ == "__main__":
     unittest.main()
