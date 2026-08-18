@@ -62,7 +62,11 @@ class _FakeClient:
                         "id": "STRIKE_IRONCLAD",
                         "type": "Attack",
                         "upgradeLevel": 2,
-                        "enchantment": {"id": "SHARP", "amount": 3, "status": "Normal"},
+                        "enchantment": {
+                            "id": "SHARP",
+                            "amount": 3,
+                            "status": "Normal",
+                        },
                     }
                 ],
                 "drawPile": [
@@ -137,7 +141,11 @@ class _FaultThenRecoverCommitEngine(_FakeCommitEngine):
         if self._remaining_faults > 0:
             self._remaining_faults -= 1
             raise AllBranchesFaultedError("all emulate_actions branch results faulted")
-        return await super().decide(instance_id, timeout_s=timeout_s, decision=decision)
+        return await super().decide(
+            instance_id,
+            timeout_s=timeout_s,
+            decision=decision,
+        )
 
 
 class _FakeOracle:
@@ -169,7 +177,11 @@ class _FakeOracle:
                 stats=BeamSearchStats(),
             ),
             trace=(),
-            targets=OracleTargets(metadata=metadata, root_actions=(), stable_nodes=()),
+            targets=OracleTargets(
+                metadata=metadata,
+                root_actions=(),
+                stable_nodes=(),
+            ),
             provenance=OracleProvenance(
                 teacher_policy_class="teacher.Coverage",
                 teacher_inner_policy_class="teacher.Policy",
@@ -198,7 +210,10 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
                 oracle_timeout_s=5.0,
                 decision_timeout_s=5.0,
             )
-            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            records = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
 
         self.assertEqual(oracle.decisions, ["d-root"])
         self.assertEqual(commit_engine.decisions, ["d-root"])
@@ -214,8 +229,14 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision_record["instance_id"], "inst")
         self.assertEqual(decision_record["decision_index"], 0)
         self.assertEqual(decision_record["decision_point_id"], "d-root")
-        self.assertEqual(decision_record["dto_contract"]["dto_version"], _DTO_VERSION)
-        self.assertEqual(decision_record["decision_response_metadata"]["server_epoch"], "epoch-1")
+        self.assertEqual(
+            decision_record["dto_contract"]["dto_version"],
+            _DTO_VERSION,
+        )
+        self.assertEqual(
+            decision_record["decision_response_metadata"]["server_epoch"],
+            "epoch-1",
+        )
         self.assertEqual(decision_record["root_value_samples"], [])
         self.assertEqual(decision_record["provenance"]["training_commit"], "abc")
         transition = decision_record["runtime_transition"]
@@ -234,15 +255,27 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(transition["next_decision_point_id"], "d-terminal")
         self.assertEqual(transition["combat_result"], "victory")
-        self.assertEqual(transition["next_dto_contract"]["dto_version"], _DTO_VERSION)
-        self.assertEqual(transition["next_masked_emulator_dto"]["outcome"], "victory")
+        self.assertEqual(
+            transition["next_dto_contract"]["dto_version"],
+            _DTO_VERSION,
+        )
+        self.assertEqual(
+            transition["next_masked_emulator_dto"]["outcome"],
+            "victory",
+        )
 
         episode_record = records[1]
         self.assertEqual(episode_record["record_type"], "combat_oracle_episode_result")
         self.assertTrue(episode_record["completed"])
         self.assertEqual(episode_record["combat_result"], "victory")
-        self.assertEqual(episode_record["dto_contract"]["dto_version"], _DTO_VERSION)
-        self.assertEqual(episode_record["final_decision_metadata"]["server_epoch"], "epoch-1")
+        self.assertEqual(
+            episode_record["dto_contract"]["dto_version"],
+            _DTO_VERSION,
+        )
+        self.assertEqual(
+            episode_record["final_decision_metadata"]["server_epoch"],
+            "epoch-1",
+        )
         final = episode_record["final_masked_emulator_dto"]
         self.assertEqual(final["hand"][0]["upgradeLevel"], 2)
         self.assertEqual(final["hand"][0]["enchantment"]["amount"], 3)
@@ -273,7 +306,7 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output, prefix)
         self.assertEqual(client.closed, ["inst"])
 
-    async def test_recovers_after_fewer_than_max_consecutive_branch_faults(self) -> None:
+    async def test_aborts_after_one_exhausted_branch_search_without_whole_search_retry(self) -> None:
         client = _FakeClient()
         oracle = _FakeOracle()
         commit_engine = _FaultThenRecoverCommitEngine(client, fault_count=2)
@@ -290,49 +323,31 @@ class OracleEpisodeRunnerTest(unittest.IsolatedAsyncioTestCase):
                 oracle_timeout_s=5.0,
                 decision_timeout_s=5.0,
             )
+            records = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
 
-        # 2 faults then a success is fewer than MAX_CONSECUTIVE_BRANCH_FAULTS (3), so the
-        # decision recovers and the episode completes normally rather than aborting.
-        self.assertEqual(commit_engine.attempts, 3)
-        self.assertTrue(result.completed)
-        self.assertEqual(result.termination_reason, "terminal")
-        self.assertEqual(client.commits, ["a"])
-
-    async def test_aborts_episode_after_max_consecutive_branch_faults(self) -> None:
-        client = _FakeClient()
-        oracle = _FakeOracle()
-        commit_engine = _FaultThenRecoverCommitEngine(client, fault_count=99)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "oracle.jsonl"
-            runner = OracleEpisodeRunner(
-                client,
-                oracle=oracle,  # type: ignore[arg-type]
-                commit_engine=commit_engine,  # type: ignore[arg-type]
-                writer=OracleJsonlWriter(path),
-            )
-            result = await runner.run(
-                "inst",
-                oracle_timeout_s=5.0,
-                decision_timeout_s=5.0,
-            )
-            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-        # Gives up after exactly MAX_CONSECUTIVE_BRANCH_FAULTS attempts - not an uncaught
-        # crash (no rollback, no exception propagates), and no commit ever happens since
-        # every attempt for this one decision faulted.
-        self.assertEqual(commit_engine.attempts, 3)
+        self.assertEqual(commit_engine.attempts, 1)
+        self.assertEqual(oracle.decisions, ["d-root"])
         self.assertEqual(client.commits, [])
         self.assertFalse(result.completed)
-        self.assertEqual(result.termination_reason, "aborted_repeated_branch_failure")
+        self.assertEqual(
+            result.termination_reason,
+            "aborted_repeated_branch_failure",
+        )
         self.assertEqual(result.decisions_collected, 0)
-        # The episode-result record is still written (this is a graceful early stop, not
-        # a rollback) so whatever was already collected stays valid training data.
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["record_type"], "combat_oracle_episode_result")
+        self.assertEqual(
+            records[0]["record_type"],
+            "combat_oracle_episode_result",
+        )
         self.assertFalse(records[0]["completed"])
 
     def test_cli_defaults_to_exhaustive_root_and_runtime_target_beam(self) -> None:
-        args = _parse_args(["--scenario", "scenario.json", "--output", "oracle.jsonl"])
+        args = _parse_args(
+            ["--scenario", "scenario.json", "--output", "oracle.jsonl"]
+        )
         self.assertFalse(args.policy_limited_root)
         self.assertEqual(args.oracle_beam_width, 32)
         self.assertEqual(args.oracle_depth, 4)

@@ -78,11 +78,14 @@ class SearchTraceEndFaultAggregateTest(unittest.IsolatedAsyncioTestCase):
 
         result = await engine.search("inst-001", root_decision, timeout_s=1.0)
 
-        self.assertEqual(result.stats.branches_created, 2)
+        # end resolves once; strike consumes all three physical attempts.
+        self.assertEqual(result.stats.branches_created, 4)
         self.assertEqual(result.stats.branches_faulted, 1)
+        self.assertEqual(result.stats.branch_retry_faults, 2)
+        self.assertEqual(result.stats.branch_retry_recoveries, 0)
         end_events = [event for event in collector.events if isinstance(event, SearchTraceEnd)]
         self.assertEqual(len(end_events), 1)
-        self.assertEqual(end_events[0].branches_created, 2)
+        self.assertEqual(end_events[0].branches_created, 4)
         self.assertEqual(end_events[0].branches_faulted, 1)
 
 

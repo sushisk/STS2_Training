@@ -65,11 +65,7 @@ _WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
 
 
 class AllBranchesFaultedError(RuntimeError):
-    """Raised when a frontier round's `emulate_actions` batch comes back with zero
-    survivors (every candidate branch faulted) - e.g. a hung/deadlocked RL Branch Worker
-    repeatedly proposed as a top candidate. A dedicated subclass (not a bare RuntimeError)
-    so callers that want to retry/give-up specifically on this condition (as opposed to an
-    unrelated bug) can catch it precisely."""
+    """Raised when a logical frontier has zero survivors after local branch retries."""
 
 
 @dataclass
@@ -86,6 +82,7 @@ class BeamSearchConfig:
         default_factory=lambda: frozenset({"system", "card", "potion"})
     )
     max_continuation_steps: int = 8
+    max_branch_attempts: int = 3
 
     def __post_init__(self) -> None:
         for name in (
@@ -94,6 +91,7 @@ class BeamSearchConfig:
             "max_depth",
             "max_batch_size",
             "max_continuation_steps",
+            "max_branch_attempts",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -156,6 +154,8 @@ class BeamSearchStats:
     nodes_expanded: int = 0
     branches_created: int = 0
     branches_faulted: int = 0
+    branch_retry_faults: int = 0
+    branch_retry_recoveries: int = 0
     policy_ms: float = 0.0
     emulate_actions_ms: float = 0.0
     value_ms: float = 0.0
@@ -796,6 +796,17 @@ class BeamSearchEngine:
             limited,
         )
 
+    def _make_retry_item(
+        self,
+        item: Mapping[str, Any],
+        meta: tuple[BeamNode, CandidateProposal, str, int],
+    ) -> tuple[JsonObject, tuple[BeamNode, CandidateProposal, str, int]]:
+        node, candidate, _old_branch_id, rng_id = meta
+        new_branch_id = self._allocator.next_branch_id()
+        retry_item = dict(item)
+        retry_item["branch_id"] = new_branch_id
+        return retry_item, (node, candidate, new_branch_id, rng_id)
+
     async def _emulate_depth_batch(
         self,
         instance_id: str,
@@ -815,43 +826,92 @@ class BeamSearchEngine:
         if server_limit is not None:
             batch_size = min(batch_size, server_limit)
 
-        branch_results: dict[str, Any] = {}
-        emulated_item_meta: list[tuple[BeamNode, CandidateProposal, str, int]] = []
-        for start in range(0, len(items), batch_size):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return branch_results, emulated_item_meta, "time_budget"
-            chunk_items = items[start : start + batch_size]
-            chunk_meta = item_meta[start : start + batch_size]
-            t0 = time.monotonic()
-            try:
-                response = await self._client.emulate_actions(
-                    instance_id,
-                    chunk_items,
-                    timeout_s=remaining,
-                    simulation_options=cfg.simulation_options,
-                )
-            except RequestRejectedError as exc:
+        pending_items = list(items)
+        pending_meta = list(item_meta)
+        pending_order = list(range(len(item_meta)))
+        final_results: dict[str, Any] = {}
+        final_meta_by_order: dict[
+            int, tuple[BeamNode, CandidateProposal, str, int]
+        ] = {}
+
+        def ordered_final_meta() -> list[tuple[BeamNode, CandidateProposal, str, int]]:
+            return [final_meta_by_order[index] for index in sorted(final_meta_by_order)]
+
+        for attempt_index in range(cfg.max_branch_attempts):
+            retry_sources: list[
+                tuple[
+                    JsonObject,
+                    tuple[BeamNode, CandidateProposal, str, int],
+                    int,
+                ]
+            ] = []
+
+            for start in range(0, len(pending_items), batch_size):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return final_results, ordered_final_meta(), "time_budget"
+                chunk_items = pending_items[start : start + batch_size]
+                chunk_meta = pending_meta[start : start + batch_size]
+                chunk_order = pending_order[start : start + batch_size]
+                t0 = time.monotonic()
+                try:
+                    response = await self._client.emulate_actions(
+                        instance_id,
+                        chunk_items,
+                        timeout_s=remaining,
+                        simulation_options=cfg.simulation_options,
+                    )
+                except RequestRejectedError as exc:
+                    stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
+                    if _client_unusable(self._client):
+                        raise
+                    fault_kind = exc.response.get("fault_kind")
+                    detail = (
+                        fault_kind
+                        if isinstance(fault_kind, str) and fault_kind
+                        else type(exc).__name__
+                    )
+                    return (
+                        final_results,
+                        ordered_final_meta(),
+                        f"emulate_actions_rejected:{detail}",
+                    )
                 stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
-                if _client_unusable(self._client):
-                    raise
-                fault_kind = exc.response.get("fault_kind")
-                detail = (
-                    fault_kind
-                    if isinstance(fault_kind, str) and fault_kind
-                    else type(exc).__name__
-                )
-                return (
-                    branch_results,
-                    emulated_item_meta,
-                    f"emulate_actions_rejected:{detail}",
-                )
-            stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
-            all_branch_ids.extend(meta[2] for meta in chunk_meta)
-            stats.branches_created += len(chunk_meta)
-            emulated_item_meta.extend(chunk_meta)
-            branch_results.update(response.get("branch_results") or {})
-        return branch_results, emulated_item_meta, None
+                all_branch_ids.extend(meta[2] for meta in chunk_meta)
+                stats.branches_created += len(chunk_meta)
+                chunk_results = response.get("branch_results") or {}
+
+                for item, meta, logical_order in zip(
+                    chunk_items, chunk_meta, chunk_order
+                ):
+                    branch_id = meta[2]
+                    result = chunk_results.get(branch_id)
+                    if _is_resolved_branch_result(result):
+                        final_results[branch_id] = result
+                        final_meta_by_order[logical_order] = meta
+                        if attempt_index > 0:
+                            stats.branch_retry_recoveries += 1
+                        continue
+                    if attempt_index + 1 >= cfg.max_branch_attempts:
+                        final_results[branch_id] = result
+                        final_meta_by_order[logical_order] = meta
+                        continue
+                    retry_sources.append((item, meta, logical_order))
+
+            if not retry_sources:
+                break
+
+            stats.branch_retry_faults += len(retry_sources)
+            pending_items = []
+            pending_meta = []
+            pending_order = []
+            for item, meta, logical_order in retry_sources:
+                retry_item, retry_meta = self._make_retry_item(item, meta)
+                pending_items.append(retry_item)
+                pending_meta.append(retry_meta)
+                pending_order.append(logical_order)
+
+        return final_results, ordered_final_meta(), None
 
     def _score_frontier(
         self,
@@ -1185,6 +1245,10 @@ class BeamSearchEngine:
             )
             return False
         return True
+
+
+def _is_resolved_branch_result(result: Any) -> bool:
+    return isinstance(result, Mapping) and result.get("status") in _RESOLVED_STATUSES
 
 
 def _server_batch_limit(client: Any) -> int | None:
