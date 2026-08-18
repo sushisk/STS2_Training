@@ -129,6 +129,7 @@ class OracleFaultAbortRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(record["completed"])
         self.assertEqual(record["termination_reason"], "aborted_snapshot_restore_fault")
         self.assertEqual(record["fault_summary"]["search_id"], "search-structural")
+        self.assertEqual(record["fault_summary"]["decision_index"], 0)
         self.assertEqual(record["fault_summary"]["fault_signature"], "snapshot_restore_fault")
         self.assertEqual(record["fault_summary"]["count"], 2)
         self.assertEqual(record["fault_summary"]["first_depth"], 3)
