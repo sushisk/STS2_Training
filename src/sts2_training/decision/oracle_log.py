@@ -16,9 +16,9 @@ from sts2_training.decision.oracle_search import OracleCollectionResult
 # observability: search_trace may contain BranchFaultTrace events and search summaries
 # carry branches_faulted. The runtime-transition / public DTO contract from v6 is kept.
 ORACLE_RECORD_SCHEMA_VERSION = 7
-# v3 adds one bounded fault_summary to aborted Oracle episode-result records. Decision
-# records remain v7 because successful Oracle-search payloads are unchanged.
-ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 3
+# Episode schema v2 remains stable. ``fault_summary`` is an optional additive diagnostic
+# on aborted runs so existing raw-data readers do not need a schema migration.
+ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
 # Value training relies on the full public card-instance identity added by STS2_RL mask
 # v1.2: pile multisets retain upgradeLevel, tinker-time state, and enchantment.
 ORACLE_VALUE_MASK_VERSION = "1.2"
