@@ -55,9 +55,17 @@ class OracleEpisodeResult:
 
 
 # //WORKING
-# 調査起点: OracleEpisodeRunner.run は oracle.collect() の後で runtime decide/commit を行うため、
-# Oracle 側の致命的 fault をここで捕捉すれば runtime action を commit せず episode を abort できる。
-# 次の調査箇所: BeamSearchEngine._emulate_depth_batch() の retry 条件と fault payload の分類方法。
+# 調査結果:
+# - OracleEpisodeRunner.run は oracle.collect() 完了後にだけ runtime decide/commit へ進む。
+#   BeamSearch 由来の structural-fault 専用例外をここで捕捉すれば、commit なしで episode を終了できる。
+# - RootValueLoggingOracleCollector.collect() は engine.search() の例外を握り潰さず、この層まで伝播する。
+# - BeamSearchEngine._emulate_depth_batch() は unresolved branch を fault_kind/detail に関係なく
+#   max_branch_attempts まで再試行するため、structural fault の再試行・ログ増幅点は BeamSearch 側にある。
+# - 最終 unresolved branch は _score_frontier/_record_branch_fault で logical branch ごとに記録され、
+#   SearchTraceEnd は総 branches_faulted 数だけを持つ。fault signature 単位の集約構造はまだない。
+# 次の調査箇所:
+# - branch result の fault_kind/detail から snapshot restore/reference_integrity と settlement timeout を
+#   安全に分類できる既存 API 契約・テストを確認し、abort/retry policy の責務境界を確定する。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
