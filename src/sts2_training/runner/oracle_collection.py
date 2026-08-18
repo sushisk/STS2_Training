@@ -21,13 +21,18 @@ import math
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.api.contract import ROOT_BRANCH_ID
-from sts2_training.decision.beam_search import AllBranchesFaultedError
+from sts2_training.decision.beam_search import (
+    AllBranchesFaultedError,
+    BranchFaultAbortError,
+    BranchFaultPolicy,
+    BranchFaultSummary,
+)
 from sts2_training.decision.engine import CombatDecisionEngine
 from sts2_training.decision.oracle_log import (
     OracleJsonlWriter,
@@ -52,26 +57,23 @@ class OracleEpisodeResult:
     termination_reason: str
     elapsed_s: float
     output_path: str
+    fault_summary: BranchFaultSummary | None = None
 
 
 # //WORKING
-# 調査結果:
-# - OracleEpisodeRunner.run は oracle.collect() 完了後にだけ runtime decide/commit へ進む。
-#   BeamSearch 由来の structural-fault 専用例外をここで捕捉すれば、commit なしで episode を終了できる。
-# - RootValueLoggingOracleCollector.collect() は engine.search() の例外を握り潰さず、この層まで伝播する。
-# - BeamSearchEngine._emulate_depth_batch() は unresolved branch を fault_kind/detail に関係なく
-#   max_branch_attempts まで再試行するため、structural fault の再試行・ログ増幅点は BeamSearch 側にある。
-# - API contract は faulted branch の非空 error だけを必須化し、fault_kind は必須ではない。
-#   structural/timeout 判定は fault_kind 単独ではなく、既知 error signature も使う必要がある。
-# - 最終 unresolved branch は _score_frontier/_record_branch_fault で logical branch ごとに記録され、
-#   SearchTraceEnd は総 branches_faulted 数だけを持つ。fault signature 単位の集約構造はまだない。
-# - search が例外終了すると OracleCollectionResult が返らず、decision record/search_trace は書かれない。
-#   episode result は termination_reason のみなので、集約 fault 情報を永続化するなら schema 拡張が必要。
-# - 既存 runner test は AllBranchesFaultedError 時に whole-search retry なし・runtime commit なし・
-#   episode result 1件だけ、という abort 契約を固定している。structural abort はこの契約を拡張できる。
-# 次の調査箇所:
-# - structural/settlement-timeout の signature 判定を BeamSearch 内のどの helper に閉じ込めるか、
-#   例外 payload と episode-level fault summary の最小 schema を決め、追加テストケースを整理する。
+# 現在の実装/調査結果:
+# - BeamSearchConfig.branch_fault_policy=None は既存 runtime Beam の挙動を維持する。
+# - Oracle CLI だけ BranchFaultPolicy を有効化し、structural fault は初回応答で即 abort する。
+# - settlement timeout は fault 種別ごとの attempt limit=2（初回+retry 1回）に制限し、retry 後に
+#   残った logical fault 数 / 元 frontier 件数で count>=3 または ratio>=10% を判定する。
+# - BranchFaultAbortError は search_id、fault signature/count、first detail、depth、branch、action、
+#   root action を bounded summary として保持し、この Runner が runtime decide/commit 前に捕捉する。
+# - abort 時は decision record を作らず、episode-result v3 に fault_summary を1件だけ永続化する。
+#   既存 AllBranchesFaultedError の「whole-search retry なし・commit なし」契約も維持する。
+# 次の作業:
+# - Runner/JSONL の回帰テストを追加し CI で policy 境界を確認する。
+# - 非 fatal branch fault の重複 detail/stack は従来どおり BranchFaultTrace ごとに残るため、
+#   PR 提案 C の「同一 signature の full detail は初回だけ」に向けた集約方法を次に詰める。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
@@ -120,6 +122,7 @@ class OracleEpisodeRunner:
         final_decision_metadata: dict[str, Any] = {}
         completed = False
         termination_reason = "unknown"
+        fault_summary: BranchFaultSummary | None = None
         output_start_size = self._output_size()
 
         try:
@@ -163,6 +166,11 @@ class OracleEpisodeRunner:
                         timeout_s=decision_timeout_s,
                         decision=decision,
                     )
+                except BranchFaultAbortError as exc:
+                    completed = False
+                    termination_reason = exc.termination_reason
+                    fault_summary = exc.summary
+                    break
                 except AllBranchesFaultedError:
                     completed = False
                     # "repeated" now means that the per-candidate branch-attempt budget
@@ -236,6 +244,7 @@ class OracleEpisodeRunner:
                 completed=completed,
                 termination_reason=termination_reason,
                 elapsed_s=elapsed_s,
+                fault_summary=fault_summary,
             )
             return OracleEpisodeResult(
                 instance_id=instance_id,
@@ -246,6 +255,7 @@ class OracleEpisodeRunner:
                 termination_reason=termination_reason,
                 elapsed_s=elapsed_s,
                 output_path=str(self._writer.path),
+                fault_summary=fault_summary,
             )
         except Exception as exc:
             try:
@@ -457,6 +467,7 @@ async def _run(args: argparse.Namespace) -> OracleEpisodeResult:
             top_k_actions=args.oracle_top_k,
             max_depth=args.oracle_depth,
             time_budget_ms=args.oracle_time_budget_ms,
+            branch_fault_policy=BranchFaultPolicy(),
             simulation_options=(
                 None
                 if runtime_config.simulation_options is None
@@ -506,6 +517,9 @@ def main(argv: list[str] | None = None) -> int:
                 "combat_result": result.combat_result,
                 "completed": result.completed,
                 "termination_reason": result.termination_reason,
+                "fault_summary": (
+                    None if result.fault_summary is None else asdict(result.fault_summary)
+                ),
                 "elapsed_s": result.elapsed_s,
                 "final_dto": result.final_dto,
                 "output_path": result.output_path,
