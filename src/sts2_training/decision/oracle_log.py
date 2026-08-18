@@ -16,7 +16,9 @@ from sts2_training.decision.oracle_search import OracleCollectionResult
 # observability: search_trace may contain BranchFaultTrace events and search summaries
 # carry branches_faulted. The runtime-transition / public DTO contract from v6 is kept.
 ORACLE_RECORD_SCHEMA_VERSION = 7
-ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 2
+# v3 adds one bounded fault_summary to aborted Oracle episode-result records. Decision
+# records remain v7 because successful Oracle-search payloads are unchanged.
+ORACLE_EPISODE_RESULT_SCHEMA_VERSION = 3
 # Value training relies on the full public card-instance identity added by STS2_RL mask
 # v1.2: pile multisets retain upgradeLevel, tinker-time state, and enchantment.
 ORACLE_VALUE_MASK_VERSION = "1.2"
@@ -288,6 +290,7 @@ def oracle_episode_result_record(
     completed: bool,
     termination_reason: str,
     elapsed_s: float,
+    fault_summary: Any = None,
 ) -> dict[str, Any]:
     """Build the terminal/truncated episode record appended to the same Oracle JSONL."""
 
@@ -312,7 +315,7 @@ def oracle_episode_result_record(
         raise ValueError("elapsed_s must be a finite non-negative number")
     dto_contract = oracle_value_dto_contract(final_dto, context="Oracle episode result")
 
-    return {
+    record = {
         "record_type": "combat_oracle_episode_result",
         "record_schema_version": ORACLE_EPISODE_RESULT_SCHEMA_VERSION,
         "instance_id": instance_id,
@@ -327,6 +330,9 @@ def oracle_episode_result_record(
         "final_masked_emulator_dto": _jsonable(final_dto),
         "elapsed_s": float(elapsed_s),
     }
+    if fault_summary is not None:
+        record["fault_summary"] = _jsonable(fault_summary)
+    return record
 
 
 class OracleJsonlWriter:
@@ -366,6 +372,7 @@ class OracleJsonlWriter:
         completed: bool,
         termination_reason: str,
         elapsed_s: float,
+        fault_summary: Any = None,
     ) -> dict[str, Any]:
         record = oracle_episode_result_record(
             instance_id=instance_id,
@@ -375,6 +382,7 @@ class OracleJsonlWriter:
             completed=completed,
             termination_reason=termination_reason,
             elapsed_s=elapsed_s,
+            fault_summary=fault_summary,
         )
         self._append(record)
         return record
