@@ -54,6 +54,10 @@ class OracleEpisodeResult:
     output_path: str
 
 
+# //WORKING
+# 調査起点: OracleEpisodeRunner.run は oracle.collect() の後で runtime decide/commit を行うため、
+# Oracle 側の致命的 fault をここで捕捉すれば runtime action を commit せず episode を abort できる。
+# 次の調査箇所: BeamSearchEngine._emulate_depth_batch() の retry 条件と fault payload の分類方法。
 class OracleEpisodeRunner:
     """Drive one started Combat instance while collecting a teacher trace per decision."""
 
