@@ -62,10 +62,83 @@ JsonObject = dict[str, Any]
 _LOG = logging.getLogger(__name__)
 _RESOLVED_STATUSES = frozenset({"completed", "partial"})
 _WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
+_STRUCTURAL_BRANCH_FAULT_MARKERS = (
+    "snapshot restore rejected",
+    "reference_integrity:",
+    "dangling reference",
+    "missing captured instance",
+)
+_SETTLEMENT_TIMEOUT_MARKER = "timed out waiting for the next decision point or settlement"
 
 
 class AllBranchesFaultedError(RuntimeError):
     """Raised when a logical frontier has zero survivors after local branch retries."""
+
+
+@dataclass(frozen=True)
+class BranchFaultPolicy:
+    """Optional fail-fast policy for branch faults produced by ``emulate_actions``.
+
+    ``None`` on ``BeamSearchConfig`` preserves the historical generic retry behavior.
+    Oracle collection can opt into deterministic structural aborts and a tighter timeout
+    retry/budget without changing runtime Beam Search semantics.
+    """
+
+    abort_on_structural_fault: bool = True
+    settlement_timeout_max_attempts: int = 2
+    settlement_timeout_abort_count: int = 3
+    settlement_timeout_abort_ratio: float = 0.10
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.abort_on_structural_fault, bool):
+            raise TypeError("abort_on_structural_fault must be a bool")
+        for name in (
+            "settlement_timeout_max_attempts",
+            "settlement_timeout_abort_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        ratio = self.settlement_timeout_abort_ratio
+        if (
+            isinstance(ratio, bool)
+            or not isinstance(ratio, (int, float))
+            or not math.isfinite(float(ratio))
+            or ratio <= 0
+            or ratio > 1
+        ):
+            raise ValueError(
+                "settlement_timeout_abort_ratio must be finite and in the interval (0, 1]"
+            )
+
+
+@dataclass(frozen=True)
+class BranchFaultSummary:
+    """Bounded diagnostic payload for a Beam search aborted by branch-fault policy."""
+
+    search_id: str
+    fault_signature: str
+    fault_kind: str | None
+    count: int
+    first_detail: str | None
+    first_depth: int
+    last_depth: int
+    first_branch_id: str
+    last_branch_id: str
+    action_ids: tuple[str, ...]
+    action_types: tuple[str, ...]
+    root_action_ids: tuple[str, ...]
+
+
+class BranchFaultAbortError(RuntimeError):
+    """Raised when the configured branch-fault policy aborts a search."""
+
+    def __init__(self, termination_reason: str, summary: BranchFaultSummary) -> None:
+        self.termination_reason = termination_reason
+        self.summary = summary
+        super().__init__(
+            f"{termination_reason}: {summary.fault_signature} x{summary.count}"
+        )
 
 
 @dataclass
@@ -83,6 +156,7 @@ class BeamSearchConfig:
     )
     max_continuation_steps: int = 8
     max_branch_attempts: int = 3
+    branch_fault_policy: BranchFaultPolicy | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -103,6 +177,10 @@ class BeamSearchConfig:
             or self.time_budget_ms <= 0
         ):
             raise ValueError("time_budget_ms must be a finite positive number when provided")
+        if self.branch_fault_policy is not None and not isinstance(
+            self.branch_fault_policy, BranchFaultPolicy
+        ):
+            raise TypeError("branch_fault_policy must be a BranchFaultPolicy or None")
         if self.simulation_options is None:
             self.simulation_options = {"stop_condition": "next_decision"}
 
@@ -387,7 +465,13 @@ class BeamSearchEngine:
                     break
 
                 branch_results, emulated_item_meta, fatal_reason = await self._emulate_depth_batch(
-                    instance_id, items, item_meta, all_branch_ids, stats, search_deadline
+                    instance_id,
+                    items,
+                    item_meta,
+                    all_branch_ids,
+                    stats,
+                    search_deadline,
+                    search_id=search_id,
                 )
                 (
                     next_beam,
@@ -815,12 +899,15 @@ class BeamSearchEngine:
         all_branch_ids: list[str],
         stats: BeamSearchStats,
         deadline: float,
+        *,
+        search_id: str | None = None,
     ) -> tuple[
         dict[str, Any],
         list[tuple[BeamNode, CandidateProposal, str, int]],
         str | None,
     ]:
         cfg = self.config
+        fault_policy = cfg.branch_fault_policy
         batch_size = cfg.max_batch_size
         server_limit = _server_batch_limit(self._client)
         if server_limit is not None:
@@ -833,6 +920,9 @@ class BeamSearchEngine:
         final_meta_by_order: dict[
             int, tuple[BeamNode, CandidateProposal, str, int]
         ] = {}
+        final_timeout_faults: list[
+            tuple[tuple[BeamNode, CandidateProposal, str, int], Mapping[str, Any]]
+        ] = []
 
         def ordered_final_meta() -> list[tuple[BeamNode, CandidateProposal, str, int]]:
             return [final_meta_by_order[index] for index in sorted(final_meta_by_order)]
@@ -881,6 +971,24 @@ class BeamSearchEngine:
                 stats.branches_created += len(chunk_meta)
                 chunk_results = response.get("branch_results") or {}
 
+                if fault_policy is not None and fault_policy.abort_on_structural_fault:
+                    structural_faults = [
+                        (meta, result)
+                        for meta in chunk_meta
+                        for result in [chunk_results.get(meta[2])]
+                        if _branch_fault_signature(result) == "snapshot_restore_fault"
+                        and isinstance(result, Mapping)
+                    ]
+                    if structural_faults:
+                        raise BranchFaultAbortError(
+                            "aborted_snapshot_restore_fault",
+                            _branch_fault_summary(
+                                search_id or "unknown",
+                                "snapshot_restore_fault",
+                                structural_faults,
+                            ),
+                        )
+
                 for item, meta, logical_order in zip(
                     chunk_items, chunk_meta, chunk_order
                 ):
@@ -892,11 +1000,44 @@ class BeamSearchEngine:
                         if attempt_index > 0:
                             stats.branch_retry_recoveries += 1
                         continue
-                    if attempt_index + 1 >= cfg.max_branch_attempts:
+
+                    fault_signature = _branch_fault_signature(result)
+                    attempt_limit = cfg.max_branch_attempts
+                    if (
+                        fault_policy is not None
+                        and fault_signature == "settlement_timeout"
+                    ):
+                        attempt_limit = min(
+                            attempt_limit,
+                            fault_policy.settlement_timeout_max_attempts,
+                        )
+                    if attempt_index + 1 >= attempt_limit:
                         final_results[branch_id] = result
                         final_meta_by_order[logical_order] = meta
+                        if (
+                            fault_policy is not None
+                            and fault_signature == "settlement_timeout"
+                            and isinstance(result, Mapping)
+                        ):
+                            final_timeout_faults.append((meta, result))
                         continue
                     retry_sources.append((item, meta, logical_order))
+
+            if fault_policy is not None and final_timeout_faults:
+                timeout_count = len(final_timeout_faults)
+                timeout_ratio = timeout_count / max(1, len(item_meta))
+                if (
+                    timeout_count >= fault_policy.settlement_timeout_abort_count
+                    or timeout_ratio >= fault_policy.settlement_timeout_abort_ratio
+                ):
+                    raise BranchFaultAbortError(
+                        "aborted_settlement_timeout_budget",
+                        _branch_fault_summary(
+                            search_id or "unknown",
+                            "settlement_timeout",
+                            final_timeout_faults,
+                        ),
+                    )
 
             if not retry_sources:
                 break
@@ -1249,6 +1390,66 @@ class BeamSearchEngine:
 
 def _is_resolved_branch_result(result: Any) -> bool:
     return isinstance(result, Mapping) and result.get("status") in _RESOLVED_STATUSES
+
+
+def _branch_fault_signature(result: Any) -> str | None:
+    if not isinstance(result, Mapping) or result.get("status") != "faulted":
+        return None
+    detail = result.get("error")
+    normalized_detail = detail.lower() if isinstance(detail, str) else ""
+    fault_kind = result.get("fault_kind")
+    normalized_kind = fault_kind.lower() if isinstance(fault_kind, str) else ""
+    if normalized_kind in {"reference_integrity", "snapshot_restore"} or any(
+        marker in normalized_detail for marker in _STRUCTURAL_BRANCH_FAULT_MARKERS
+    ):
+        return "snapshot_restore_fault"
+    if _SETTLEMENT_TIMEOUT_MARKER in normalized_detail:
+        return "settlement_timeout"
+    return None
+
+
+def _branch_fault_summary(
+    search_id: str,
+    fault_signature: str,
+    faults: Sequence[
+        tuple[tuple[BeamNode, CandidateProposal, str, int], Mapping[str, Any]]
+    ],
+) -> BranchFaultSummary:
+    if not faults:
+        raise ValueError("faults must not be empty")
+
+    locations: list[tuple[int, str, str | None, str]] = []
+    action_ids: set[str] = set()
+    action_types: set[str] = set()
+    root_action_ids: set[str] = set()
+    for (node, candidate, branch_id, _rng_id), _result in faults:
+        action_type = action_type_for_id(node.masked_emulator_dto, candidate.action_id)
+        is_continuation_action = action_type in CONTINUATION_ACTION_TYPES
+        combat_depth = node.combat_depth + (0 if is_continuation_action else 1)
+        root_action_id = node.root_action_id or candidate.action_id
+        locations.append((combat_depth, branch_id, action_type, root_action_id))
+        action_ids.add(candidate.action_id)
+        if action_type is not None:
+            action_types.add(action_type)
+        root_action_ids.add(root_action_id)
+
+    first_result = faults[0][1]
+    first_detail = first_result.get("error")
+    fault_kind = first_result.get("fault_kind")
+    return BranchFaultSummary(
+        search_id=search_id,
+        fault_signature=fault_signature,
+        fault_kind=fault_kind if isinstance(fault_kind, str) else None,
+        count=len(faults),
+        first_detail=first_detail if isinstance(first_detail, str) else None,
+        first_depth=locations[0][0],
+        last_depth=locations[-1][0],
+        first_branch_id=locations[0][1],
+        last_branch_id=locations[-1][1],
+        action_ids=tuple(sorted(action_ids)),
+        action_types=tuple(sorted(action_types)),
+        root_action_ids=tuple(sorted(root_action_ids)),
+    )
 
 
 def _server_batch_limit(client: Any) -> int | None:
