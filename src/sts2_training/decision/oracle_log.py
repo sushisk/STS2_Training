@@ -432,7 +432,11 @@ def oracle_episode_result_record(
         "elapsed_s": float(elapsed_s),
     }
     if fault_summary is not None:
-        record["fault_summary"] = _jsonable(fault_summary)
+        fault_payload = _jsonable(fault_summary)
+        if not isinstance(fault_payload, dict):
+            raise ValueError("fault_summary must serialize to an object")
+        fault_payload.setdefault("decision_index", decisions_collected)
+        record["fault_summary"] = fault_payload
     return record
 
 
