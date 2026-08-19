@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import unittest
 
 from sts2_training.decision.value_features import (
@@ -8,6 +7,7 @@ from sts2_training.decision.value_features import (
     VALUE_FEATURE_SCHEMA_VERSION,
     combat_value_features,
 )
+from tests.dto_test_helpers import card, card_replace, dto, dto_get, dto_replace, enemy, intent, power
 
 
 def _card(
@@ -19,40 +19,40 @@ def _card(
     count: int | None = None,
     tinker_time_type: str | None = None,
 ) -> dict:
-    card = {
-        "id": card_id,
-        "type": type_,
-        "rarity": "Basic",
-        "cost": 1,
-        "targetType": "AnyEnemy" if type_ == "Attack" else "Self",
-        "upgraded": upgrade_level > 0,
-        "upgradeLevel": upgrade_level,
-        "tinkerTimeType": tinker_time_type,
-        "tinkerTimeRider": None,
-        "enchantment": enchantment,
-    }
+    fields = dict(
+        id=card_id,
+        type=type_,
+        rarity="Basic",
+        cost=1,
+        target_type="AnyEnemy" if type_ == "Attack" else "Self",
+        upgraded=upgrade_level > 0,
+        upgrade_level=upgrade_level,
+        tinker_time_type=tinker_time_type,
+        tinker_time_rider=None,
+        enchantment=enchantment,
+    )
     if count is not None:
-        card["count"] = count
-    return card
+        fields["count"] = count
+    return card(**fields)
 
 
 def _dto() -> dict:
-    return {
-        "mask_version": "1.2",
-        "hp": 40,
-        "maxHp": 80,
-        "block": 5,
-        "energy": 2,
-        "enemies": [
-            {
-                "hp": 20,
-                "maxHp": 40,
-                "isAlive": True,
-                "intent": {"attackDamage": 10, "attackRepeats": 2},
-                "powers": [{"amount": 3}],
-            }
+    return dto(
+        mask_version="1.2",
+        hp=40,
+        max_hp=80,
+        block=5,
+        energy=2,
+        enemies=[
+            enemy(
+                hp=20,
+                max_hp=40,
+                is_alive=True,
+                intent=intent(attack_damage=10, attack_repeats=2),
+                powers=[power(amount=3)],
+            )
         ],
-        "hand": [
+        hand=[
             _card("STRIKE", "Attack", upgrade_level=1),
             _card(
                 "DEFEND",
@@ -60,20 +60,16 @@ def _dto() -> dict:
                 enchantment={"id": "SHARP", "amount": 2, "status": "Normal"},
             ),
         ],
-        "drawPile": [
-            _card("BASH", "Attack", upgrade_level=2, count=3),
-        ],
-        "discardPile": [
-            _card("DEFEND", "Skill", count=2, tinker_time_type="Alpha"),
-        ],
-        "exhaustPile": [_card("POWER", "Power", count=1)],
-        "potions": [{"potion_id": "p"}],
-        "playerPowers": [{"amount": 2}],
-        "legal_actions": [
+        draw_pile=[_card("BASH", "Attack", upgrade_level=2, count=3)],
+        discard_pile=[_card("DEFEND", "Skill", count=2, tinker_time_type="Alpha")],
+        exhaust_pile=[_card("POWER", "Power", count=1)],
+        potions=[{"potion_id": "p"}],
+        player_powers=[power(amount=2)],
+        legal_actions=[
             {"action_id": "opaque-1", "action_type": "card"},
             {"action_id": "opaque-2", "action_type": "card"},
         ],
-    }
+    )
 
 
 class CombatValueFeaturesTest(unittest.TestCase):
@@ -110,30 +106,32 @@ class CombatValueFeaturesTest(unittest.TestCase):
         self.assertNotIn("action_id", VALUE_FEATURE_NAMES)
 
     def test_upgrade_and_enchantment_change_value_features(self) -> None:
-        plain = _dto()
-        plain["hand"] = [_card("STRIKE", "Attack")]
-        upgraded = copy.deepcopy(plain)
-        upgraded["hand"][0]["upgraded"] = True
-        upgraded["hand"][0]["upgradeLevel"] = 1
-        enchanted = copy.deepcopy(plain)
-        enchanted["hand"][0]["enchantment"] = {
-            "id": "SHARP",
-            "amount": 3,
-            "status": "Normal",
-        }
+        plain = dto_replace(_dto(), hand=[_card("STRIKE", "Attack")])
+        plain_card = dto_get(plain, "hand")[0]
+        upgraded = dto_replace(
+            plain,
+            hand=[card_replace(plain_card, upgraded=True, upgrade_level=1)],
+        )
+        enchanted = dto_replace(
+            plain,
+            hand=[
+                card_replace(
+                    plain_card,
+                    enchantment={"id": "SHARP", "amount": 3, "status": "Normal"},
+                )
+            ],
+        )
 
         self.assertNotEqual(combat_value_features(plain), combat_value_features(upgraded))
         self.assertNotEqual(combat_value_features(plain), combat_value_features(enchanted))
 
     def test_legacy_mask_and_legacy_pile_shape_fail_closed(self) -> None:
-        legacy = _dto()
-        legacy["mask_version"] = "1.1"
+        legacy = dto_replace(_dto(), mask_version="1.1")
         with self.assertRaisesRegex(ValueError, "mask_version='1.2'"):
             combat_value_features(legacy)
 
-        malformed = _dto()
-        malformed["drawPile"] = {"BASH": 3}
-        with self.assertRaisesRegex(ValueError, "drawPile must be a sequence"):
+        malformed = dto_replace(_dto(), draw_pile={"BASH": 3})
+        with self.assertRaisesRegex(ValueError, "must be a sequence"):
             combat_value_features(malformed)
 
 
