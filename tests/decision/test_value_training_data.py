@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import tempfile
 import unittest
@@ -15,6 +14,7 @@ from sts2_training.decision.value_training_data import (
     load_combat_value_examples,
     load_combat_value_rl_episodes,
 )
+from tests.dto_test_helpers import action, card, dto, dto_get, dto_replace, enemy, intent
 
 
 _DTO_VERSION = "emulator-test"
@@ -60,39 +60,39 @@ def _contract(dto_version: str = _DTO_VERSION) -> dict:
 
 
 def _card(card_id: str, type_: str, *, upgrade_level: int = 0, enchantment=None, count=None):
-    card = {
-        "id": card_id,
-        "type": type_,
-        "upgraded": upgrade_level > 0,
-        "upgradeLevel": upgrade_level,
-        "tinkerTimeType": None,
-        "tinkerTimeRider": None,
-        "enchantment": enchantment,
-    }
+    fields = dict(
+        id=card_id,
+        type=type_,
+        upgraded=upgrade_level > 0,
+        upgrade_level=upgrade_level,
+        tinker_time_type=None,
+        tinker_time_rider=None,
+        enchantment=enchantment,
+    )
     if count is not None:
-        card["count"] = count
-    return card
+        fields["count"] = count
+    return card(**fields)
 
 
 def _dto(*, dto_version: str = _DTO_VERSION, terminal: bool = False) -> dict:
-    dto = {
-        "mask_version": "1.2",
-        "dto_version": dto_version,
-        "hp": 40,
-        "maxHp": 80,
-        "block": 0,
-        "energy": 3,
-        "enemies": [
-            {
-                "hp": 20,
-                "maxHp": 40,
-                "isAlive": True,
-                "intent": {"attackDamage": 5, "attackRepeats": 1},
-                "powers": [],
-            }
+    state = dto(
+        mask_version="1.2",
+        dto_version=dto_version,
+        hp=40,
+        max_hp=80,
+        block=0,
+        energy=3,
+        enemies=[
+            enemy(
+                hp=20,
+                max_hp=40,
+                is_alive=True,
+                intent=intent(attack_damage=5, attack_repeats=1),
+                powers=[],
+            )
         ],
-        "hand": [_card("STRIKE", "Attack", upgrade_level=1)],
-        "drawPile": [
+        hand=[_card("STRIKE", "Attack", upgrade_level=1)],
+        draw_pile=[
             _card(
                 "DEFEND",
                 "Skill",
@@ -100,22 +100,21 @@ def _dto(*, dto_version: str = _DTO_VERSION, terminal: bool = False) -> dict:
                 count=2,
             )
         ],
-        "discardPile": [],
-        "exhaustPile": [],
-        "potions": [],
-        "playerPowers": [],
-        "legal_actions": [],
-    }
+        discard_pile=[],
+        exhaust_pile=[],
+        potions=[],
+        player_powers=[],
+        legal_actions=[],
+    )
     if terminal:
-        dto["terminal"] = True
-        dto["outcome"] = "victory"
-    return dto
+        state = dto_replace(state, terminal=True, outcome="victory")
+    return state
 
 
 def _sample(action_id: str, rng_id: int, *, target_value, target_source: str) -> dict:
     return {
         "action_id": action_id,
-        "action": {"action_id": action_id, "action_type": "card"},
+        "action": action(id=action_id, type="card"),
         "rng_id": rng_id,
         "root_state_node_id": f"n-{action_id}",
         "decision_point_id": f"after-{action_id}",
@@ -150,7 +149,7 @@ def _record(*samples: dict, dto_version: str = _DTO_VERSION, decision_index: int
         "root_value_samples": list(samples),
         "runtime_transition": {
             "chosen_action_id": "actual",
-            "chosen_action": {"action_id": "actual", "action_type": "card"},
+            "chosen_action": action(id="actual", type="card"),
             "next_decision_point_id": f"d{decision_index + 1}",
             "commit_response_metadata": {
                 "decision_point_id": f"d{decision_index + 1}",
@@ -174,7 +173,7 @@ def _episode(*, final_dto: dict, decisions_collected: int, completed: bool, comb
         "completed": completed,
         "termination_reason": "terminal" if completed else "max_decisions",
         "combat_result": combat_result,
-        "dto_contract": _contract(final_dto["dto_version"]),
+        "dto_contract": _contract(dto_get(final_dto, "dto_version")),
         "final_decision_metadata": {
             "decision_point_id": f"d{decisions_collected}",
             "server_epoch": "epoch-1",
@@ -245,7 +244,10 @@ class CombatValueTrainingDataTest(unittest.TestCase):
             _sample("b", 2, target_value=2.0, target_source="value_bootstrap"),
             dto_version="emulator-other",
         )
-        second["root_value_samples"][0]["masked_emulator_dto"]["dto_version"] = "emulator-other"
+        sample = second["root_value_samples"][0]
+        sample["masked_emulator_dto"] = dto_replace(
+            sample["masked_emulator_dto"], dto_version="emulator-other"
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             a = Path(tmpdir) / "a.jsonl"
             b = Path(tmpdir) / "b.jsonl"
@@ -256,7 +258,9 @@ class CombatValueTrainingDataTest(unittest.TestCase):
 
     def test_sample_mask_is_checked_independently(self) -> None:
         sample = _sample("a", 1, target_value=1.0, target_source="value_bootstrap")
-        sample["masked_emulator_dto"]["mask_version"] = "1.1"
+        sample["masked_emulator_dto"] = dto_replace(
+            sample["masked_emulator_dto"], mask_version="1.1"
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "bad-sample.jsonl"
             path.write_text(json.dumps(_record(sample)) + "\n", encoding="utf-8")
