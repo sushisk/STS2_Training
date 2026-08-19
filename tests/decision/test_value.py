@@ -3,7 +3,15 @@ from __future__ import annotations
 import unittest
 
 from sts2_training.decision.value import DEFAULT_WEIGHTS, HeuristicValueFunction
-from tests.dto_test_helpers import dto, dto_replace, enemy, enemy_replace, intent, power
+from tests.dto_test_helpers import (
+    dto,
+    dto_replace,
+    enemy,
+    enemy_replace,
+    intent,
+    power,
+    transition,
+)
 
 
 def _single_feature_weights(name: str, value: float = 1.0) -> dict[str, float]:
@@ -35,13 +43,13 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
     def test_transition_victory_flag_is_honored(self) -> None:
         value_fn = HeuristicValueFunction()
-        state = dto(transition={"kind": "combat_completed", "victory": True})
+        state = dto(transition=transition(kind="combat_completed", victory=True))
 
         self.assertEqual(value_fn.evaluate(state), DEFAULT_WEIGHTS["victory_bonus"])
 
     def test_unknown_transition_victory_is_not_treated_as_defeat(self) -> None:
         value_fn = HeuristicValueFunction()
-        state = dto(transition={"kind": "combat_completed", "victory": None})
+        state = dto(transition=transition(kind="combat_completed", victory=None))
 
         self.assertNotEqual(value_fn.evaluate(state), DEFAULT_WEIGHTS["defeat_penalty"])
 
