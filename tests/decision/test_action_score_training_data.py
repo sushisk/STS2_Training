@@ -13,26 +13,27 @@ from sts2_training.decision.action_score_training_data import (
     load_combat_action_score_examples,
 )
 from sts2_training.decision.oracle_log import ORACLE_RECORD_SCHEMA_VERSION, ORACLE_VALUE_MASK_VERSION
+from tests.dto_test_helpers import action, dto, dto_replace, enemy, intent
 
 _DTO_VERSION = "emulator-test"
 
 
 def _dto() -> dict:
-    return {
-        "mask_version": ORACLE_VALUE_MASK_VERSION,
-        "dto_version": _DTO_VERSION,
-        "hp": 40,
-        "maxHp": 80,
-        "block": 0,
-        "energy": 3,
-        "enemies": [],
-        "hand": [],
-        "drawPile": [],
-        "discardPile": [],
-        "exhaustPile": [],
-        "potions": [],
-        "playerPowers": [],
-    }
+    return dto(
+        mask_version=ORACLE_VALUE_MASK_VERSION,
+        dto_version=_DTO_VERSION,
+        hp=40,
+        max_hp=80,
+        block=0,
+        energy=3,
+        enemies=[],
+        hand=[],
+        draw_pile=[],
+        discard_pile=[],
+        exhaust_pile=[],
+        potions=[],
+        player_powers=[],
+    )
 
 
 def _root_action(
@@ -45,7 +46,7 @@ def _root_action(
 ) -> dict:
     return {
         "action_id": action_id,
-        "action": {"action_id": action_id, "action_type": "system", "parameters": {}},
+        "action": action(id=action_id, type="system", parameters={}),
         "evaluated": target_source != "no_target",
         "estimated_q": estimated_q,
         "rng_outcomes": [
@@ -69,7 +70,7 @@ def _root_action(
 
 
 def _record(*, exhaustive: bool = True) -> dict:
-    dto = _dto()
+    state = _dto()
     return {
         "record_type": "combat_oracle_decision",
         "record_schema_version": ORACLE_RECORD_SCHEMA_VERSION,
@@ -81,7 +82,7 @@ def _record(*, exhaustive: bool = True) -> dict:
             "mask_version": ORACLE_VALUE_MASK_VERSION,
             "dto_version": _DTO_VERSION,
         },
-        "masked_emulator_dto": dto,
+        "masked_emulator_dto": state,
         "oracle_targets": {
             "metadata": {"exhaustive_root_actions": exhaustive},
             "root_actions": [
@@ -143,18 +144,23 @@ class CombatActionScoreTrainingDataTest(unittest.TestCase):
 
     def test_board_context_interaction_survives_pairwise_delta(self) -> None:
         record = _record()
-        record["masked_emulator_dto"]["enemies"] = [
-            {
-                "index": 0,
-                "hp": 20,
-                "maxHp": 20,
-                "block": 0,
-                "isAlive": True,
-                "intent": {"attackDamage": 40, "attackRepeats": 1},
-                "powers": [],
-            }
-        ]
-        record["oracle_targets"]["root_actions"][0]["action"]["action_type"] = "card"
+        record["masked_emulator_dto"] = dto_replace(
+            record["masked_emulator_dto"],
+            enemies=[
+                enemy(
+                    index=0,
+                    hp=20,
+                    max_hp=20,
+                    block=0,
+                    is_alive=True,
+                    intent=intent(attack_damage=40, attack_repeats=1),
+                    powers=[],
+                )
+            ],
+        )
+        record["oracle_targets"]["root_actions"][0]["action"] = action(
+            id="best", type="card", parameters={}
+        )
 
         examples, _ = self._load(record)
         pairs = build_pairwise_action_score_examples(examples)
