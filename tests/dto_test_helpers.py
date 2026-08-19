@@ -1,12 +1,17 @@
 """Semantic builders/accessors for Emulator DTO fixtures used by tests.
 
-Tests outside this module should avoid spelling Emulator DTO wire keys directly.
-When the DTO schema changes, update the key maps here and keep behavior-focused
-pytest cases expressed in semantic names.
+Behavior tests should avoid spelling Emulator DTO wire keys for records represented
+by builders in this module. When those schema fields change, update the key maps
+here and keep behavior-focused pytest cases expressed in semantic names.
 
-Wire/envelope contract tests may still assert protocol keys such as ``instance_id``
-when those keys are the contract under test; this module is specifically for the
-contents of ``masked_emulator_dto`` and nested public Emulator records.
+``tests/test_dto_test_helpers_contract.py`` is the intentional exception: it pins
+these semantic builders to the current wire contract. Wire/envelope contract tests
+may likewise assert protocol keys such as ``instance_id`` when those keys are the
+contract under test.
+
+Small payloads without builders (for example room-context, relic, and enchantment
+payload contents) are currently treated as opaque values. Add a builder before a
+behavior test starts depending on their internal field names.
 """
 
 from __future__ import annotations
@@ -73,6 +78,11 @@ POWER_KEYS: dict[str, str] = {
     "power_id": "power_id",
     "amount": "amount",
     "type": "type",
+}
+
+POTION_KEYS: dict[str, str] = {
+    "id": "id",
+    "potion_id": "potion_id",
 }
 
 CARD_KEYS: dict[str, str] = {
@@ -191,6 +201,10 @@ def enemy_get(value: Mapping[str, Any], field: str) -> Any:
 
 def power(**fields: Any) -> dict[str, Any]:
     return _encode(fields, POWER_KEYS)
+
+
+def potion(**fields: Any) -> dict[str, Any]:
+    return _encode(fields, POTION_KEYS)
 
 
 def card(**fields: Any) -> dict[str, Any]:
