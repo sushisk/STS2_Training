@@ -7,68 +7,79 @@ from sts2_training.decision.action_score_features import (
     ACTION_SCORE_FEATURE_SCHEMA_VERSION,
     combat_action_score_features,
 )
+from tests.dto_test_helpers import (
+    action,
+    action_parameters,
+    card,
+    choice_semantics,
+    dto,
+    dto_replace,
+    enemy,
+    intent,
+    pending_choice,
+)
 
 
 def _card(card_id: str, *, upgrade_level: int = 0, enchantment: dict | None = None) -> dict:
-    return {
-        "id": card_id,
-        "type": "Attack",
-        "rarity": "Common",
-        "cost": 1,
-        "targetType": "AnyEnemy",
-        "upgraded": upgrade_level > 0,
-        "upgradeLevel": upgrade_level,
-        "tinkerTimeType": None,
-        "tinkerTimeRider": None,
-        "enchantment": enchantment,
-    }
+    return card(
+        id=card_id,
+        type="Attack",
+        rarity="Common",
+        cost=1,
+        target_type="AnyEnemy",
+        upgraded=upgrade_level > 0,
+        upgrade_level=upgrade_level,
+        tinker_time_type=None,
+        tinker_time_rider=None,
+        enchantment=enchantment,
+    )
 
 
 def _dto() -> dict:
-    return {
-        "mask_version": "1.2",
-        "dto_version": "emulator-test",
-        "hp": 40,
-        "maxHp": 80,
-        "block": 5,
-        "energy": 2,
-        "enemies": [
-            {
-                "index": 0,
-                "hp": 20,
-                "maxHp": 40,
-                "block": 8,
-                "isAlive": True,
-                "intent": {"attackDamage": 7, "attackRepeats": 2},
-                "powers": [],
-            }
+    return dto(
+        mask_version="1.2",
+        dto_version="emulator-test",
+        hp=40,
+        max_hp=80,
+        block=5,
+        energy=2,
+        enemies=[
+            enemy(
+                index=0,
+                hp=20,
+                max_hp=40,
+                block=8,
+                is_alive=True,
+                intent=intent(attack_damage=7, attack_repeats=2),
+                powers=[],
+            )
         ],
-        "hand": [
+        hand=[
             _card(
                 "STRIKE",
                 upgrade_level=2,
                 enchantment={"id": "SHARP", "amount": 3, "status": "Normal"},
             )
         ],
-        "drawPile": [],
-        "discardPile": [],
-        "exhaustPile": [],
-        "potions": [],
-        "playerPowers": [],
-    }
+        draw_pile=[],
+        discard_pile=[],
+        exhaust_pile=[],
+        potions=[],
+        player_powers=[],
+    )
 
 
 def _action(action_id: str) -> dict:
-    return {
-        "action_id": action_id,
-        "action_type": "card",
-        "parameters": {
-            "cardId": "STRIKE",
-            "cost": 1,
-            "targetType": "AnyEnemy",
-            "enemyIndex": 0,
-        },
-    }
+    return action(
+        id=action_id,
+        type="card",
+        parameters=action_parameters(
+            card_id="STRIKE",
+            cost=1,
+            target_type="AnyEnemy",
+            enemy_index=0,
+        ),
+    )
 
 
 class CombatActionScoreFeaturesTest(unittest.TestCase):
@@ -93,35 +104,72 @@ class CombatActionScoreFeaturesTest(unittest.TestCase):
         self.assertEqual(by_name["context_player_hp_ratio_x_action_card"], 0.5)
         self.assertAlmostEqual(by_name["context_danger_ratio_x_action_card"], 0.225)
         self.assertAlmostEqual(by_name["context_danger_ratio_x_card_type_attack"], 0.225)
-        self.assertFalse(any("action_id" in name or "card_id" in name for name in ACTION_SCORE_FEATURE_NAMES))
+        self.assertFalse(
+            any("action_id" in name or "card_id" in name for name in ACTION_SCORE_FEATURE_NAMES)
+        )
 
     def test_choice_operation_interaction_survives_pairwise_delta(self) -> None:
-        dto = _dto()
-        attack = {**_card("ATTACK_OPTION"), "optionId": "attack-option"}
-        skill = {**_card("SKILL_OPTION"), "optionId": "skill-option", "type": "Skill"}
-        dto["pendingChoice"] = {
-            "selectedCount": 0,
-            "minSelect": 1,
-            "maxSelect": 1,
-            "selectedOptionIds": [],
-            "options": [attack, skill],
-            "choiceSemantics": {"version": 1, "operation": "gain"},
-        }
-        attack_action = {
-            "action_id": "choose-attack",
-            "action_type": "choice_card",
-            "parameters": {"optionId": "attack-option"},
-        }
-        skill_action = {
-            "action_id": "choose-skill",
-            "action_type": "choice_card",
-            "parameters": {"optionId": "skill-option"},
-        }
+        state = _dto()
+        attack = card(
+            id="ATTACK_OPTION",
+            type="Attack",
+            rarity="Common",
+            cost=1,
+            target_type="AnyEnemy",
+            upgraded=False,
+            upgrade_level=0,
+            tinker_time_type=None,
+            tinker_time_rider=None,
+            enchantment=None,
+            option_id="attack-option",
+        )
+        skill = card(
+            id="SKILL_OPTION",
+            type="Skill",
+            rarity="Common",
+            cost=1,
+            target_type="AnyEnemy",
+            upgraded=False,
+            upgrade_level=0,
+            tinker_time_type=None,
+            tinker_time_rider=None,
+            enchantment=None,
+            option_id="skill-option",
+        )
+        state = dto_replace(
+            state,
+            pending_choice=pending_choice(
+                selected_count=0,
+                min_select=1,
+                max_select=1,
+                selected_option_ids=[],
+                options=[attack, skill],
+                semantics=choice_semantics(version=1, operation="gain"),
+            ),
+        )
+        attack_action = action(
+            id="choose-attack",
+            type="choice_card",
+            parameters=action_parameters(option_id="attack-option"),
+        )
+        skill_action = action(
+            id="choose-skill",
+            type="choice_card",
+            parameters=action_parameters(option_id="skill-option"),
+        )
         attack_features = dict(
-            zip(ACTION_SCORE_FEATURE_NAMES, combat_action_score_features(dto, attack_action), strict=True)
+            zip(
+                ACTION_SCORE_FEATURE_NAMES,
+                combat_action_score_features(state, attack_action),
+                strict=True,
+            )
         )
         skill_features = dict(
-            zip(ACTION_SCORE_FEATURE_NAMES, combat_action_score_features(dto, skill_action), strict=True)
+            zip(
+                ACTION_SCORE_FEATURE_NAMES,
+                combat_action_score_features(state, skill_action),
+                strict=True,
+            )
         )
         feature_name = "context_choice_op_gain_x_card_type_attack"
         self.assertEqual(attack_features[feature_name] - skill_features[feature_name], 1.0)
@@ -133,10 +181,9 @@ class CombatActionScoreFeaturesTest(unittest.TestCase):
         )
 
     def test_legacy_mask_fails_closed(self) -> None:
-        dto = _dto()
-        dto["mask_version"] = "1.1"
+        state = dto_replace(_dto(), mask_version="1.1")
         with self.assertRaisesRegex(ValueError, "mask_version='1.2'"):
-            combat_action_score_features(dto, _action("a"))
+            combat_action_score_features(state, _action("a"))
 
 
 if __name__ == "__main__":

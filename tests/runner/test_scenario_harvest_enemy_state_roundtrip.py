@@ -13,61 +13,54 @@ from sts2_training.runner.scenario_harvest import (
     is_completed_run_log,
     main,
 )
+from tests.dto_test_helpers import dto, enemy, intent
 
 
 class HarvestedEnemyStateRoundTripTest(unittest.TestCase):
     def test_enemy_intent_and_state_log_survive_oracle_scenario_adapter(self) -> None:
-        dto = {
-            "mask_version": "1.2",
-            "characterId": "IRONCLAD",
-            "hp": 70,
-            "maxHp": 80,
-            "enemies": [
-                {
-                    "id": "CULTIST",
-                    "hp": 40,
-                    "maxHp": 48,
-                    "isAlive": True,
-                    "intent": {"stateId": "INCANTATION"},
-                    "stateLog": ["ENTRY", "INCANTATION"],
-                    "powers": [],
-                }
+        state = dto(
+            mask_version="1.2",
+            character_id="IRONCLAD",
+            hp=70,
+            max_hp=80,
+            enemies=[
+                enemy(
+                    id="CULTIST",
+                    hp=40,
+                    max_hp=48,
+                    is_alive=True,
+                    intent=intent(state_id="INCANTATION"),
+                    state_log=["ENTRY", "INCANTATION"],
+                    powers=[],
+                )
             ],
-        }
+        )
 
-        spec = dto_to_scenario_spec(dto, seed=123)
+        spec = dto_to_scenario_spec(state, seed=123)
 
         assert spec is not None
         scenario = _scenario_from_json(spec)
-        enemy = scenario.to_instance_config()["enemies"][0]
-        self.assertEqual(enemy["forced_move"], "INCANTATION")
-        self.assertEqual(enemy["state_log"], ["ENTRY", "INCANTATION"])
+        enemy_spec = scenario.to_instance_config()["enemies"][0]
+        self.assertEqual(enemy_spec["forced_move"], "INCANTATION")
+        self.assertEqual(enemy_spec["state_log"], ["ENTRY", "INCANTATION"])
 
 
 class HarvestCompletionProvenanceTest(unittest.TestCase):
     def _combat_start_dto(self, *, column: int) -> dict:
-        return {
-            "mask_version": "1.2",
-            "characterId": "IRONCLAD",
-            "hp": 70,
-            "maxHp": 80,
-            "currentRoomType": "CombatRoom",
-            "boundary": "stable",
-            "turnNumber": 1,
-            "combatRoundNumber": 1,
-            "stepIndex": column,
-            "pendingChoice": {},
-            "room_context": {"column": column, "row": 1},
-            "enemies": [
-                {
-                    "id": "CULTIST",
-                    "hp": 40,
-                    "maxHp": 48,
-                    "isAlive": True,
-                    "powers": [],
-                }
-            ],
-        }
+        return dto(
+            mask_version="1.2",
+            character_id="IRONCLAD",
+            hp=70,
+            max_hp=80,
+            current_room_type="CombatRoom",
+            boundary="stable",
+            turn_number=1,
+            combat_round_number=1,
+            step_index=column,
+            pending_choice={},
+            room_context={"column": column, "row": 1},
+            enemies=[enemy(id="CULTIST", hp=40, max_hp=48, is_alive=True, powers=[])],
+        )
 
     def test_trailing_record_after_run_result_is_not_promotion_eligible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,7 +87,7 @@ class HarvestCompletionProvenanceTest(unittest.TestCase):
                 },
                 {
                     "event": "selection",
-                    "received": {"masked_emulator_dto": {"currentRoomType": "MapSelect"}},
+                    "received": {"masked_emulator_dto": dto(current_room_type="MapSelect")},
                 },
             ]
             log_path.write_text(
