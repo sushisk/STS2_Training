@@ -97,6 +97,42 @@ INTENT_KEYS: dict[str, str] = {
     "attack_repeats": "attackRepeats",
 }
 
+PENDING_CHOICE_KEYS: dict[str, str] = {
+    "choice_type": "choiceType",
+    "selected_count": "selectedCount",
+    "min_select": "minSelect",
+    "max_select": "maxSelect",
+    "selected_option_ids": "selectedOptionIds",
+    "options": "options",
+    "semantics": "choiceSemantics",
+}
+
+CHOICE_SEMANTICS_KEYS: dict[str, str] = {
+    "version": "version",
+    "operation": "operation",
+}
+
+ACTION_KEYS: dict[str, str] = {
+    "id": "action_id",
+    "type": "action_type",
+    "available": "is_available",
+    "parameters": "parameters",
+}
+
+ACTION_PARAMETER_KEYS: dict[str, str] = {
+    "card_id": "cardId",
+    "cost": "cost",
+    "target_type": "targetType",
+    "enemy_index": "enemyIndex",
+    "option_id": "optionId",
+    "command": "command",
+}
+
+TRANSITION_KEYS: dict[str, str] = {
+    "kind": "kind",
+    "victory": "victory",
+}
+
 
 def _encode(fields: Mapping[str, Any], keys: Mapping[str, str]) -> dict[str, Any]:
     unknown = set(fields) - set(keys)
@@ -142,8 +178,6 @@ def dto_get(value: Mapping[str, Any], field: str) -> Any:
 
 
 def enemy(**fields: Any) -> dict[str, Any]:
-    """Build a public enemy record using semantic field names."""
-
     return _encode(fields, ENEMY_KEYS)
 
 
@@ -156,14 +190,10 @@ def enemy_get(value: Mapping[str, Any], field: str) -> Any:
 
 
 def power(**fields: Any) -> dict[str, Any]:
-    """Build a public power record using semantic field names."""
-
     return _encode(fields, POWER_KEYS)
 
 
 def card(**fields: Any) -> dict[str, Any]:
-    """Build a public card record using semantic field names."""
-
     return _encode(fields, CARD_KEYS)
 
 
@@ -172,6 +202,24 @@ def card_replace(value: Mapping[str, Any], **fields: Any) -> dict[str, Any]:
 
 
 def intent(**fields: Any) -> dict[str, Any]:
-    """Build a public enemy intent record using semantic field names."""
-
     return _encode(fields, INTENT_KEYS)
+
+
+def pending_choice(**fields: Any) -> dict[str, Any]:
+    return _encode(fields, PENDING_CHOICE_KEYS)
+
+
+def choice_semantics(**fields: Any) -> dict[str, Any]:
+    return _encode(fields, CHOICE_SEMANTICS_KEYS)
+
+
+def action(**fields: Any) -> dict[str, Any]:
+    return _encode(fields, ACTION_KEYS)
+
+
+def action_parameters(**fields: Any) -> dict[str, Any]:
+    return _encode(fields, ACTION_PARAMETER_KEYS)
+
+
+def transition(**fields: Any) -> dict[str, Any]:
+    return _encode(fields, TRANSITION_KEYS)
