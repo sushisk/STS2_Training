@@ -7,7 +7,18 @@ from sts2_training.decision.value_features import (
     VALUE_FEATURE_SCHEMA_VERSION,
     combat_value_features,
 )
-from tests.dto_test_helpers import card, card_replace, dto, dto_get, dto_replace, enemy, intent, power
+from tests.dto_test_helpers import (
+    action,
+    card,
+    card_replace,
+    dto,
+    dto_get,
+    dto_replace,
+    enemy,
+    intent,
+    potion,
+    power,
+)
 
 
 def _card(
@@ -63,11 +74,11 @@ def _dto() -> dict:
         draw_pile=[_card("BASH", "Attack", upgrade_level=2, count=3)],
         discard_pile=[_card("DEFEND", "Skill", count=2, tinker_time_type="Alpha")],
         exhaust_pile=[_card("POWER", "Power", count=1)],
-        potions=[{"potion_id": "p"}],
+        potions=[potion(potion_id="p")],
         player_powers=[power(amount=2)],
         legal_actions=[
-            {"action_id": "opaque-1", "action_type": "card"},
-            {"action_id": "opaque-2", "action_type": "card"},
+            action(id="opaque-1", type="card"),
+            action(id="opaque-2", type="card"),
         ],
     )
 
