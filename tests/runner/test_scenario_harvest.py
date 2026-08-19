@@ -20,6 +20,7 @@ from tests.dto_test_helpers import (
     enemy,
     intent,
     pending_choice,
+    potion,
     power,
 )
 
@@ -74,7 +75,7 @@ def _combat_start_dto(**overrides) -> dict:
         pending_choice={},
         room_context={"column": 1, "row": 2},
         relics=[{"id": "BURNING_BLOOD"}],
-        potions=[None, {"id": "FIRE_POTION"}, None],
+        potions=[None, potion(id="FIRE_POTION"), None],
         player_powers=[
             power(id="STRENGTH_POWER", amount=999999999, type="Buff"),
             power(id="BUFFER_POWER", amount=999999999, type="Buff"),
