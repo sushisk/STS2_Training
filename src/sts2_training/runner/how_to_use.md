@@ -143,3 +143,50 @@ result = await start_combat_from_state(client, scenario, engine=my_engine)
 |---|---|
 | `start_combat_from_state` | 特定の戦闘盤面からの評価・デバッグ・特定シナリオでの学習 |
 | `start_new_run` | 通常のフルラン(データ収集の基本形) |
+
+## 評価の並列化(`--start-rl-servers` / `--ports`)
+
+RL サーバ 1 台はクライアント側から並列化できない。`API/tcp_server.py` は
+`_handler_lock` という **1 個の `asyncio.Lock` で全接続の全リクエストを直列化**しており、
+その背後で Emulator は spawn された pythonnet/CLR プロセス 1 個の中で動く
+(`API/api_runtime.py`)。したがって 1 ポートに対して `--concurrency` を上げても
+キューが伸びるだけで速くならない。
+
+CPU を使い切るには**サーバをポートの数だけ立てて、worker を 1 台ずつに固定する**。
+
+いちばん簡単なのは `evaluate_whole_run.py` に起動と停止を任せる方法。ポートは自動で選ばれ、
+終了時(Ctrl-C や例外を含む)にプロセスツリーごと停止する。
+
+```
+python tools/evaluate_whole_run.py --character-id IRONCLAD --num-runs 20 \
+    --start-rl-servers 4 --rl-root C:\STS2_RL ...
+```
+
+checkout の場所は `--rl-root` か環境変数 `STS2_RL_ROOT` で渡す。環境変数を使う場合、
+PowerShell は `$env:STS2_RL_ROOT = "C:\STS2_RL"`、cmd.exe は `set STS2_RL_ROOT=C:\STS2_RL`、
+POSIX shell は `export STS2_RL_ROOT=/path/to/STS2_RL`。
+PowerShell の `set` は `Set-Variable` のエイリアスで環境変数にはならないので注意。
+
+サーバを自分で管理する場合は `--ports` を使う。この場合は開始前に全ポートへ疎通確認を行い、
+listen していないポートを名指しして即座に失敗する(サーバが 1 台欠けていると、その worker の
+担当分が丸ごと接続エラーになり、残った run だけで平均が出てしまうため)。
+
+```
+# サーバ側: 4 プロセス
+python -m API.tcp_server --port 8765
+python -m API.tcp_server --port 8766
+python -m API.tcp_server --port 8767
+python -m API.tcp_server --port 8768
+
+# Training 側: worker がポートに 1 対 1 で張り付く(--concurrency は ports 数が既定)
+python tools/evaluate_whole_run.py --character-id IRONCLAD --num-runs 20 \
+    --ports 8765,8766,8767,8768 ...
+```
+
+`--concurrency` をポート数より大きくすると、複数 worker が 1 台を共有して
+そのサーバのロックで直列化される。その場合は WARNING を出したうえで実行は継続する。
+
+なお `emulate_actions` のバッチサイズは `beam_width × top_k_actions` が上限であり
+(`max_batch_size=64` には届かない)、1 リクエストあたりの仕事量は既に飽和している。
+1 戦あたりのリクエスト数は実測 322〜662 回、1 リクエスト 0.2〜0.6 秒。
+短縮できるのは**戦を跨いだ並列化**だけである。

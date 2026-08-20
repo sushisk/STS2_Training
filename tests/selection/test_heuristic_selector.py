@@ -212,3 +212,55 @@ def test_select_event_option_allows_lethal_when_it_is_the_only_option() -> None:
     chosen = selector.select(legal_actions)
 
     assert chosen["action_id"] == "forced"
+
+
+def test_rest_options_use_the_rest_heuristic_instead_of_a_uniform_pick() -> None:
+    """`choice_rest_option` had no branch and fell through to `_choose` (uniform random)."""
+
+    selector = HeuristicCombatSelector(random.Random(0), epsilon=0.0)
+    candidates = [
+        {
+            "action_id": "a-heal",
+            "action_type": "choice_rest_option",
+            "label": "HEAL",
+            "is_available": True,
+            "parameters": {"restOptionId": "HEAL"},
+        },
+        {
+            "action_id": "a-smith",
+            "action_type": "choice_rest_option",
+            "label": "SMITH",
+            "is_available": True,
+            "parameters": {"restOptionId": "SMITH"},
+        },
+    ]
+
+    hurt = selector.select(candidates, masked_emulator_dto={"hp": 8, "maxHp": 80})
+    healthy = selector.select(candidates, masked_emulator_dto={"hp": 80, "maxHp": 80})
+
+    assert hurt["action_id"] == "a-heal"
+    assert healthy["action_id"] == "a-smith"
+
+
+def test_rest_option_choice_is_deterministic_without_epsilon() -> None:
+    candidates = [
+        {
+            "action_id": "a-heal",
+            "action_type": "choice_rest_option",
+            "label": "HEAL",
+            "is_available": True,
+            "parameters": {"restOptionId": "HEAL"},
+        },
+        {
+            "action_id": "a-smith",
+            "action_type": "choice_rest_option",
+            "label": "SMITH",
+            "is_available": True,
+            "parameters": {"restOptionId": "SMITH"},
+        },
+    ]
+    dto = {"hp": 8, "maxHp": 80}
+
+    for seed in range(20):
+        selector = HeuristicCombatSelector(random.Random(seed), epsilon=0.0)
+        assert selector.select(candidates, masked_emulator_dto=dto)["action_id"] == "a-heal"

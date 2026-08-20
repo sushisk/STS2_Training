@@ -37,6 +37,8 @@ class CombatObservation:
     max_hp: float
     block: float
     energy: float | None
+    max_energy: float | None
+    turn_number: int | None
     enemies: tuple[EnemyObservation, ...]
     hand: tuple[Mapping[str, Any], ...]
     potions: tuple[Mapping[str, Any], ...]
@@ -59,6 +61,14 @@ class CombatObservation:
             _number(dto.get("block"), default=0.0, field="block", strict=strict),
         )
         energy = _optional_number(dto.get("energy"), field="energy", strict=strict)
+        max_energy = _optional_number(dto.get("maxEnergy"), field="maxEnergy", strict=strict)
+        raw_turn = dto.get("turnNumber")
+        if isinstance(raw_turn, bool) or not isinstance(raw_turn, int):
+            if raw_turn is not None and strict:
+                raise ValueError("heuristic input turnNumber must be an integer")
+            turn_number = None
+        else:
+            turn_number = raw_turn
 
         raw_enemies = _mapping_sequence(dto.get("enemies"), "enemies", strict=strict)
         enemies: list[EnemyObservation] = []
@@ -152,6 +162,8 @@ class CombatObservation:
             max_hp=max_hp,
             block=block,
             energy=energy,
+            max_energy=max_energy,
+            turn_number=turn_number,
             enemies=tuple(enemies),
             hand=tuple(_mapping_sequence(dto.get("hand"), "hand", strict=False)),
             potions=tuple(_mapping_sequence(dto.get("potions"), "potions", strict=False)),

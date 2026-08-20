@@ -193,8 +193,16 @@ terminal state に戻った後で Value 評価されます。
 各値が有限な数値であることも検証します。不一致、`NaN`、`inf`、非数値は候補を黙って
 捨てず `RuntimeError` として表面化します。
 
-既定の `HeuristicValueFunction` は HP、block、敵 HP、予測被弾、Power などの簡易特徴を
-使います。
+既定の `HeuristicValueFunction` は、プレイヤーの生存を
+`effective_hp = hp − max(0, 敵の攻撃予告合計 − block)` の 1 項（`effective_hp_ratio`）で表し、
+これに敵 HP、生存敵数、Power の特徴を足します。
+
+HP と block を別項にしない理由は、Beam がターン内の異なる時点にある leaf を比較するためです。
+「カードを打ったがまだ敵のターンを受けていない」leaf と「ターンを終えて既に受けた」leaf を
+素の HP / block で比べると、未払いの被弾量が揃わず、プレイの良し悪しではなくターンの偶奇で
+勝敗が決まります。`effective_hp` はこの意味で turn-invariant で、block は実際に防いだ分だけ
+HP と 1:1 で評価されます（余剰 block と非攻撃 intent に対する block は 0 点。block は
+ターンをまたいで持ち越されないため）。詳細は `decision/value.py` の docstring を参照。
 
 ## フォールバックと例外
 

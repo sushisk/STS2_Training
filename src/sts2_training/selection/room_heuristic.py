@@ -1,4 +1,15 @@
-"""Heuristic preference scores for ``map_room`` navigation decisions."""
+"""Heuristic preference scores for ``map_room`` navigation decisions.
+
+``Unknown`` outranks ``Monster``. That ordering follows the Emulator's own roll for an
+unknown map point (`Core.Odds/UnknownMapPointOdds.cs`): Monster 10%, Treasure 2%,
+Shop 3%, Elite never, and the remaining ~85% an Event. A `?` is therefore a fight only
+one time in ten, while a `Monster` point is a fight every time, so `?` costs far less HP
+in expectation and is the only off-route source of healing, relics, and gold.
+
+Scoring `Unknown` *below* `Monster` made the router take a guaranteed fight at every
+contested choice. Floor-reach evaluation runs lost 12-42 HP per combat and never regained
+any, so maximizing the number of combats was the dominant cause of death.
+"""
 
 from __future__ import annotations
 
@@ -12,8 +23,8 @@ _POINT_TYPE_SCORE: dict[str, float] = {
     "Treasure": 6.0,
     "RestSite": 5.0,
     "Shop": 3.0,
+    "Unknown": 2.0,
     "Monster": 0.0,
-    "Unknown": -1.0,
     "Elite": -2.0,
     "Boss": 0.0,
 }

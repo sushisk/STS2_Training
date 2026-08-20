@@ -51,9 +51,9 @@ Whole Run 評価スクリプトに、次の設定を引数で指定できるよ�
 - `--top-k-actions`
 - `--board-score learned|heuristic`
 - `--learned-pruner`
-- `--score-log-dir`（score ログ収集の有効化）
+- `--detailed-log-dir`（盤面・selection・action score・search trace の収集）
 
-score ログを有効にした場合は、action score の出力と search trace の両方を記録する。action score と board score のどちらか一方だけを出す分岐ではなく、ログ収集のON/OFFで制御する仕様にしている。
+詳細ログを有効にした場合は、rootごとの完全な masked DTO と action score、selection audit、search trace を同一JSONLに記録する。
 
 ### 2.2 pruner と board score の確認
 

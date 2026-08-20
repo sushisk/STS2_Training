@@ -9,6 +9,30 @@ not need a separate training target for partially resolved choice UI states.
 `HeuristicValueFunction` and `PriorHeuristicPolicy` share `CombatObservation` for wire
 normalization, so HP/block/enemy-intent/power interpretation cannot silently drift
 between ranking and value code.
+
+**Player survival is a single `effective_hp_ratio` term, not separate HP/block/incoming
+terms.** Beam compares leaves that sit at different points in the turn cycle - one line
+may have played a card and not yet taken the enemy's turn, while a sibling line has ended
+the turn and already taken it. Any evaluator that scores raw HP and raw block separately
+gives those leaves different amounts of not-yet-paid damage, so the comparison is decided
+by turn parity rather than by play quality. Concretely, with the old
+`player_hp_ratio`/`player_block`/`predicted_incoming_damage` split (40.0/+0.5/-1.0, and
+`incoming_damage` already net of block), block was counted twice - once as itself and once
+as damage it prevents - making one point of used block worth three points of HP, and
+"end turn, then defend" outscored "defend, then end turn" even though both spend one card
+and absorb one attack.
+
+`effective_hp = hp - max(0, enemy intent total - block)` removes both problems at once. It
+is turn-invariant: both orderings above evaluate to the same effective HP at equal depth,
+while at shallower depth the line that blocks first is correctly ahead. Block earns exactly
+the damage it actually prevents, so surplus block is worth nothing and block against a
+non-attacking intent is worth nothing - which is correct, since block does not carry across
+turns. Enemy intent is always published in the Combat DTO, so this never silently degrades
+into "block has no value".
+
+The term is deliberately not clamped at zero. A negative `effective_hp` means the published
+enemy turn is lethal, and letting it go negative keeps a gradient toward reducing incoming
+damage even in positions that are already losing.
 """
 
 from __future__ import annotations
@@ -22,10 +46,8 @@ from sts2_training.decision.combat_observation import CombatObservation
 JsonObject = Mapping[str, Any]
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "player_hp_ratio": 40.0,
-    "player_block": 0.5,
+    "effective_hp_ratio": 40.0,
     "enemy_hp_ratio": -30.0,
-    "predicted_incoming_damage": -1.0,
     "enemies_alive": -2.0,
     "buff_debuff_score": 2.0,
     "enemy_buff_debuff_score": 2.0,
@@ -148,11 +170,12 @@ class HeuristicValueFunction(ValueModel):
                 enemy.powers, self._power_values, field_name
             )
 
+        # `incoming_damage` is already `max(0, sum(enemy intents) - block)`, so this is the
+        # HP the player is projected to hold once the enemy's published turn resolves.
+        effective_hp = observation.hp - observation.incoming_damage
         return {
-            "player_hp_ratio": observation.hp / observation.max_hp,
-            "player_block": observation.block,
+            "effective_hp_ratio": effective_hp / observation.max_hp,
             "enemy_hp_ratio": enemy_hp / enemy_max_hp,
-            "predicted_incoming_damage": observation.incoming_damage,
             "enemies_alive": float(len(alive_enemies)),
             "buff_debuff_score": player_power_type_score,
             "enemy_buff_debuff_score": enemy_power_type_score,

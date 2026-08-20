@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from sts2_training.api.contract import MASK_VERSION, SCHEMA_VERSION
 from sts2_training.runner.floor_reach_eval import (
@@ -105,6 +108,29 @@ class _FakeConnection:
 
 
 class RunFloorReachEvalTest(unittest.IsolatedAsyncioTestCase):
+    async def test_detailed_log_contains_root_board_and_terminal_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            results = await run_floor_reach_eval(
+                character_id="IRONCLAD",
+                num_runs=1,
+                concurrency=1,
+                use_beam=False,
+                connection_factory=lambda: _FakeConnection(),
+                decision_timeout_s=5.0,
+                detailed_log_dir=Path(temp_dir),
+            )
+
+            log_path = next(Path(temp_dir).glob("*.jsonl"))
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            root_events = [event for event in events if event["event"] == "root_decision"]
+
+        self.assertEqual(results[0].max_total_floor, 3)
+        self.assertEqual(len(root_events), 2)
+        self.assertIn("masked_emulator_dto", root_events[0])
+        self.assertIn("action_scores", root_events[0])
+        self.assertEqual(root_events[0]["masked_emulator_dto"]["totalFloor"], 1)
+        self.assertTrue(any(event["event"] == "run_result" for event in events))
+
     async def test_tracks_max_total_floor_across_decisions(self) -> None:
         results = await run_floor_reach_eval(
             character_id="IRONCLAD",

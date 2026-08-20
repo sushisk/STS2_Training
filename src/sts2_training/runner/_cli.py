@@ -93,3 +93,19 @@ def print_result(result: EpisodeResult) -> None:
             sort_keys=True,
         )
     )
+
+
+def _port_list(raw: str) -> list[int]:
+    """Parse a comma-separated TCP port list for multi-server sharding."""
+
+    ports = [item.strip() for item in raw.split(",") if item.strip()]
+    if not ports:
+        raise argparse.ArgumentTypeError("at least one port is required")
+    parsed: list[int] = []
+    for item in ports:
+        parsed.append(_port(item))
+    if len(set(parsed)) != len(parsed):
+        raise argparse.ArgumentTypeError(
+            "ports must be unique; two workers cannot share one RL server"
+        )
+    return parsed

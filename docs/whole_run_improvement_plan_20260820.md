@@ -325,13 +325,13 @@ python tools/check_score_log_scope.py data/evaluation/score_logs/<dir>
        --models learned --search-modes standard --board-score heuristic \
        --beam-depth 2 --beam-width 8 --top-k-actions 8 \
        --output-dir data/evaluation/whole_run/p0-verify \
-       --score-log-dir data/evaluation/score_logs/p0-verify
+       --detailed-log-dir data/evaluation/detailed_logs/p0-verify
    ```
 
 2. 受け入れ判定。
 
    ```
-   python tools/check_score_log_scope.py data/evaluation/score_logs/p0-verify
+   python tools/check_score_log_scope.py data/evaluation/detailed_logs/p0-verify
    ```
 
    `searches_with_missing_candidates == 0`、`out_of_scope_drops == 0`、exit 0 であること。

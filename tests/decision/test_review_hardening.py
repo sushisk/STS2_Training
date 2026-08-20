@@ -255,7 +255,7 @@ class HeuristicValueReviewTest(unittest.TestCase):
 
     def test_non_finite_weight_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "finite number"):
-            HeuristicValueFunction(weights={"player_hp_ratio": float("nan")})
+            HeuristicValueFunction(weights={"effective_hp_ratio": float("nan")})
 
     def test_non_finite_dto_number_is_rejected(self) -> None:
         value_fn = HeuristicValueFunction()

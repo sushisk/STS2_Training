@@ -14,6 +14,7 @@ from sts2_training.selection.action_classification import (
     CHOICE_REWARD_CARD_ACTION_TYPE,
     CHOICE_REWARD_POTION_REPLACE_ACTION_TYPE,
     CHOICE_REWARD_POTION_TAKE_ACTION_TYPE,
+    CHOICE_REST_OPTION_ACTION_TYPE,
     CHOICE_REWARD_SKIP_ACTION_TYPE,
     CHOICE_SKIP_ACTION_TYPE,
     MAP_ROOM_ACTION_TYPE,
@@ -27,6 +28,7 @@ from sts2_training.selection.reward_card_selection import (
     CardDataRewardCardSelectionPolicy,
     RewardCardSelectionPolicy,
 )
+from sts2_training.selection.rest_heuristic import rest_option_preference_scores
 from sts2_training.selection.room_heuristic import room_preference_scores
 
 if TYPE_CHECKING:
@@ -108,6 +110,10 @@ class HeuristicCombatSelector:
         if map_rooms:
             return self._choose_room(map_rooms, dto)
 
+        rest_options = by_type.get(CHOICE_REST_OPTION_ACTION_TYPE)
+        if rest_options:
+            return self._choose_rest_option(rest_options, dto)
+
         event_options = by_type.get(CHOICE_EVENT_OPTION_ACTION_TYPE)
         if event_options:
             return self._choose_event_option(event_options)
@@ -164,6 +170,23 @@ class HeuristicCombatSelector:
             return self._choose(candidates)
 
         scores = room_preference_scores(candidates, masked_emulator_dto)
+        return self._choose_best_scored(candidates, scores)
+
+    def _choose_rest_option(
+        self,
+        candidates: Sequence[JsonObject],
+        masked_emulator_dto: Mapping[str, Any],
+    ) -> JsonObject:
+        """Prefer healing while HP is low, otherwise take the permanent upgrade.
+
+        Epsilon applies here as it does to card and room selection: this is a soft quality
+        preference for the data-collection track, not a safety constraint. Evaluation runs
+        pass ``epsilon=0.0``.
+        """
+        if self._rng.random() < self._epsilon:
+            return self._choose(candidates)
+
+        scores = rest_option_preference_scores(candidates, masked_emulator_dto)
         return self._choose_best_scored(candidates, scores)
 
     def _choose_event_option(self, candidates: Sequence[JsonObject]) -> JsonObject:

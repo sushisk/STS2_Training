@@ -24,6 +24,7 @@ CHOICE_REWARD_POTION_REPLACE_ACTION_TYPE = "choice_reward_potion_replace"
 CHOICE_REWARD_SKIP_ACTION_TYPE = "choice_reward_skip"
 MAP_ROOM_ACTION_TYPE = "map_room"
 CHOICE_EVENT_OPTION_ACTION_TYPE = "choice_event_option"
+CHOICE_REST_OPTION_ACTION_TYPE = "choice_rest_option"
 
 
 def available_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
@@ -77,6 +78,10 @@ def map_room_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
 
 def choice_event_option_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
     return _actions_of_type(legal_actions, CHOICE_EVENT_OPTION_ACTION_TYPE)
+
+
+def rest_option_actions(legal_actions: Sequence[JsonObject]) -> list[JsonObject]:
+    return _actions_of_type(legal_actions, CHOICE_REST_OPTION_ACTION_TYPE)
 
 
 def group_by_action_type(

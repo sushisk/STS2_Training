@@ -370,6 +370,7 @@ class SearchTraceEnd:
     branches_created: int
     branches_faulted: int = 0
     branches_out_of_scope: int = 0
+    leaves_turn_aligned: int = 0
     event_type: str = field(default="search_end", init=False)
 
     @property

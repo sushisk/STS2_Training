@@ -11,6 +11,8 @@ widening happens in exactly one place; these tests pin each entry point to it.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import importlib.util
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -99,6 +101,71 @@ class RunnerBeamScopeTest(unittest.TestCase):
             frozenset({"system", "card"}),
         )
 
+    def test_evaluate_whole_run_mode_configs_use_the_full_combat_scope(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "_evaluate_whole_run_under_test",
+            Path(__file__).resolve().parents[2] / "tools" / "evaluate_whole_run.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        args = module._parse_args(  # noqa: SLF001
+            [
+                "--character-id",
+                "IRONCLAD",
+                "--search-modes",
+                "standard",
+                "--beam-width",
+                "8",
+                "--top-k-actions",
+                "4",
+            ]
+        )
+        config = module._mode_configs(args)["standard"]  # noqa: SLF001
+
+        self.assertEqual(config.beam_searchable_action_types, COMBAT_BEAM_ACTION_TYPES)
+        self.assertEqual(config.beam_width, 8)
+        self.assertEqual(config.top_k_actions, 4)
+
+    def test_floor_reach_eval_warns_when_an_explicit_config_narrows_the_scope(self) -> None:
+        """Caller-authoritative scope is allowed, but never silent.
+
+        The engine traces each dropped branch, but by then the run is underway and its
+        floor statistics are already meaningless. Say so while building the engine.
+        """
+
+        narrowed = BeamSearchConfig(
+            max_depth=2, beam_searchable_action_types=frozenset({"system", "card"})
+        )
+
+        with self.assertLogs(floor_reach_eval_module._LOG, level="WARNING") as logs:  # noqa: SLF001
+            floor_reach_eval_module._build_engine(  # noqa: SLF001
+                _Client(),
+                state=floor_reach_eval_module._RunState(),  # noqa: SLF001
+                seed=1,
+                use_beam=True,
+                search_mode=narrowed,
+                beam_max_depth=None,
+            )
+
+        message = "\n".join(logs.output)
+        self.assertIn("narrower than the Combat domain", message)
+        self.assertIn("choice_target", message)
+
+    def test_floor_reach_eval_does_not_warn_for_the_full_combat_scope(self) -> None:
+        with mock.patch.object(floor_reach_eval_module._LOG, "warning") as warn:  # noqa: SLF001
+            floor_reach_eval_module._build_engine(  # noqa: SLF001
+                _Client(),
+                state=floor_reach_eval_module._RunState(),  # noqa: SLF001
+                seed=1,
+                use_beam=True,
+                search_mode="standard",
+                beam_max_depth=None,
+            )
+
+        warn.assert_not_called()
+
     def test_stable_pruner_ab_cli_config_uses_the_full_combat_scope(self) -> None:
         args = argparse.Namespace(search_mode="standard", beam_depth=None)
 
@@ -161,3 +228,42 @@ class SelfPlayBeamScopeTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FloorReachEvalEpsilonTest(unittest.TestCase):
+    """Evaluation measures the policy, not an exploring variant of it.
+
+    `HeuristicCombatSelector`'s own 0.1 default belongs to the data-collection track. Left
+    on during evaluation it makes one in ten map-room and card fallback picks uniformly
+    random, which is measurement noise laid on top of every floor statistic.
+    """
+
+    def _selector(self, **kwargs) -> object:
+        engine = floor_reach_eval_module._build_engine(  # noqa: SLF001
+            _Client(),
+            state=floor_reach_eval_module._RunState(),  # noqa: SLF001
+            seed=1,
+            use_beam=True,
+            search_mode="standard",
+            beam_max_depth=None,
+            **kwargs,
+        )
+        return engine._fallback  # noqa: SLF001
+
+    def test_evaluation_is_greedy_by_default(self) -> None:
+        self.assertEqual(self._selector()._epsilon, 0.0)  # noqa: SLF001
+
+    def test_explicit_epsilon_is_honored(self) -> None:
+        self.assertEqual(self._selector(eval_epsilon=0.25)._epsilon, 0.25)  # noqa: SLF001
+
+    def test_out_of_range_epsilon_is_rejected(self) -> None:
+        for bad in (-0.1, 1.5, "0.1", True):
+            with self.subTest(eval_epsilon=bad):
+                with self.assertRaisesRegex(ValueError, "eval_epsilon"):
+                    asyncio.run(
+                        floor_reach_eval_module.run_floor_reach_eval(
+                            character_id="IRONCLAD",
+                            num_runs=1,
+                            eval_epsilon=bad,
+                        )
+                    )

@@ -144,6 +144,28 @@ class SelectionAudit:
             # from request shape, while preserving request.action_id byte-for-byte.
             "selected_action_id": selected_action_id,
         }
+        # A branch fault is otherwise difficult to investigate because the server may
+        # return only a generic ``branch execution faulted`` message.  Preserve an
+        # explicitly named, self-contained replay context.  This is the complete
+        # Training-visible parent decision DTO, not an internal Emulator restore
+        # snapshot (the latter is not exposed by the current API).
+        if isinstance(result, Mapping) and result.get("status") == "faulted":
+            parent_dto = _masked_dto(received)
+            event["replay_snapshot"] = deepcopy(dict(parent_dto))
+            event["fault_context"] = {
+                "snapshot_kind": "training_visible_parent_decision",
+                "parent_decision_point_id": (
+                    received.get("decision_point_id")
+                    if isinstance(received, Mapping)
+                    else None
+                ),
+                "parent_boundary": parent_dto.get("boundary"),
+                "parent_choice_scope": parent_dto.get("choiceScope"),
+                "parent_pending_choice": deepcopy(parent_dto.get("pendingChoice")),
+                "parent_legal_actions": deepcopy(parent_dto.get("legal_actions")),
+                "branch_request": deepcopy(event_request),
+                "branch_result": deepcopy(dict(result)),
+            }
         if operation == "commit_action" and result is not None:
             event.update(_root_outcomes(received, result))
         if error is not None:

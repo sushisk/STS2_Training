@@ -154,6 +154,96 @@ def test_speculative_branch_result_does_not_create_root_room_result() -> None:
     assert "run_result" not in events[0]
 
 
+def test_faulted_branch_records_explicit_replay_context() -> None:
+    events: list[dict] = []
+    audit = SelectionAudit(events.append)
+    audit.remember(
+        _decision(
+            decision_point_id="decision-1",
+            boundary="pending_choice",
+            room_context={"room_id": 7},
+            choiceScope="TopLevel",
+            pendingChoice={},
+            legal_actions=[
+                {
+                    "action_id": "0",
+                    "action_type": "choice_target",
+                    "label": "Enemy",
+                }
+            ],
+        )
+    )
+
+    request = {
+        **_commit_request(),
+        "operation": "emulate_actions",
+        "branch_id": "branch-1",
+        "parent_branch_id": "root",
+        "rng_id": 323,
+    }
+    result = {
+        "status": "faulted",
+        "branch_id": "branch-1",
+        "parent_branch_id": "root",
+        "rng_id": 323,
+        "error": "branch execution faulted",
+        "fault_kind": "replay_mismatch",
+    }
+
+    audit.record_action(request, source_branch_id="root", result=result)
+
+    context = events[0]["fault_context"]
+    assert events[0]["replay_snapshot"]["boundary"] == "pending_choice"
+    assert context["snapshot_kind"] == "training_visible_parent_decision"
+    assert context["parent_decision_point_id"] == "decision-1"
+    assert context["parent_choice_scope"] == "TopLevel"
+    assert context["parent_legal_actions"][0]["action_type"] == "choice_target"
+    assert context["branch_request"]["branch_id"] == "branch-1"
+    assert context["branch_result"]["fault_kind"] == "replay_mismatch"
+
+
+def test_faulted_branch_jsonl_contains_replay_snapshot(tmp_path) -> None:
+    path = tmp_path / "faults.jsonl"
+    with JsonlSelectionLogger(path, append=False) as logger:
+        audit = SelectionAudit(logger)
+        audit.remember(
+            _decision(
+                decision_point_id="decision-1",
+                boundary="pending_choice",
+                room_context={"room_id": 7},
+                choiceScope="TopLevel",
+                pendingChoice={},
+                legal_actions=[
+                    {
+                        "action_id": "0",
+                        "action_type": "choice_target",
+                        "label": "Enemy",
+                    }
+                ],
+            )
+        )
+        audit.record_action(
+            {
+                **_commit_request(),
+                "operation": "emulate_actions",
+                "branch_id": "branch-1",
+                "parent_branch_id": "root",
+                "rng_id": 323,
+            },
+            source_branch_id="root",
+            result={
+                "status": "faulted",
+                "branch_id": "branch-1",
+                "fault_kind": "replay_mismatch",
+                "error": "branch execution faulted",
+            },
+        )
+
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert record["replay_snapshot"]["boundary"] == "pending_choice"
+    assert record["fault_context"]["branch_result"]["fault_kind"] == "replay_mismatch"
+
+
 def test_whole_run_sparse_commit_records_public_action_id_unchanged() -> None:
     events: list[dict] = []
     audit = SelectionAudit(events.append)

@@ -110,7 +110,7 @@ class HeuristicValueFunctionTest(unittest.TestCase):
 
     def test_block_is_consumed_once_across_multiple_enemy_attacks(self) -> None:
         value_fn = HeuristicValueFunction(
-            weights=_single_feature_weights("predicted_incoming_damage", -1.0)
+            weights=_single_feature_weights("effective_hp_ratio", 1.0)
         )
         state = dto(
             hp=50,
@@ -122,7 +122,78 @@ class HeuristicValueFunctionTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(value_fn.evaluate(state), -10.0)
+        # 10 block against 20 total incoming leaves 10 unblocked: (50-10)/50. Consuming the
+        # block once per attacker would absorb both hits and give 50/50 instead.
+        self.assertEqual(value_fn.evaluate(state), 0.8)
+
+    def test_survival_score_is_turn_invariant(self) -> None:
+        """Playing a defensive card before or after the enemy turn must score the same.
+
+        Beam compares leaves that sit at different points in the turn cycle. If the two
+        orderings below do not tie at equal depth, the search is decided by turn parity
+        rather than play quality, and "end the turn first" wins for free - which is what
+        made the agent discard playable Strikes and Defends.
+        """
+
+        value_fn = HeuristicValueFunction()
+        attacker = enemy(hp=30, max_hp=30, is_alive=True, intent=intent(attack_damage=12))
+
+        def state(hp: int, block: int) -> dict:
+            return dto(hp=hp, max_hp=80, block=block, enemies=[attacker])
+
+        # Line A: Defend (5 block), then end the turn and take 12 into 5 block.
+        a_after_defend = state(hp=60, block=5)
+        a_after_enemy_turn = state(hp=53, block=0)
+        # Line B: end the turn first, taking the full 12, then Defend on the next turn.
+        b_after_enemy_turn = state(hp=48, block=0)
+        b_after_defend = state(hp=48, block=5)
+
+        self.assertEqual(
+            value_fn.evaluate(a_after_enemy_turn), value_fn.evaluate(b_after_defend)
+        )
+        self.assertGreater(
+            value_fn.evaluate(a_after_defend), value_fn.evaluate(b_after_enemy_turn)
+        )
+
+    def test_block_trades_one_for_one_against_hp_it_prevents(self) -> None:
+        value_fn = HeuristicValueFunction()
+        attacker = enemy(hp=30, max_hp=30, is_alive=True, intent=intent(attack_damage=12))
+        base = dto(hp=50, max_hp=80, block=0, enemies=[attacker])
+
+        self.assertEqual(
+            value_fn.evaluate(dto_replace(base, block=5)),
+            value_fn.evaluate(dto_replace(base, hp=55)),
+        )
+
+    def test_block_beyond_incoming_damage_is_worthless(self) -> None:
+        value_fn = HeuristicValueFunction()
+        attacker = enemy(hp=30, max_hp=30, is_alive=True, intent=intent(attack_damage=12))
+        base = dto(hp=50, max_hp=80, block=12, enemies=[attacker])
+
+        # Block does not carry across turns, so surplus block buys nothing.
+        self.assertEqual(
+            value_fn.evaluate(dto_replace(base, block=30)), value_fn.evaluate(base)
+        )
+
+    def test_block_against_a_non_attacking_intent_is_worthless(self) -> None:
+        value_fn = HeuristicValueFunction()
+        buffer_enemy = enemy(hp=30, max_hp=30, is_alive=True, intent=intent(attack_damage=0))
+        base = dto(hp=50, max_hp=80, block=0, enemies=[buffer_enemy])
+
+        self.assertEqual(
+            value_fn.evaluate(dto_replace(base, block=20)), value_fn.evaluate(base)
+        )
+
+    def test_lethal_incoming_damage_keeps_a_gradient_below_zero(self) -> None:
+        """`effective_hp` is not clamped: reducing lethal damage must still improve."""
+
+        value_fn = HeuristicValueFunction()
+        attacker = enemy(hp=30, max_hp=30, is_alive=True, intent=intent(attack_damage=40))
+        base = dto(hp=10, max_hp=80, block=0, enemies=[attacker])
+
+        self.assertGreater(
+            value_fn.evaluate(dto_replace(base, block=15)), value_fn.evaluate(base)
+        )
 
     def test_player_power_type_direction(self) -> None:
         value_fn = HeuristicValueFunction()
@@ -235,7 +306,7 @@ class HeuristicValueFunctionTest(unittest.TestCase):
         self.assertEqual(value_fn.evaluate_batch(dtos), [value_fn.evaluate(d) for d in dtos])
 
     def test_custom_weights_override_defaults(self) -> None:
-        value_fn = HeuristicValueFunction(weights={"player_hp_ratio": 0.0})
+        value_fn = HeuristicValueFunction(weights={"effective_hp_ratio": 0.0})
         full_hp = dto(hp=100, max_hp=100, enemies=[])
         no_hp = dto(hp=0, max_hp=100, enemies=[])
 

@@ -50,3 +50,50 @@ def test_unknown_point_type_is_neutral() -> None:
     candidates = [_room_action("a-mystery", "SomeFuturePointType")]
     scores = room_preference_scores(candidates, {"hp": 80, "maxHp": 80})
     assert scores["a-mystery"] == 0.0
+
+
+def test_unknown_room_outranks_a_guaranteed_monster_fight() -> None:
+    """A `?` is a fight ~10% of the time; a Monster point is a fight every time.
+
+    Emulator `Core.Odds/UnknownMapPointOdds.cs` rolls Monster 0.10, Treasure 0.02,
+    Shop 0.03, Elite never, and the ~0.85 remainder is an Event. Scoring Unknown below
+    Monster made the router take the maximum possible number of combats, which is the
+    dominant cause of attrition death in floor-reach runs.
+    """
+
+    candidates = [
+        _room_action("a-unknown", "Unknown"),
+        _room_action("a-monster", "Monster"),
+    ]
+
+    scores = room_preference_scores(candidates, {"hp": 80, "maxHp": 80})
+
+    assert scores["a-unknown"] > scores["a-monster"]
+
+
+def test_unknown_still_ranks_below_guaranteed_good_rooms() -> None:
+    candidates = [
+        _room_action("a-unknown", "Unknown"),
+        _room_action("a-treasure", "Treasure"),
+        _room_action("a-rest", "RestSite"),
+        _room_action("a-shop", "Shop"),
+        _room_action("a-elite", "Elite"),
+    ]
+
+    scores = room_preference_scores(candidates, {"hp": 80, "maxHp": 80})
+
+    assert scores["a-treasure"] > scores["a-unknown"]
+    assert scores["a-rest"] > scores["a-unknown"]
+    assert scores["a-shop"] > scores["a-unknown"]
+    assert scores["a-unknown"] > scores["a-elite"]
+
+
+def test_unknown_is_preferred_over_monster_at_low_hp_too() -> None:
+    candidates = [
+        _room_action("a-unknown", "Unknown"),
+        _room_action("a-monster", "Monster"),
+    ]
+
+    scores = room_preference_scores(candidates, {"hp": 8, "maxHp": 80})
+
+    assert scores["a-unknown"] > scores["a-monster"]
