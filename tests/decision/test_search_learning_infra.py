@@ -244,7 +244,7 @@ class BeamSearchInstrumentationTest(unittest.TestCase):
             root_action_id=None,
         )
 
-        items, metadata, _policy_ms = engine._propose_frontier(
+        items, metadata, _policy_ms, _exhausted = engine._propose_frontier(
             [parent],
             search_id="search",
             proposal_step_index=0,

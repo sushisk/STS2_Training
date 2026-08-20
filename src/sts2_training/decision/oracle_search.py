@@ -251,7 +251,7 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
         finally:
             self.config.top_k_actions = original_top_k
 
-        _items, item_meta, _policy_ms = result
+        _items, item_meta, _policy_ms, _exhausted = result
         proposed_ids = {proposal.action_id for _node, proposal, _branch, _rng in item_meta}
         available_ids = {
             str(action["action_id"])
@@ -265,9 +265,11 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
             )
         return result
 
-    def _score_frontier(self, item_meta, branch_results, depth=None, *, search_id: str):  # type: ignore[override]
+    def _score_frontier(  # type: ignore[override]
+        self, item_meta, branch_results, depth=None, *, search_id: str, root_turn=None
+    ):
         result = super()._score_frontier(
-            item_meta, branch_results, depth, search_id=search_id
+            item_meta, branch_results, depth, search_id=search_id, root_turn=root_turn
         )
         next_beam, newly_finished = result[0], result[1]
         if self.trace_collector is not None:

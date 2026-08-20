@@ -202,7 +202,7 @@ class ExhaustiveRootProposalTest(unittest.TestCase):
             root_action_id=None,
         )
 
-        items, metadata, _ms = engine._propose_frontier(
+        items, metadata, _ms, _exhausted = engine._propose_frontier(
             [parent],
             search_id="search",
             proposal_step_index=0,

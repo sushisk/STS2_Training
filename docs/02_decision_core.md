@@ -10,7 +10,7 @@ decision core は、1 つの Combat decision DTO から action を選ぶ層で�
 
 `BeamSearchEngine` は `PolicyModel` が提案した候補 action を `AsyncTrainingApiClient.emulate_action(s)` で分岐実行し、`ValueModel` が stable/terminal state を評価し、beam width と depth budget の範囲で best root action を返す。`candidate_coverage.py` は policy ranking の後に構造的に必要な action type を補い、policy-only の blind spot を減らす。
 
-Value は heuristic 実装に加えて `LinearValueModel` を利用できる。learned Value は `VALUE_FEATURE_SCHEMA_VERSION = 2` の feature を使い、artifact schema `3`、mask version `1.2`、学習時の exact `dto_version`、feature names を load 時に検証する。runtime inference は artifact の scaler/係数を使う線形評価で、terminal utility が DTO から exact に得られる場合はそれを優先する。
+Value は 2 つの heuristic 実装（`HeuristicValueFunction` / `DamageRaceValueFunction`）に加えて `LinearValueModel` を利用できる。`DamageRaceValueFunction` は出力を「この戦闘が終わったときの自 HP の見積り」に定義し、全項を自 HP 単位で表す。ターン途中の state とターン開始時の state が同じ問いに答えるため直接比較できる（§5.3）。learned Value は `VALUE_FEATURE_SCHEMA_VERSION = 2` の feature を使い、artifact schema `3`、mask version `1.2`、学習時の exact `dto_version`、feature names を load 時に検証する。runtime inference は artifact の scaler/係数を使う線形評価で、terminal utility が DTO から exact に得られる場合はそれを優先する。
 
 Policy は bootstrap の `PriorHeuristicPolicy` に加えて `LinearActionScorePolicy` を利用できる。learned `action_score` は Oracle root action の `estimated_q` の絶対値を回帰するのではなく、同一 decision 内の順位を pairwise logistic で distill する。runtime artifact は schema `1`、feature schema `4`、mask version `1.2`、exact `dto_version`、feature names を検証し、linear score を `ActionCandidate.action_score` に保持したまま候補を並べる。
 
@@ -25,7 +25,8 @@ Value の学習データは二系統を明確に分ける。supervised Value は
 | `action_score_features.py` | learned action ranking 用 feature schema v4。board/candidate/interaction feature を構築 |
 | `action_score_training_data.py` | Oracle root-action label を読み、同一 decision 内 pairwise example を作る |
 | `learned_policy.py` | artifact schema v1 の `LinearActionScorePolicy` と runtime contract validation |
-| `value.py` | `ValueModel` interface と heuristic value |
+| `value.py` | `ValueModel` interface と加算型 heuristic value |
+| `damage_race_value.py` | 自 HP 単位の `DamageRaceValueFunction`（残り戦闘のダメージレース閉形式） |
 | `value_features.py` | learned Value 用 feature schema v2 と DTO featurization |
 | `learned_value.py` | artifact schema v3 の `LinearValueModel` と runtime contract validation |
 | `value_training_data.py` / `_value_training_data_impl.py` | supervised root-value sample と actual committed trajectory の structured loader |
@@ -71,6 +72,9 @@ class BeamSearchConfig:
     release_branches_on_finish: bool = True
     beam_searchable_action_types: frozenset[str] = field(default_factory=lambda: frozenset({"system", "card", "potion"}))
     max_continuation_steps: int = 8
+    max_branch_attempts: int = 3
+    turn_aligned_leaves: bool = False
+    turn_boundary_scoring: bool = False
 
 class BeamSearchEngine:
     def __init__(self, client: Any, *, policy: PolicyModel, value_fn: ValueModel, config: BeamSearchConfig | None = None, stable_pruner: StableFrontierPruner | None = None, trace_collector: SearchTraceCollector | None = None) -> None
@@ -105,6 +109,31 @@ class LinearValueModel(ValueModel):
     def exact_terminal_utility(self, masked_emulator_dto: Mapping[str, Any]) -> float | None
     def oracle_provenance(self) -> Mapping[str, Any]
 ```
+
+```python
+DEFAULT_TERMINAL_VALUES: dict[str, float]   # {"victory": 100000.0, "defeat": -100000.0}
+
+class DamageRaceValueFunction(ValueModel):
+    def __init__(
+        self,
+        *,
+        block_per_energy: float = 5.0,
+        turn_attrition: float = 1.0,
+        default_damage_per_energy: float = 6.0,
+        min_damage_per_energy: float = 1.0,
+        calibration_prior_turns: float = 1.0,
+        enemy_effective_hp_multipliers: Mapping[str, float] | None = None,
+        terminal_values: Mapping[str, float] | None = None,
+    ) -> None
+    def evaluate(self, masked_emulator_dto: Mapping[str, Any]) -> float
+    def exact_terminal_utility(self, masked_emulator_dto: Mapping[str, Any]) -> float | None
+    def oracle_provenance(self) -> Mapping[str, Any]
+```
+
+`block_per_energy`(σ) と `turn_attrition`(c) だけが手置きの定数で、エネルギー単価は
+`calibration_prior_turns` 分の事前観測へ縮約しつつ戦闘中に自己校正する。
+`enemy_effective_hp_multipliers` は既定で空 dict であり、名前付き power による補正は
+opt-in（§5.3）。非有限値・非正値・空文字キーは構築時に `ValueError`。
 
 Value training data:
 
@@ -198,6 +227,36 @@ python tools/train_combat_value.py \
   --output tools/output/combat_value_weights.json
 ```
 
+`DamageRaceValueFunction` を Beam に渡す:
+
+```python
+from sts2_training.decision.beam_search import BeamSearchEngine, BeamSearchConfig
+from sts2_training.decision.damage_race_value import DamageRaceValueFunction
+from sts2_training.decision.policy import PriorHeuristicPolicy
+
+engine = BeamSearchEngine(
+    client,
+    policy=PriorHeuristicPolicy(),
+    value_fn=DamageRaceValueFunction(),
+    config=BeamSearchConfig(beam_width=8, top_k_actions=4, max_depth=2),
+)
+```
+
+Whole Run 評価では `--board-score` の既定が `damage_race` なので指定は不要。
+旧実装と比較する場合のみ明示する:
+
+```bash
+python tools/evaluate_whole_run.py --character-id IRONCLAD --num-runs 10   --board-score heuristic
+```
+
+名前付き power の補正を有効にする（既定は無効）:
+
+```python
+value_fn = DamageRaceValueFunction(
+    enemy_effective_hp_multipliers={"VULNERABLE_POWER": 1 / 1.5},
+)
+```
+
 learned `action_score` の学習:
 
 ```bash
@@ -244,7 +303,124 @@ runner が named/default preset から engine を作るときは `runner/beam_sc
 
 scope 外で捨てられた branch は `BeamSearchStats.branches_out_of_scope` と `OutOfScopeDropTrace`（`event_type="out_of_scope_drop"`、`boundary` / `observed_action_types` / `allowed_action_types` 付き）に記録され、WARNING ログも出る。`branches_faulted` とは意図的に別カウンタで、非ゼロは transport/emulator の失敗ではなく **設定の誤り**を意味する。
 
-### 5.2 その他
+### 5.2 `HeuristicValueFunction` の生存項は turn-invariant でなければならない
+
+既定 heuristic はプレイヤーの生存を `effective_hp_ratio` の 1 項で表す。
+
+```
+effective_hp = hp − max(0, 敵の攻撃予告合計 − block)
+```
+
+HP と block を別項に分けてはならない。Beam はターン内の異なる時点にある leaf を比較する。
+「カードを打ったがまだ敵のターンを受けていない」leaf と「ターンを終えて既に受けた」leaf を
+素の HP / block で比べると、未払いの被弾量が揃わないため、プレイの良し悪しではなく
+**ターンの偶奇**で勝敗が決まる。
+
+旧構成（`player_hp_ratio` 40.0 / `player_block` +0.5 / `predicted_incoming_damage` −1.0、
+`incoming_damage` は既に block 差し引き済み）では block が二重計上され、使われた block 1 点が
+HP 3 点分の価値になっていた。さらに「ターンを終えてから防御」が「防御してからターンを終える」に
+勝ってしまい、探索は打てる攻撃・防御カードを手札に残したままターンを渡していた。
+
+`effective_hp` は同じ深さで両者を一致させ、浅い深さでは先に防御した側が正しく上に来る。
+block は実際に防いだ分だけ HP と 1:1 で評価される（余剰 block と非攻撃 intent に対する block は
+0 点。block はターンをまたいで持ち越されない）。敵 intent は Combat DTO で常に公開されるため、
+「block が無価値になる」縮退は起きない。0 で clamp しないのは、確定死の局面でも被弾を減らす
+勾配を残すため。
+
+### 5.3 `DamageRaceValueFunction` の導出
+
+出力は「この戦闘が終わったときの自 HP」で、単位は自 HP に統一されている。
+`HeuristicValueFunction` の重み付き和では表現できない性質が 2 つあるため別実装になっている。
+
+**単位が状況依存になる。** `enemy_hp_ratio` の係数は敵HP 1 点あたり `30 / Σ maxHp` なので、
+38 HP の敵に対しては自 HP 1 点の 1.58 倍、250 HP のボスに対しては 0.24 倍になる。
+戦闘の主要 2 資源の交換レートが、誰も選んでいないのに 6 倍動く。
+
+**変換を表現できない。** 戦闘はエネルギー→ダメージ/block、block→防いだ HP、
+敵HP減→残ターン減→被弾減、という変換の連鎖である。独立特徴量の和には
+「x を消費して y を得る操作が価値中立か」という概念が無い。
+実際 `α = 40/maxHp` として「Defend してからターン終了」は `α(H - I + b + β - I')`、
+「ターン終了してから Defend」も同じ値になり、`effective_hp` 化によって
+2 つのターン順序が代数的に一致してしまっている。探索は選ぶ理由を持たず、
+`max()` が先頭の最大要素（＝ policy 順）を返す。
+
+**モデル**。1 ターンのエネルギー予算 `E` を攻撃 `x` と防御 `E-x` に分けると、
+与ダメージは `x·κ`、軽減は `(E-x)·σ`、残敵 HP `R` を削るのに `R/(x·κ)` ターンかかり、
+各ターンのコストは `max(0, D - (E-x)·σ) + c` である。プレイヤーは最も痛くない配分を選ぶので
+
+```
+Loss(R, D) = min over 0 < x <= E of  R/(x·κ) · (max(0, D - (E-x)·σ) + c)
+```
+
+`c > 0` は 1 ターンの固定消耗（削りダメージ、状態異常、敵のスケーリング）。
+これが無いと「永久に防御して攻撃しない」がコスト 0 の解になり最小化が退化する。
+
+この最小値は閉形式を持つ（`_remaining_loss`）。目的関数は `x` について区分的に単調で
+どちらの区間でも減少するので、最適点は「全部防ぎ切れる最大の `x`」か `x = E` のいずれか。
+`Loss` は `R` について線形で、その傾きが敵 HP と自 HP の交換レートになる。
+これは手置きではなく `κ, σ, D, E, c` から導出される。
+
+今ターンは近似しない。`I`、`b`、残エネルギーがすべて既知なので `_turn_cost` が
+同じ目的関数をエネルギー配分について厳密に最小化する。区分線形なので最適になり得る配分は
+3 つだけ（防御に使わない / ちょうど防ぎ切る / 全部防御）で、3 つとも評価する。
+
+**カード表は不要。** カードのダメージ量は DTO にも同梱カードデータにも無い
+（`dmg_per_play` は 439 件すべて 0.0）。`κ` は代わりに進行中の戦闘から校正する。
+分母は**完了したターンのエネルギーのみ**で、今ターンの未消費分は数えない。
+今ターンを分母に入れると「Defend を打った側だけレートが下がる」ため、
+同一ターン内の 2 つの leaf が別の交換レートで採点されてしまう。実測では、
+今ターンを含めた場合に同点ケースが +5 ではなく +11.25 になり、Defend の変換中立性も崩れた。
+推定値は `calibration_prior_turns` ターン分の擬似観測でキャラ事前分布へ縮約する。
+完了 1 ターンは標本として極端に小さく、縮約が無いと静かな 1 ターンでレートが半減し、
+ターン終了が「HP」と「急に遅くなったレース」で二重に課金される。
+
+エネルギー単体は決して加点しない。エネルギーはそれが生む block とダメージを通してのみ
+評価され、ターン終了後の state も同じ式で採点されるので、
+ターン終了が「補充されたエネルギー」で得をすることは構造的に起こらない。
+
+**既知の性質**
+
+- `V < 0` は「このままだと死ぬ」を意味する。負の下限は設けていないため、
+  絶望的な局面では大きな負値になる（実測 20,209 state のうち 3.97% が `-100` 未満）。
+  Beam は順序しか使わないので実害は無いが、learning label として使う場合はスケールに注意する
+- `enemy_effective_hp_multipliers` は既定で空。名前付き power による補正は
+  式そのものと分けて A/B できるよう opt-in にしてある
+- selection ログには branch 適用後の DTO が入っていない（`received.masked_emulator_dto` は
+  決定時の親 state）ため、leaf の並べ替えをオフラインで再生することはできない。
+  検証は実戦の score ログで行う
+
+### 5.4 `turn_boundary_scoring` は leaf を採点する場所を変える
+
+`BeamSearchConfig.turn_boundary_scoring`（既定 `False`）を有効にすると、探索は
+**1 プレイヤーターンの内側から出なくなる**。
+
+- 展開してよい行動は `TURN_INTERNAL_ACTION_TYPES`（`card` / `potion` / continuation）
+  だけになる。`End Turn`（`system`）は展開されないので、探索中にターン境界を跨ぐ行が
+  生成されない
+- 各 leaf は「このターンにカードを k 枚打った状態」になり、**root 自身も k=0 の行**
+  （＝「今すぐ End Turn」）として leaf に含まれる
+- 全 leaf を強制 `End Turn` の先で採点する。root の leaf では、その強制 `End Turn` が
+  そのまま `root_action_id` になる
+
+これは `beam_searchable_action_types`（その state を探索してよいか）とは別の軸である。
+後者は `available_action_types(dto) <= allowed` という全称条件なので、そこから `system`
+を外すと `End Turn` が常に合法である以上すべての Combat state が探索対象外になる。
+展開してよい行動の集合はこの判定とは分けて持つ。
+
+`turn_aligned_leaves`（§10、`_align_leaf_turns`）は遅れた leaf だけを `min(turn) + 1` へ
+持ち上げる別の規則で、両方を同時に有効にすると `BeamSearchConfig.__post_init__` が
+`ValueError` を投げる。
+
+この mode では次の 2 つが leaf 条件に加わる。
+
+- 展開できる候補が 1 つも無いノードは、探索全体を打ち切らずに**そのノードだけ** leaf に
+  なる（`End Turn` しか合法手が無い局面がこれに当たる）
+- カード自身がターンを終わらせた行は、そこで止まる（次ターンの内側に予算を使わせない）
+
+強制 `End Turn` のバッチが reject された場合は best effort で元のスコアが残る。
+`BeamSearchStats.leaves_turn_aligned` と `search_end` trace に発火回数が入る。
+
+### 5.5 その他
 
 Beam Search は continuation handling、policy candidate limit、Whole Run active branch capacity、stable frontier pruning を別々の責務として扱う。`StableFrontierPruner` が制御するのは stable/resolved frontier の survivor selection だけであり、詳細は [03_stable_pruner.md](03_stable_pruner.md) を参照する。
 

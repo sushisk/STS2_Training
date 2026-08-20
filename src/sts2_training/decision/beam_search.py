@@ -14,6 +14,15 @@ their existing spellings for compatibility; runtime code uses canonical score ac
 
 Policy candidate limits, continuation ordering, and Whole Run active-branch capacity
 remain separate mechanisms owned by this engine.
+
+`turn_boundary_scoring` changes where leaves are scored rather than how deep the search
+goes. End Turn stays out of `TURN_INTERNAL_ACTION_TYPES`, so no line crosses into the next
+player turn and every leaf is "k cards played this turn" for some k. Each leaf - the root
+included, as the k=0 "end the turn now" line - is then scored after a forced End Turn, so
+the whole frontier answers one question instead of being split by turn parity. Two rules
+follow from that and are enforced here: a node with nothing left to expand becomes a leaf
+instead of aborting the search, and a card that ends the turn by itself stops its line at
+the boundary.
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ import math
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sts2_training.api.contract import ROOT_BRANCH_ID, RequestRejectedError
@@ -63,6 +72,13 @@ JsonObject = dict[str, Any]
 _LOG = logging.getLogger(__name__)
 _RESOLVED_STATUSES = frozenset({"completed", "partial"})
 _WHOLE_RUN_COMBAT_BOUNDARIES = frozenset({"stable", "pending_choice"})
+# Action types that advance a player turn from the inside: they start or complete a card
+# or potion play. `system` (End Turn) is deliberately absent - under
+# `BeamSearchConfig.turn_boundary_scoring` the turn boundary is the leaf, not a move, so
+# no line may cross it during the search. Kept separate from
+# `beam_searchable_action_types`, which answers a different question (may this state be
+# searched at all) with a universal test over the state's available types.
+TURN_INTERNAL_ACTION_TYPES = frozenset({"card", "potion"}) | CONTINUATION_ACTION_TYPES
 
 
 class AllBranchesFaultedError(RuntimeError):
@@ -84,6 +100,13 @@ class BeamSearchConfig:
     )
     max_continuation_steps: int = 8
     max_branch_attempts: int = 3
+    # Score leaves at a common point in the turn cycle instead of wherever the depth
+    # budget happened to stop. See `BeamSearchEngine._align_leaf_turns`.
+    turn_aligned_leaves: bool = False
+    # Keep the whole search inside one player turn and score every leaf after a forced
+    # End Turn. See `BeamSearchEngine._score_leaves_at_turn_boundary` and the module
+    # docstring section on turn-boundary scoring.
+    turn_boundary_scoring: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -104,6 +127,11 @@ class BeamSearchConfig:
             or self.time_budget_ms <= 0
         ):
             raise ValueError("time_budget_ms must be a finite positive number when provided")
+        if self.turn_aligned_leaves and self.turn_boundary_scoring:
+            raise ValueError(
+                "turn_aligned_leaves and turn_boundary_scoring are two different leaf "
+                "alignment rules; enable at most one"
+            )
         if self.simulation_options is None:
             self.simulation_options = {"stop_condition": "next_decision"}
 
@@ -159,6 +187,8 @@ class BeamSearchStats:
     # Whole Run boundary admission rule. Deliberately separate from branches_faulted:
     # a non-zero count here is a configuration signal, not an emulator/transport failure.
     branches_out_of_scope: int = 0
+    # Leaves whose score was replaced by the score of their forced End Turn continuation.
+    leaves_turn_aligned: int = 0
     branch_retry_faults: int = 0
     branch_retry_recoveries: int = 0
     policy_ms: float = 0.0
@@ -308,18 +338,18 @@ class BeamSearchEngine:
             )
         )
 
-        beam: list[BeamNode] = [
-            BeamNode(
-                branch_id=ROOT_BRANCH_ID,
-                parent_branch_id=ROOT_BRANCH_ID,
-                rng_id=0,
-                decision_point_id=root_decision_point_id,
-                masked_emulator_dto=root_dto,
-                depth=0,
-                value=0.0,
-                root_action_id=None,
-            )
-        ]
+        root_node = BeamNode(
+            branch_id=ROOT_BRANCH_ID,
+            parent_branch_id=ROOT_BRANCH_ID,
+            rng_id=0,
+            decision_point_id=root_decision_point_id,
+            masked_emulator_dto=root_dto,
+            depth=0,
+            value=0.0,
+            root_action_id=None,
+        )
+        beam: list[BeamNode] = [root_node]
+        root_turn = _turn_number(root_dto)
         waiting_stable: list[BeamNode] = []
         finished: list[BeamNode] = []
         all_branch_ids: list[str] = []
@@ -350,13 +380,19 @@ class BeamSearchEngine:
                     reason = "not_beam_searchable"
                     break
 
-                items, item_meta, action_score_ms = self._propose_frontier(
+                items, item_meta, action_score_ms, exhausted = self._propose_frontier(
                     beam,
                     search_id=search_id,
                     proposal_step_index=proposal_step_index,
                 )
                 proposal_step_index += 1
                 stats.policy_ms += action_score_ms
+                if exhausted:
+                    exhausted_ids = {node.branch_id for node in exhausted}
+                    finished.extend(
+                        node for node in exhausted if _is_macro_resolved(node)
+                    )
+                    beam = [node for node in beam if node.branch_id not in exhausted_ids]
                 if not items:
                     reason = "no_candidates"
                     break
@@ -403,7 +439,10 @@ class BeamSearchEngine:
                     branches_faulted,
                     branches_out_of_scope,
                 ) = self._score_frontier(
-                    emulated_item_meta, branch_results, search_id=search_id
+                    emulated_item_meta,
+                    branch_results,
+                    search_id=search_id,
+                    root_turn=root_turn,
                 )
                 stats.value_ms += state_score_ms
                 stats.branches_faulted += branches_faulted
@@ -493,6 +532,20 @@ class BeamSearchEngine:
 
             finished.extend(waiting_stable)
             finished.extend(node for node in beam if _is_macro_resolved(node))
+            if cfg.turn_aligned_leaves:
+                finished = await self._align_leaf_turns(
+                    instance_id, finished, all_branch_ids, stats, search_deadline
+                )
+            elif cfg.turn_boundary_scoring:
+                finished = await self._score_leaves_at_turn_boundary(
+                    instance_id,
+                    root_node,
+                    finished,
+                    all_branch_ids,
+                    released_branch_ids,
+                    stats,
+                    search_deadline,
+                )
         except BaseException as exc:
             search_error = exc
             raise
@@ -543,6 +596,7 @@ class BeamSearchEngine:
                 branches_created=result.stats.branches_created,
                 branches_faulted=result.stats.branches_faulted,
                 branches_out_of_scope=result.stats.branches_out_of_scope,
+                leaves_turn_aligned=result.stats.leaves_turn_aligned,
             )
         )
         return result
@@ -557,10 +611,11 @@ class BeamSearchEngine:
         list[JsonObject],
         list[tuple[BeamNode, CandidateProposal, str, int]],
         float,
+        list[BeamNode],
     ]:
         t0 = time.monotonic()
         requests = [
-            (node.masked_emulator_dto.get("legal_actions") or [], node.masked_emulator_dto)
+            (self._expandable_actions(node.masked_emulator_dto), node.masked_emulator_dto)
             for node in beam
         ]
         proposals = propose_batch_with_provenance(
@@ -574,11 +629,18 @@ class BeamSearchEngine:
 
         items: list[JsonObject] = []
         item_meta: list[tuple[BeamNode, CandidateProposal, str, int]] = []
+        exhausted: list[BeamNode] = []
         for parent_index, (node, candidates) in enumerate(zip(beam, proposals)):
             if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
                 raise RuntimeError("PolicyModel.propose_batch entries must be candidate sequences")
             if len(candidates) > self.config.top_k_actions:
                 raise RuntimeError("PolicyModel.propose_batch returned more than top_k candidates")
+            if not candidates:
+                # Nothing left to expand from this node - with End Turn outside the
+                # expandable set this is simply "no card is playable any more", which is
+                # a leaf, not a reason to abandon the whole search.
+                exhausted.append(node)
+                continue
             available_ids = _available_action_ids(node.masked_emulator_dto)
             trace_candidates: list[PolicyCandidateTrace] = []
             for candidate in candidates:
@@ -637,7 +699,19 @@ class BeamSearchEngine:
                         candidates=tuple(trace_candidates),
                     )
                 )
-        return items, item_meta, action_score_ms
+        return items, item_meta, action_score_ms, exhausted
+
+    def _expandable_actions(self, dto: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        """Legal actions this search is allowed to expand into new branches."""
+
+        actions = _legal_action_mappings(dto)
+        if not self.config.turn_boundary_scoring:
+            return actions
+        return [
+            action
+            for action in actions
+            if action.get("action_type") in TURN_INTERNAL_ACTION_TYPES
+        ]
 
     def _prune_stable_frontier(
         self,
@@ -928,6 +1002,7 @@ class BeamSearchEngine:
         depth: int | None = None,
         *,
         search_id: str,
+        root_turn: int | None = None,
     ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool, int, int]:
         del depth
         cfg = self.config
@@ -1072,6 +1147,13 @@ class BeamSearchEngine:
             if terminal or cannot_expand:
                 newly_finished.append(new_node)
                 continue
+            if cfg.turn_boundary_scoring and _crossed_turn_boundary(dto, root_turn):
+                # A card ended the turn on its own. The line is already past the boundary
+                # every other leaf will be lifted to, so it stops here rather than
+                # spending budget inside the next turn and reintroducing the half-move
+                # skew this mode exists to remove.
+                newly_finished.append(new_node)
+                continue
             if is_continuation_decision(dto):
                 if continuation_steps >= cfg.max_continuation_steps:
                     hit_continuation_limit = True
@@ -1093,6 +1175,309 @@ class BeamSearchEngine:
             branches_faulted,
             branches_out_of_scope,
         )
+
+    async def _align_leaf_turns(
+        self,
+        instance_id: str,
+        finished: Sequence[BeamNode],
+        all_branch_ids: list[str],
+        stats: BeamSearchStats,
+        deadline: float,
+    ) -> list[BeamNode]:
+        """Re-score leaves that stopped earlier in the turn cycle than their siblings.
+
+        A fixed depth budget stops different lines at different points in the turn. With
+        ``max_depth=2``, "play a card, play a card" ends still inside the player's turn
+        with the enemy's published attack unpaid, while "end turn, play a card" has
+        already absorbed that attack *and* banked a fresh turn's worth of energy and
+        cards. Scoring those two states against each other decides the root action by
+        turn parity rather than by play quality, and it is the reason the search kept
+        ending turns with playable Strikes and Defends in hand.
+
+        Each lagging leaf is therefore extended by its forced End Turn - the move that
+        line was going to make anyway - and scored there instead. This is quiescence, not
+        extra search: the node keeps its depth and its place in the tree, only its
+        ``state_score`` changes to the score of its settled continuation.
+
+        Leaves are lifted by at most one turn, to ``min(turn) + 1``. Extending further
+        would mean simulating turns in which the player deliberately passes, which no
+        real continuation does, and would punish exactly the lines that spent their
+        budget playing cards. Leaves already at or beyond the target keep their score;
+        a crossed turn boundary cannot be uncrossed.
+
+        Best effort by design: a branch that faults or a batch that is rejected leaves the
+        original score standing, because a missing refinement is better than dropping a
+        candidate move.
+        """
+
+        nodes = list(finished)
+        extendable: list[tuple[int, BeamNode, int, str]] = []
+        for index, node in enumerate(nodes):
+            if node.root_action_id is None or node.terminal or not _is_macro_resolved(node):
+                continue
+            if not node.decision_point_id:
+                continue
+            turn = _turn_number(node.masked_emulator_dto)
+            end_turn_action_id = _end_turn_action_id(node.masked_emulator_dto)
+            if turn is None or end_turn_action_id is None:
+                continue
+            extendable.append((index, node, turn, end_turn_action_id))
+
+        if len(extendable) < 2:
+            return nodes
+        target_turn = min(turn for _index, _node, turn, _action in extendable) + 1
+        lagging = [entry for entry in extendable if entry[2] < target_turn]
+        if not lagging or len(lagging) == len(extendable):
+            # Nothing to align: either every leaf already crossed the boundary, or none
+            # of them did and they are all directly comparable.
+            return nodes
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return nodes
+
+        items: list[JsonObject] = []
+        meta: list[tuple[int, BeamNode, str]] = []
+        for index, node, _turn, end_turn_action_id in lagging:
+            branch_id = self._allocator.next_branch_id()
+            items.append(
+                {
+                    "parent_branch_id": node.branch_id,
+                    "branch_id": branch_id,
+                    "rng_id": node.rng_id,
+                    "decision_point_id": node.decision_point_id,
+                    "action_id": end_turn_action_id,
+                }
+            )
+            meta.append((index, node, branch_id))
+
+        t0 = time.monotonic()
+        try:
+            response = await self._client.emulate_actions(
+                instance_id,
+                items,
+                timeout_s=remaining,
+                simulation_options=self.config.simulation_options,
+            )
+        except (RequestRejectedError, TransportError):
+            stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
+            _LOG.info("turn-aligned leaf scoring skipped: emulate_actions unavailable")
+            return nodes
+        stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
+        all_branch_ids.extend(branch_id for _index, _node, branch_id in meta)
+        stats.branches_created += len(meta)
+
+        branch_results = response.get("branch_results") or {}
+        aligned: list[tuple[int, Mapping[str, Any]]] = []
+        for index, _node, branch_id in meta:
+            result = branch_results.get(branch_id)
+            if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
+                continue
+            dto = result.get("masked_emulator_dto")
+            if isinstance(dto, Mapping):
+                aligned.append((index, dto))
+        if not aligned:
+            return nodes
+
+        t0 = time.monotonic()
+        raw_scores = self._value_fn.evaluate_batch([dto for _index, dto in aligned])
+        stats.value_ms += (time.monotonic() - t0) * 1000.0
+        scores = _validated_state_scores(raw_scores, expected=len(aligned))
+        for (index, _dto), score in zip(aligned, scores, strict=True):
+            nodes[index] = replace(nodes[index], value=score)
+        stats.leaves_turn_aligned += len(aligned)
+        return nodes
+
+    async def _score_leaves_at_turn_boundary(
+        self,
+        instance_id: str,
+        root_node: BeamNode,
+        finished: Sequence[BeamNode],
+        all_branch_ids: list[str],
+        released_branch_ids: set[str],
+        stats: BeamSearchStats,
+        deadline: float,
+    ) -> list[BeamNode]:
+        """Score every leaf after the End Turn its line is going to play anyway.
+
+        Under `turn_boundary_scoring` the search never expands End Turn, so no line
+        crosses into the next player turn and every leaf is "k cards played this turn"
+        for some k. Those states are not comparable to each other - the enemy's published
+        attack is still unpaid, and how much of it is unpaid depends on how much of the
+        turn each line had left. Settling all of them at the same boundary makes the whole
+        frontier answer one question: where does this turn leave me once the enemy has
+        moved.
+
+        This is what `_align_leaf_turns` was reaching for. That version lifted only the
+        lagging leaves, to `min(turn) + 1`, because lines that had already played End Turn
+        were sitting a half-move further on and could not be uncrossed. Keeping End Turn
+        out of the expandable set removes those lines, so the target is simply the root's
+        turn plus one and every leaf can reach it.
+
+        The root itself is one of the leaves: it is the k=0 line, "end the turn now". It
+        has no root action yet, so the forced End Turn becomes its root action, which is
+        how End Turn stays selectable without being searched through.
+
+        Best effort by design: if the batch is rejected the unsettled scores stand, exactly
+        as in `_align_leaf_turns`.
+        """
+
+        nodes = list(finished)
+        root_turn = _turn_number(root_node.masked_emulator_dto)
+
+        targets: list[tuple[int | None, BeamNode, str]] = []
+        for index, node in enumerate(nodes):
+            if node.branch_id == ROOT_BRANCH_ID or node.terminal:
+                continue
+            if not node.decision_point_id or not _is_macro_resolved(node):
+                continue
+            if _crossed_turn_boundary(node.masked_emulator_dto, root_turn):
+                # Already settled past the boundary by a card that ended the turn.
+                continue
+            end_turn_action_id = _end_turn_action_id(node.masked_emulator_dto)
+            if end_turn_action_id is None:
+                continue
+            targets.append((index, node, end_turn_action_id))
+
+        root_end_turn = _end_turn_action_id(root_node.masked_emulator_dto)
+        if root_end_turn is not None and root_node.decision_point_id:
+            targets.append((None, root_node, root_end_turn))
+
+        if not targets:
+            return nodes
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return nodes
+
+        items: list[JsonObject] = []
+        meta: list[tuple[int | None, BeamNode, str, str, int]] = []
+        for index, node, end_turn_action_id in targets:
+            branch_id = self._allocator.next_branch_id()
+            rng_id = (
+                self._allocator.next_rng_id()
+                if node.branch_id == ROOT_BRANCH_ID
+                else node.rng_id
+            )
+            items.append(
+                {
+                    "parent_branch_id": node.branch_id,
+                    "branch_id": branch_id,
+                    "rng_id": rng_id,
+                    "decision_point_id": node.decision_point_id,
+                    "action_id": end_turn_action_id,
+                }
+            )
+            meta.append((index, node, branch_id, end_turn_action_id, rng_id))
+
+        # Settling needs branch slots, and by this point the search is holding most of
+        # them. The server caps active branches (RL's `max_branches`), so a search that
+        # already holds ~50 of 64 has its settling batch rejected outright - and the
+        # rejection is best-effort here, which turned the whole mode into a silent no-op
+        # on exactly the searches with the most leaves to settle. Free everything the
+        # settling does not need first, then size the batch to the room that leaves.
+        target_nodes = [node for _index, node, _action in targets]
+        await self._release_unneeded_whole_run_branches(
+            instance_id,
+            all_branch_ids,
+            released_branch_ids,
+            target_nodes,
+            (),
+            deadline=deadline,
+        )
+
+        batch_size = self.config.max_batch_size
+        server_limit = _server_batch_limit(self._client)
+        if server_limit is not None:
+            batch_size = min(batch_size, server_limit)
+        capacity = _server_active_branch_capacity(self._client)
+        if capacity is not None:
+            held = len({node.branch_id for node in target_nodes} - {ROOT_BRANCH_ID})
+            batch_size = max(1, min(batch_size, capacity - held))
+
+        branch_results: dict[str, Any] = {}
+        for start in range(0, len(items), batch_size):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            chunk = items[start : start + batch_size]
+            t0 = time.monotonic()
+            try:
+                response = await self._client.emulate_actions(
+                    instance_id,
+                    chunk,
+                    timeout_s=remaining,
+                    simulation_options=self.config.simulation_options,
+                )
+            except (RequestRejectedError, TransportError):
+                stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
+                _LOG.warning(
+                    "turn-boundary leaf scoring skipped for %d leaf/leaves: "
+                    "emulate_actions unavailable",
+                    len(chunk),
+                )
+                if _client_unusable(self._client):
+                    return nodes
+                continue
+            stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
+            all_branch_ids.extend(item["branch_id"] for item in chunk)
+            stats.branches_created += len(chunk)
+            chunk_results = response.get("branch_results") or {}
+            if isinstance(chunk_results, Mapping):
+                branch_results.update(chunk_results)
+            # A settled state is never expanded, so this chunk's branches - and the leaf
+            # branches they came from - can go back to the pool now. Without this the
+            # second chunk has no more room than the first one had.
+            await self._release_unneeded_whole_run_branches(
+                instance_id,
+                all_branch_ids,
+                released_branch_ids,
+                [node for _index, node, _action in targets[start + batch_size :]],
+                (),
+                deadline=deadline,
+            )
+        settled: list[tuple[int | None, BeamNode, str, str, int, Mapping[str, Any]]] = []
+        for index, node, branch_id, end_turn_action_id, rng_id in meta:
+            result = branch_results.get(branch_id)
+            if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
+                continue
+            dto = result.get("masked_emulator_dto")
+            if isinstance(dto, Mapping):
+                settled.append((index, node, branch_id, end_turn_action_id, rng_id, dto))
+        if not settled:
+            return nodes
+
+        t0 = time.monotonic()
+        raw_scores = self._value_fn.evaluate_batch([entry[5] for entry in settled])
+        stats.value_ms += (time.monotonic() - t0) * 1000.0
+        scores = _validated_state_scores(raw_scores, expected=len(settled))
+
+        for (index, node, branch_id, end_turn_action_id, rng_id, dto), score in zip(
+            settled, scores, strict=True
+        ):
+            if index is not None:
+                nodes[index] = replace(nodes[index], value=score)
+                continue
+            action = _action_for_id(node.masked_emulator_dto, end_turn_action_id)
+            nodes.append(
+                BeamNode(
+                    branch_id=branch_id,
+                    parent_branch_id=node.branch_id,
+                    rng_id=rng_id,
+                    decision_point_id="",
+                    masked_emulator_dto=dto,
+                    depth=node.depth + 1,
+                    value=score,
+                    root_action_id=end_turn_action_id,
+                    combat_depth=node.combat_depth + 1,
+                    terminal=_is_terminal(dto),
+                    action_id=end_turn_action_id,
+                    action_type="system",
+                    action=None if action is None else dict(action),
+                )
+            )
+        stats.leaves_turn_aligned += len(settled)
+        return nodes
 
     def _record_out_of_scope_drop(
         self,
@@ -1466,6 +1851,44 @@ def _client_unusable(client: Any) -> bool:
     return getattr(client, "pending_retry", None) is not None or getattr(
         client, "session_invalid", False
     )
+
+
+def _turn_number(dto: Mapping[str, Any]) -> int | None:
+    """Player turn this Combat DTO belongs to, or None outside Combat.
+
+    `turnNumber` is present on every Combat DTO and matches `combatRoundNumber`; it is the
+    only signal that says how far through the turn cycle a leaf actually is.
+    """
+
+    value = dto.get("turnNumber")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _end_turn_action_id(dto: Mapping[str, Any]) -> str | None:
+    """The available End Turn action, which the Emulator publishes as the sole `system`
+    action of a Combat decision (`GameInstance.BuildLegalActions`)."""
+
+    legal_actions = dto.get("legal_actions")
+    if not isinstance(legal_actions, Sequence) or isinstance(legal_actions, (str, bytes)):
+        return None
+    for action in legal_actions:
+        if not isinstance(action, Mapping) or action.get("is_available") is False:
+            continue
+        if action.get("action_type") != "system":
+            continue
+        action_id = action.get("action_id")
+        if isinstance(action_id, str) and action_id:
+            return action_id
+    return None
+
+
+def _crossed_turn_boundary(dto: Mapping[str, Any], root_turn: int | None) -> bool:
+    if root_turn is None:
+        return False
+    turn = _turn_number(dto)
+    return turn is not None and turn > root_turn
 
 
 def _is_macro_resolved(node: BeamNode) -> bool:
