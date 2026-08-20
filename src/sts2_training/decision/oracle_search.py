@@ -269,7 +269,7 @@ class _OracleBeamSearchEngine(BeamSearchEngine):
         result = super()._score_frontier(
             item_meta, branch_results, depth, search_id=search_id
         )
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit, _branches_faulted = result
+        next_beam, newly_finished = result[0], result[1]
         if self.trace_collector is not None:
             finished_object_ids = {id(node) for node in newly_finished}
             for node in (*next_beam, *newly_finished):

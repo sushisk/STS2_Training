@@ -535,7 +535,15 @@ class BeamSearchEngineTest(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        _next_beam, _finished, _ms, _depth, _limit, branches_faulted = engine._score_frontier(  # noqa: SLF001
+        (
+            _next_beam,
+            _finished,
+            _ms,
+            _depth,
+            _limit,
+            branches_faulted,
+            _out_of_scope,
+        ) = engine._score_frontier(  # noqa: SLF001
             [(parent, ActionCandidate("pick"), "b-child", 7)],
             branch_results,
             search_id="s",

@@ -234,6 +234,18 @@ terminal_return_episodes = load_combat_value_rl_episodes(
 
 ## 5. 補足説明
 
+### 5.1 `beam_searchable_action_types` は runner が広げる
+
+`BeamSearchConfig.beam_searchable_action_types` の既定値は `{"system", "card", "potion"}` であり、continuation（`choice_target` / `choice_card` / `choice_confirm` / `choice_skip`）を含まない。`resolve_search_mode()` が返す preset も同じ既定値を持つ。一方 `CombatDecisionEngine` は、明示的に渡された `beam_config` の `beam_searchable_action_types` を authoritative として尊重する。
+
+したがって runner が preset をそのまま engine に渡すと、scope は狭いままになる。Emulator は `TargetType.AnyEnemy` のカードに対して**生存敵が 2 体以上のときだけ** `choice_target` continuation を発行するため、狭い scope は「複数敵戦でのみ、対象指定カードだけが探索から消える」という形で現れる。fault ではないので `branches_faulted` は 0 のままである。
+
+runner が named/default preset から engine を作るときは `runner/beam_scope.py` の `runner_combat_beam_config()` を通す。widening を 1 箇所に集約するためのモジュールであり、entry point ごとに scope がずれないよう `tests/runner/test_runner_beam_scope.py` が entry point を pin している。呼び出し側が `BeamSearchConfig` を明示した場合は、その semantic scope を caller-authoritative として保持する。
+
+scope 外で捨てられた branch は `BeamSearchStats.branches_out_of_scope` と `OutOfScopeDropTrace`（`event_type="out_of_scope_drop"`、`boundary` / `observed_action_types` / `allowed_action_types` 付き）に記録され、WARNING ログも出る。`branches_faulted` とは意図的に別カウンタで、非ゼロは transport/emulator の失敗ではなく **設定の誤り**を意味する。
+
+### 5.2 その他
+
 Beam Search は continuation handling、policy candidate limit、Whole Run active branch capacity、stable frontier pruning を別々の責務として扱う。`StableFrontierPruner` が制御するのは stable/resolved frontier の survivor selection だけであり、詳細は [03_stable_pruner.md](03_stable_pruner.md) を参照する。
 
 Value supervised data の `root_value_samples` は Oracle が生成した counterfactual post-state/target であり、actual committed trajectory とは別物である。`action_score` の `estimated_q` も Oracle teacher が同一 root decision 内の ranking label として生成した値で、runtime linear score を calibrated Q と解釈しない。target の生成規則、Oracle record schema、teacher/search-budget provenance は [04_oracle.md](04_oracle.md) を参照する。structured dataclass で未使用の public producer field まで保持したい場合は `value_raw_data.py` の raw loader を使う。

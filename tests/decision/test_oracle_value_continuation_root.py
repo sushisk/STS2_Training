@@ -97,7 +97,15 @@ class ContinuationRootValueSamplingTest(unittest.TestCase):
             }
         }
 
-        next_beam, finished, _value_ms, _hit_depth, _hit_limit, _faulted = engine._score_frontier(  # noqa: SLF001
+        (
+            next_beam,
+            finished,
+            _value_ms,
+            _hit_depth,
+            _hit_limit,
+            _faulted,
+            _out_of_scope,
+        ) = engine._score_frontier(  # noqa: SLF001
             [(root, _proposal("pick"), "b1", 7)],
             first_result,
             search_id="s",
@@ -122,7 +130,15 @@ class ContinuationRootValueSamplingTest(unittest.TestCase):
                 },
             }
         }
-        deeper_beam, _finished, _value_ms, _hit_depth, _hit_limit, _faulted = engine._score_frontier(  # noqa: SLF001
+        (
+            deeper_beam,
+            _finished,
+            _value_ms,
+            _hit_depth,
+            _hit_limit,
+            _faulted,
+            _out_of_scope,
+        ) = engine._score_frontier(  # noqa: SLF001
             [(root_state, _proposal("attack"), "b2", 7)],
             deep_result,
             search_id="s",

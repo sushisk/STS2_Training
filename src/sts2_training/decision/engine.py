@@ -35,6 +35,7 @@ from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.event_branch_search import best_event_option
 from sts2_training.decision.policy import PolicyModel, PriorHeuristicPolicy
 from sts2_training.decision.search_modes import resolve_search_mode
+from sts2_training.decision.search_trace import SearchTraceCollector
 from sts2_training.decision.stable_pruner import StableFrontierPruner
 from sts2_training.decision.value import HeuristicValueFunction, ValueModel
 from sts2_training.selection.action_classification import (
@@ -85,6 +86,7 @@ class CombatDecisionEngine:
         fallback_selector: HeuristicCombatSelector | None = None,
         event_branch_search: bool = True,
         beam_search_enabled: bool = True,
+        trace_collector: SearchTraceCollector | None = None,
     ) -> None:
         if not isinstance(beam_search_enabled, bool):
             raise TypeError("beam_search_enabled must be a bool")
@@ -131,6 +133,7 @@ class CombatDecisionEngine:
             value_fn=value_model,
             config=resolved_beam_config,
             stable_pruner=stable_pruner,
+            trace_collector=trace_collector,
         )
         self._fallback = (
             fallback_selector if fallback_selector is not None else HeuristicCombatSelector()

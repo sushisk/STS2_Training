@@ -46,6 +46,7 @@ from sts2_training.decision import CombatDecisionEngine
 from sts2_training.decision.beam_search import BeamSearchConfig
 from sts2_training.decision.search_modes import resolve_search_mode, search_mode_uses_beam
 from sts2_training.runner._cli import _positive_int, add_common_arguments, configure_logging
+from sts2_training.runner.beam_scope import runner_combat_beam_config
 from sts2_training.runner.episode import EpisodeResult
 from sts2_training.runner.start_new_run import start_new_run
 from sts2_training.selection.heuristic_selector import HeuristicCombatSelector
@@ -206,9 +207,15 @@ async def _run_one(
         connection = connection_factory()
         client = AsyncTrainingApiClient(connection, selection_logger=tracked_logger)
         await connection.connect()
+        beam_config = resolve_search_mode(
+            effective_search_mode,
+            max_depth=effective_beam_max_depth,
+        )
+        if not isinstance(effective_search_mode, BeamSearchConfig):
+            beam_config = runner_combat_beam_config(beam_config)
         engine = CombatDecisionEngine(
             client,
-            beam_config=resolve_search_mode(effective_search_mode, max_depth=effective_beam_max_depth),
+            beam_config=beam_config,
             beam_search_enabled=search_mode_uses_beam(effective_search_mode),
             fallback_selector=HeuristicCombatSelector(random.Random(seed)),
         )

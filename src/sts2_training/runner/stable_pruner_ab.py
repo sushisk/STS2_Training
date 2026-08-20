@@ -30,12 +30,12 @@ from sts2_training.api import AsyncTrainingApiClient, TcpConnection
 from sts2_training.api.contract import ROOT_BRANCH_ID
 from sts2_training.api.transport import TransportError
 from sts2_training.decision.beam_search import BeamSearchConfig, BeamSearchResult
-from sts2_training.decision.combat_decision import COMBAT_BEAM_ACTION_TYPES
 from sts2_training.decision.engine import CombatDecisionEngine, DecisionOutcome
 from sts2_training.decision.learned_pruner import LinearStableFrontierPruner
 from sts2_training.decision.search_modes import resolve_search_mode
 from sts2_training.decision.stable_pruner import StableFrontierPruner, ValueTopKPruner
 from sts2_training.runner._cli import add_common_arguments, configure_logging
+from sts2_training.runner.beam_scope import runner_combat_beam_config
 from sts2_training.runner.scenario import CombatScenario, EnemyScenario
 from sts2_training.selection.heuristic_selector import NoAvailableActionError
 
@@ -646,13 +646,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _cli_beam_config(args: argparse.Namespace) -> BeamSearchConfig:
-    config = resolve_search_mode(args.search_mode, max_depth=args.beam_depth)
-    return replace(
-        config,
-        beam_searchable_action_types=COMBAT_BEAM_ACTION_TYPES,
-        simulation_options=(
-            None if config.simulation_options is None else dict(config.simulation_options)
-        ),
+    return runner_combat_beam_config(
+        resolve_search_mode(args.search_mode, max_depth=args.beam_depth)
     )
 
 

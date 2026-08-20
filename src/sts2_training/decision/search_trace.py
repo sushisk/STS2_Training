@@ -170,6 +170,54 @@ class BranchFaultTrace:
 
 
 @dataclass(frozen=True)
+class OutOfScopeDropTrace:
+    """A branch that resolved successfully but fell outside the Beam semantic scope.
+
+    Distinct from `BranchFaultTrace`: `emulate_actions` returned a usable
+    `masked_emulator_dto`, and the branch is dropped purely because
+    `BeamSearchConfig.beam_searchable_action_types` (or the Whole Run boundary admission
+    rule) does not admit the resulting state. That makes it a *configuration* signal
+    rather than a transport/emulator failure, and it never increments `branches_faulted`.
+
+    Recorded because a mis-scoped config is otherwise completely invisible: the frontier
+    keeps whatever branches happened to stay in scope, the search still returns a best
+    root action, and every fault counter stays at zero. `observed_action_types` and
+    `boundary` are echoed from the dropped DTO so the missing admission rule can be
+    identified from the trace alone.
+    """
+
+    search_id: str
+    node_id: str
+    parent_node_id: str
+    branch_id: str
+    parent_branch_id: str
+    root_action_id: str | None
+    rng_id: int
+    depth: int
+    combat_depth: int
+    continuation_steps: int
+    action_id: str
+    action_type: str | None
+    action: JsonObject | None
+    policy_rank: int | None
+    policy_score: float | None
+    post_coverage_rank: int | None
+    candidate_source: str | None
+    boundary: str | None
+    observed_action_types: tuple[str, ...] | None
+    allowed_action_types: tuple[str, ...]
+    event_type: str = field(default="out_of_scope_drop", init=False)
+
+    @property
+    def action_rank(self) -> int | None:
+        return self.policy_rank
+
+    @property
+    def action_score(self) -> float | None:
+        return self.policy_score
+
+
+@dataclass(frozen=True)
 class StablePruneNodeTrace:
     node_id: str
     parent_node_id: str
@@ -321,6 +369,7 @@ class SearchTraceEnd:
     nodes_expanded: int
     branches_created: int
     branches_faulted: int = 0
+    branches_out_of_scope: int = 0
     event_type: str = field(default="search_end", init=False)
 
     @property
@@ -335,6 +384,7 @@ SearchTraceEvent: TypeAlias = (
     | PolicyProposalTrace
     | ResolvedNodeTrace
     | BranchFaultTrace
+    | OutOfScopeDropTrace
     | StablePruneTrace
     | SearchTraceEnd
 )

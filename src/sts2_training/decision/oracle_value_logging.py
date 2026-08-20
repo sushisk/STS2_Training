@@ -105,7 +105,7 @@ class _RootValueCapturingOracleEngine(_OracleBeamSearchEngine):
         result = super()._score_frontier(
             item_meta, branch_results, depth, search_id=search_id
         )
-        next_beam, newly_finished, _value_ms, _hit_depth, _hit_limit, _branches_faulted = result
+        next_beam, newly_finished = result[0], result[1]
 
         for node in (*next_beam, *newly_finished):
             if node.root_action_id is None or is_continuation_decision(node.masked_emulator_dto):

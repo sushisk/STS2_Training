@@ -92,6 +92,20 @@ python -m sts2_training.runner.oracle_collection \
   --target-beam-width 8
 ```
 
+複数シナリオを継続収集する場合は、成功データと fault を自動分離する管理ラッパーを使う。
+成功 (`completed=true` かつ `termination_reason=terminal`) は `data/oracle/<date>/`、
+中断・例外・不完全 JSONL は JSONL と stdout/stderr と manifest をまとめて
+`data/oracle_fault/<date>/` に保存する。既存ファイルは上書きせず時刻 suffix を付ける。
+
+```powershell
+.\scripts\run_oracle_collection_managed.ps1 `
+  -ScenarioPath data/scenarios/godmode_harvested/ironclad-...json,
+                data/scenarios/godmode_harvested/defect-...json
+```
+
+RL server (`127.0.0.1:8765`) は事前に起動しておく。`data/oracle/<date>/` のみを学習入力に
+使用し、`data/oracle_fault/` は故障解析用として学習データに混ぜない。
+
 ```bash
 python -m sts2_training.runner.scenario_harvest \
   --input-dir data/runs \

@@ -41,6 +41,7 @@ from sts2_training.decision.combat_decision import (
 from sts2_training.decision.policy import PolicyModel
 from sts2_training.decision.search_trace import (
     BranchFaultTrace,
+    OutOfScopeDropTrace,
     PolicyCandidateTrace,
     PolicyProposalTrace,
     SearchTraceCollector,
@@ -154,6 +155,10 @@ class BeamSearchStats:
     nodes_expanded: int = 0
     branches_created: int = 0
     branches_faulted: int = 0
+    # Branches that resolved cleanly but were dropped by the Beam semantic scope /
+    # Whole Run boundary admission rule. Deliberately separate from branches_faulted:
+    # a non-zero count here is a configuration signal, not an emulator/transport failure.
+    branches_out_of_scope: int = 0
     branch_retry_faults: int = 0
     branch_retry_recoveries: int = 0
     policy_ms: float = 0.0
@@ -396,11 +401,13 @@ class BeamSearchEngine:
                     hit_max_depth,
                     hit_continuation_limit,
                     branches_faulted,
+                    branches_out_of_scope,
                 ) = self._score_frontier(
                     emulated_item_meta, branch_results, search_id=search_id
                 )
                 stats.value_ms += state_score_ms
                 stats.branches_faulted += branches_faulted
+                stats.branches_out_of_scope += branches_out_of_scope
                 stats.nodes_expanded += len(branch_results)
                 if (
                     emulated_item_meta
@@ -535,6 +542,7 @@ class BeamSearchEngine:
                 nodes_expanded=result.stats.nodes_expanded,
                 branches_created=result.stats.branches_created,
                 branches_faulted=result.stats.branches_faulted,
+                branches_out_of_scope=result.stats.branches_out_of_scope,
             )
         )
         return result
@@ -920,7 +928,7 @@ class BeamSearchEngine:
         depth: int | None = None,
         *,
         search_id: str,
-    ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool, int]:
+    ) -> tuple[list[BeamNode], list[BeamNode], float, bool, bool, int, int]:
         del depth
         cfg = self.config
         resolved: list[
@@ -1001,6 +1009,7 @@ class BeamSearchEngine:
         newly_finished: list[BeamNode] = []
         hit_max_depth = False
         hit_continuation_limit = False
+        branches_out_of_scope = 0
 
         for node, candidate, branch_id, rng_id, result, dto, status in resolved:
             action_type = action_type_for_id(node.masked_emulator_dto, candidate.action_id)
@@ -1018,6 +1027,19 @@ class BeamSearchEngine:
                 dto,
                 cfg.beam_searchable_action_types,
             ):
+                branches_out_of_scope += 1
+                self._record_out_of_scope_drop(
+                    search_id,
+                    node,
+                    candidate,
+                    branch_id,
+                    rng_id,
+                    dto,
+                    action_type=action_type,
+                    action=action,
+                    combat_depth=combat_depth,
+                    continuation_steps=continuation_steps,
+                )
                 continue
             state_score = state_score_by_branch.get(branch_id, node.state_score)
             decision_point_id = result.get("decision_point_id")
@@ -1069,6 +1091,72 @@ class BeamSearchEngine:
             hit_max_depth,
             hit_continuation_limit,
             branches_faulted,
+            branches_out_of_scope,
+        )
+
+    def _record_out_of_scope_drop(
+        self,
+        search_id: str,
+        node: BeamNode,
+        candidate: Any,
+        branch_id: str,
+        rng_id: int,
+        dto: Mapping[str, Any],
+        *,
+        action_type: str | None,
+        action: Mapping[str, Any] | None,
+        combat_depth: int,
+        continuation_steps: int,
+    ) -> None:
+        """Log and trace a resolved branch dropped by the Beam semantic scope.
+
+        The branch is not a fault: `emulate_actions` produced a usable DTO. It is dropped
+        only because the configured `beam_searchable_action_types` (or the Whole Run
+        boundary rule) does not admit the resulting state. Without this record, a runner
+        that forgets to widen the scope loses whole classes of actions - every targeted
+        card in a multi-enemy fight, for one - while every fault counter stays at zero and
+        the search still returns a plausible-looking best root action.
+        """
+
+        observed = available_action_types(dto)
+        boundary = dto.get("boundary")
+        _LOG.warning(
+            "beam search branch %s (parent=%s, action_id=%s, action_type=%s) resolved but "
+            "fell outside the configured Beam scope: boundary=%s observed_action_types=%s "
+            "allowed_action_types=%s",
+            branch_id,
+            node.branch_id,
+            candidate.action_id,
+            action_type,
+            boundary,
+            None if observed is None else sorted(observed),
+            sorted(self.config.beam_searchable_action_types),
+        )
+        self._record_trace(
+            OutOfScopeDropTrace(
+                search_id=search_id,
+                node_id=f"{search_id}:{branch_id}",
+                parent_node_id=f"{search_id}:{node.branch_id}",
+                branch_id=branch_id,
+                parent_branch_id=node.branch_id,
+                root_action_id=node.root_action_id or candidate.action_id,
+                rng_id=rng_id,
+                depth=node.depth + 1,
+                combat_depth=combat_depth,
+                continuation_steps=continuation_steps,
+                action_id=candidate.action_id,
+                action_type=action_type,
+                action=None if action is None else dict(action),
+                policy_rank=candidate.action_rank,
+                policy_score=candidate.action_score,
+                post_coverage_rank=candidate.post_coverage_rank,
+                candidate_source=candidate.candidate_source,
+                boundary=boundary if isinstance(boundary, str) else None,
+                observed_action_types=(
+                    None if observed is None else tuple(sorted(observed))
+                ),
+                allowed_action_types=tuple(sorted(self.config.beam_searchable_action_types)),
+            )
         )
 
     def _record_branch_fault(
