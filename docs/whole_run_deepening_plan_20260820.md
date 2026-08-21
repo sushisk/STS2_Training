@@ -1090,12 +1090,30 @@ publish されていないため ordinal で区別する）。
   継続する形にする
 - 根本原因（Emulator の legal/illegal 不一致）は STS2_Emulator 側の調査が要る
 
-### 11.7.3 未解決: 落ちた決定の `score_trace` が失われる
+### 11.7.3 解決済み: 落ちた決定の `score_trace` が失われる
 
-異常終了した 2 戦は、致命的になった探索の trace を持っていない
-（`search_start` と `search_end` の件数が一致しており、最後の決定の trace が書かれていない）。
-`score_trace` が決定完了時にまとめて書かれるため、落ちた決定の分が失われる。
-異常終了の原因究明ができないので、逐次フラッシュに変える必要がある。
+`_TrackingCombatDecisionEngine.decide()` は `super().decide()` が**返ってから**
+detailed log を書いていた。したがって `decide()` が送出すると、
+**その決定の trace だけが記録されない**。異常終了した 2 戦がどちらも
+`search_start` と `search_end` の件数が一致していたのはこのためで、
+落ちた探索は両方に寄与していない。原因究明に最も必要な 1 件が、
+構造的に必ず失われる形だった。
+
+`decide()` を try/except で包み、送出時に
+
+- `event="decision_failed"`（例外の型・メッセージ、分かる場合は root DTO）
+- それまでに収集済みの `score_trace`（`decision_source="failed"`）
+
+を書いてから再送出するようにした。`decision` 引数が無い呼び出し
+（`decide_and_commit` の初回）では `decision_point_id` を trace の
+`root_decision_point_id` から拾う。盤面自体は `selection` イベントが
+リクエスト時点で書かれているので同じストリームから復元できる。
+
+**テスト**: `tests/runner/test_failed_decision_logging.py` 5 件。
+`decide()` が送出するケースで trace と `decision_failed` が書かれること、
+`decision` 引数が無い場合の decision_point_id フォールバック、
+trace が 1 件も無い時点での送出、および成功パスのラベル付けを固定する。
+**try/except を外すと 4 件が実際に落ちる**ことを確認済み。
 
 ## 11.8 採点を ply ごとに行う（2026-08-21）
 

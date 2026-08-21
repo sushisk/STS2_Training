@@ -121,10 +121,26 @@ class _TrackingCombatDecisionEngine(CombatDecisionEngine):
     ) -> DecisionOutcome:
         if self._score_trace_collector is not None:
             self._score_trace_collector.events.clear()
-        outcome = await super().decide(instance_id, timeout_s=timeout_s, decision=decision)
+        try:
+            outcome = await super().decide(
+                instance_id, timeout_s=timeout_s, decision=decision
+            )
+        except Exception as exc:
+            # The decision that fails is the one whose trace is worth the most, and it
+            # was the only one never written: logging ran after `decide()` returned, so a
+            # run that died took its own explanation with it. Two Whole Run evaluations
+            # aborted with `AllBranchesFaultedError` and neither left a trace of the
+            # search that raised.
+            self._log_failed_decision(instance_id, decision, exc)
+            raise
         self._log_root_detail(instance_id, outcome)
         self._log_action_scores(instance_id, outcome)
-        self._log_score_trace(instance_id, outcome)
+        self._log_score_trace(
+            instance_id,
+            decision_point_id=outcome.decision.get("decision_point_id"),
+            decision_source=outcome.source,
+            selected_action_id=outcome.chosen_action_id,
+        )
         self._state.decisions_made += 1
         self._state.source_counts[outcome.source] += 1
 
@@ -133,7 +149,68 @@ class _TrackingCombatDecisionEngine(CombatDecisionEngine):
             _record_floor(self._state, dto)
         return outcome
 
-    def _log_score_trace(self, instance_id: str, outcome: DecisionOutcome) -> None:
+    def _log_failed_decision(
+        self,
+        instance_id: str,
+        decision: Mapping[str, Any] | None,
+        exc: BaseException,
+    ) -> None:
+        """Record a decision that raised, together with the trace it got as far as.
+
+        `decision` is only present when the caller already had one in hand, so the
+        decision point is taken from the search trace when it is not. The board itself is
+        recoverable either way: `selection` events are written as the requests happen, so
+        the parent decision is already in the same stream.
+        """
+
+        logger = self._detailed_logger
+        if logger is None:
+            return
+        decision_point_id = (
+            decision.get("decision_point_id") if isinstance(decision, Mapping) else None
+        )
+        if decision_point_id is None:
+            decision_point_id = self._traced_root_decision_point_id()
+        dto = decision.get("masked_emulator_dto") if isinstance(decision, Mapping) else None
+        try:
+            logger(
+                {
+                    "event": "decision_failed",
+                    "instance_id": instance_id,
+                    "decision_point_id": decision_point_id,
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                    "masked_emulator_dto": (
+                        deepcopy(dict(dto)) if isinstance(dto, Mapping) else None
+                    ),
+                }
+            )
+        except Exception:
+            _LOG.exception("failed-decision logging failed")
+        self._log_score_trace(
+            instance_id,
+            decision_point_id=decision_point_id,
+            decision_source="failed",
+            selected_action_id=None,
+        )
+
+    def _traced_root_decision_point_id(self) -> str | None:
+        collector = self._score_trace_collector
+        if collector is None:
+            return None
+        for event in collector.events:
+            candidate = getattr(event, "root_decision_point_id", None)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        return None
+
+    def _log_score_trace(
+        self,
+        instance_id: str,
+        *,
+        decision_point_id: Any,
+        decision_source: Any,
+        selected_action_id: Any,
+    ) -> None:
         collector = self._score_trace_collector
         logger = self._detailed_logger
         if collector is None or logger is None:
@@ -160,9 +237,9 @@ class _TrackingCombatDecisionEngine(CombatDecisionEngine):
                     {
                         "event": "score_trace",
                         "instance_id": instance_id,
-                        "decision_point_id": outcome.decision.get("decision_point_id"),
-                        "decision_source": outcome.source,
-                        "selected_action_id": outcome.chosen_action_id,
+                        "decision_point_id": decision_point_id,
+                        "decision_source": decision_source,
+                        "selected_action_id": selected_action_id,
                         "trace_event": trace_event,
                     }
                 )
