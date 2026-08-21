@@ -76,14 +76,28 @@ terminal per-Branch fields (`status`, `branch_id`, `parent_branch_id`, `rng_id`,
     "actual_choice_scope": "TopLevel",
     "actual_choice_kind": "target",
     "actual_room_context": { "room_type": "CombatRoom" },
-    "actual_masked_emulator_dto": { "...": "..." }
+    "actual_masked_emulator_dto": { "...": "..." },
+    "expected_position": {
+      "prefix_length": 9,
+      "room_id": 4,
+      "boundary": "stable",
+      "stepIndex": 110,
+      "totalFloor": 15,
+      "hp": 71,
+      "energy": 1,
+      "turnNumber": 1
+    }
   }
 }
 ```
 
 `diagnostics` describes **where the failed Branch actually landed**, which is what makes a
 replay mismatch diagnosable at all: the generic `error` string cannot say what state was
-reached instead of the expected one.
+reached instead of the expected one. `expected_position` carries the position the Branch
+was asked to reach, taken from the parent decision, so that a landing point which is
+*further along the same line* can be told apart from one that diverged onto another; both
+occur and they have different causes. Every field in it is already public as part of a
+normal decision payload.
 
 Everything in `diagnostics` is subject to the same masking as any other published state.
 `actual_masked_emulator_dto`, when present, is built by the same masking path as a normal

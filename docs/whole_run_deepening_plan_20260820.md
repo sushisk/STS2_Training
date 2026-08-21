@@ -1186,3 +1186,87 @@ release 済みブランチを親に持つバッチを reject する fake Whole R
 効いていなかった 26% は **3 ply 以上＝最も深く leaf が多い探索**なので、
 202608210802 の「0.2%」「平均到達階層 17.56」もまだ完全な状態の数字ではない。
 
+## 11.9 Whole Run の戦闘分岐を Combat snapshot 復元へ変える（2026-08-21）
+
+### 11.9.1 調査で分かったこと
+
+§11.7.2 の修正後も `AllBranchesFaultedError` が 2 件出た。RL の `[FAULT]` 診断と
+Training の detailed log を突き合わせた結果、消去できた仮説と残った事実は次のとおり。
+
+| 仮説 | 判定 | 根拠 |
+|---|---|---|
+| 敵の RNG（move 選択の乱数） | **否定（実測）** | 同一行動を `rng_id` 1〜4 で分岐させて手札まで完全一致。intent 列も `BygoneEffigy` が宣言する `SLEEP → WAKE → SLASH → SLASH` の連鎖どおり（`API/tests/test_bygone_effigy_combat_determinism.py`） |
+| prefix の数値 action_id が別カードを指す | **否定** | replay 先の action_id 2/3/4 が親と完全一致。欠けていたのは手札で唯一コスト 3 のカードだけで、これは `BuildLegalActions` が `CanPlay()` で絞る挙動（＝エネルギー不足）で説明できる |
+| prefix が長すぎる（蓄積バグ） | **否定** | 失敗した決定の prefix は **1 手**。1 手で 121 HP の敵は倒せない |
+| `auto_action_ids` の二重適用 | **否定** | `reward_auto_progress` の契約とコードで root/replay が対称 |
+| replay 機構そのものの非決定性 | 否定寄り | 同一プロセス・8 seed で bit 一致（ただし floor 4-5 の浅い局面のみ） |
+
+残った観測は「**同じ部屋・同じ戦闘を最後まで進めた状態に着地している**」（stepIndex +8、
+HP 71→39、敵全滅、`reward_select`）で、しかも 12 回のリトライすべてで同一だった。
+
+### 11.9.2 前提の食い違い
+
+調査の途中で、設計の前提そのものが実装とずれていることが分かった。
+
+**Whole Run の戦闘分岐は Combat Instance の経路を通っていない。**
+
+```python
+# Run/worker_pool.py: Whole Run の分岐はこれ
+session.load_state(map_snapshot)          # 地図画面のスナップショット
+session.choose_room(room_id)
+for action_id in action_prefix:
+    session.step(action_id)               # 戦闘の頭から打ち直す
+```
+
+`CombatScenario` / `ResetFromScenario` / `CombatStateSnapshot` / `battle_emulator` を
+Whole Run 側は 1 つも import していない。`worker_pool.py` の docstring にも
+「Combat 側の `branch_worker_pool.py` と形は似せているが独立実装で、共有していない」と
+明記されている。**したがって Combat Instance 側の修正は Whole Run の戦闘分岐に効かない。**
+
+### 11.9.3 決定: Combat snapshot からの復元へ移行する
+
+地図スナップショット + prefix 再生は採用しない。理由は 2 つ。
+
+- **RNG**: 戦闘の再現が prefix 再生の忠実性に完全依存する。途中 1 箇所のズレで以降すべてが
+  狂い、`BygoneEffigy` のように起床時に Strength +10 を付ける敵がいると、小さなズレが
+  boundary が変わるほどの差に増幅される。fault が観測されたのはこの敵の戦闘だけだが、
+  それは**この敵だけが症状を可視化する**からであって、他の戦闘でも静かに同じ乖離が
+  起きている可能性がある
+- **速度**: 深いターンほど再生量が線形に増える。1 決定あたり 4.28 秒のうち相当部分がこれ
+
+`GameInstance` 側の部品は既にある。
+
+| API | 性質 |
+|---|---|
+| `CaptureSnapshot()` / `CaptureSnapshotJson()` | **戦闘中のみ**（`EnsureCombatActive()`）。`player` / `_combatState` / **`_runState`** / `_combatSessionId` / `_stepIndex` を含む |
+| `RestoreSnapshotJson(json)` | clean combat snapshot のみ受理。JSON 構造・型・スキーマ版を復元前に検証 |
+| `ValidateRestoreSnapshotJson(json)` | 副作用なしのドライラン |
+
+`_runState` を含むのでレリック・ゴールド・floor が失われない。そして Training の beam は
+`transition.kind == "combat_completed"` を terminal 扱いし、戦闘外の boundary は
+`branches_out_of_scope` として捨てるので、**分岐が戦闘境界で終端してよい**。
+`CaptureSnapshot` が戦闘限定であることは制約にならない。
+
+足りないのは橋渡しだけで、`Run/whole_run_session.py` は `save_state` / `load_state`
+（run 級）しか公開しておらず、capture/restore の口が無い。
+
+**フォールバックは残さない。** 戦闘分岐は必ず combat snapshot を使い、復元できなければ
+fault にする。静かに旧経路へ落ちると、今回のような乖離がまた見えなくなる。
+
+### 11.9.4 実装前に確かめること
+
+1. **`pending_choice` から capture できるか。** `AssertQuiescentDecisionBoundary()` は
+   `_pendingChoice` / `_pendingTarget` / `_pendingRewardDecision` を published choice として
+   扱う。Whole Run は `choice_target` などからも分岐するので、その境界で capture が
+   許されるかを実測する。許されないなら continuation の扱いを別に決める
+2. **深い局面での capture → restore ラウンドトリップ。** floor 13-15 相当
+   （レリック 4 個・デッキ 16 枚・パワー付き）で観測が一致するか
+3. **`combat_session_id` の同一性。** `worker_pool` は観測から読んでいる。復元後も
+   維持されるか
+4. **snapshot JSON のサイズ。** 分岐ごとに `multiprocessing.Queue` を渡る。
+   `worker_pool` の IPC purity 契約（JSON-safe primitive のみ）は文字列なので満たす
+5. **`context_id` / holder-step の再定義。** 現在は map_snapshot + room_id + prefix から
+   導出している。combat snapshot に変わると同一性の定義が変わる
+6. **Training 側は無変更で済むか。** wire contract は変わらない見込みだが、
+   `branches_out_of_scope` の出方は変わりうる
+
