@@ -1037,7 +1037,32 @@ root は必ず採点対象に入るので、`aligned = 0` は**採点バッチ�
 （capacity を持つ fake Whole Run client を使い、修正前は `leaves_turn_aligned == 0` で
 実際に落ちることを確認済み）。ログレベルも INFO から WARNING に上げた。
 
-### 11.7.2 未解決: `AllBranchesFaultedError` による異常終了 2 件
+### 11.7.2 解決済み: `AllBranchesFaultedError` による異常終了 2 件
+
+原因は STS2_RL 側にあった。生き残った探索に残っていた fault の中身:
+
+```
+"Illegal action: 6"  at Sts2Emulator.Api.GameInstance.Step(Int32 actionId)
+  action_type=card, action_id=6 (BASH), combat_depth=1   ← DTO は legal と公開していた
+```
+
+Combat branch の replay が、親の opaque な `action_id` をそのまま step していた。
+`action_id` はそれが来た決定でしか有効でないため、replay 先では別の行動を指す。
+さらに `_COMBAT_ACTION_TYPES` が `choice_card` / `choice_confirm` / `choice_skip` を含む
+——焚き火の強化プロンプトやカード報酬が publish するのはまさにこれ——ため、
+非戦闘の選択画面が Combat replay 経路に入っていた。
+
+STS2_RL 側で、`room_context.room_type == "CombatRoom"` を Combat view の条件に加え、
+選んだ行動を意味キー（`legal_action_semantic_key_text`）＋ ordinal で持ち回って
+replay 先で解決し直すよう修正した（同名カードは意味キーを共有し、card instance id は
+publish されていないため ordinal で区別する）。
+
+`End Turn` を候補から外したことでこれが致命化していた。従来は frontier に常に成功する
+`End Turn` が残っていたが、候補が全部カードになったため 1 件の fault で frontier が全滅した。
+
+202608210802 で `branches_faulted = 0` / `branches_out_of_scope = 0` を確認。
+
+### 11.7.4 未解決だった残り（旧 11.7.2 の記録）
 
 過去の同種評価（`rest-verify` / `route-verify` / `dmgrace-verify` / `p0-verify`）は
 いずれも `runs_errored = 0` だったので、これは回帰である。
@@ -1071,4 +1096,75 @@ root は必ず採点対象に入るので、`aligned = 0` は**採点バッチ�
 （`search_start` と `search_end` の件数が一致しており、最後の決定の trace が書かれていない）。
 `score_trace` が決定完了時にまとめて書かれるため、落ちた決定の分が失われる。
 異常終了の原因究明ができないので、逐次フラッシュに変える必要がある。
+
+## 11.8 採点を ply ごとに行う（2026-08-21）
+
+### 11.8.1 何が起きていたか
+
+§11.7.1 の capacity 修正後も `leaves_turn_aligned == 0` は 30.9% → 25.8% にしか下がらなかった。
+深さ別に見ると原因が一目で分かる（202608210802, 1850 探索）。
+
+| `depths_completed` | 探索数 | `aligned == 0` | 率 |
+|---:|---:|---:|---:|
+| 2 | 524 | 0 | **0%** |
+| 3 | 103 | 45 | 44% |
+| 4 | 419 | 262 | **63%** |
+| 5 | 150 | 115 | **77%** |
+| 6+ | 47 | 30 | 64% |
+
+`_release_unneeded_whole_run_branches` の `keep_ids` は **`beam` と `waiting_stable` だけ**で、
+`finished` を含まない。この release はループ本体の末尾にあるので、
+**ある ply で leaf になったノードは、その ply の終わりに release される**。
+一方 leaf の採点は全 ply が終わったあとに一括で行っていた。
+
+2 ply の探索だけ 100% 成功していたのは、leaf が全部「最後の ply」で生まれ、
+最後の ply は `break` して release 呼び出しに到達しないため。3 ply 以上では
+最初の ply の leaf が既に消えている。
+
+失敗が「一部」ではなく **きれいに 0** になるのは、サーバが
+**存在しない親 branch を含むバッチを丸ごと reject する**ため。root branch は決して
+release されないので、個別 fault なら root の分だけは通って `aligned >= 1` になるはずだった。
+§11.7.1 で capacity と結論したのは、この all-or-nothing を見落としたことによる誤診である
+（capacity も実在の一因ではあり、修正で 48.8 vs 29.4 だった branch 数の差が
+43.4 vs 41.0 まで縮んでいる）。
+
+### 11.8.2 修正
+
+採点を **leaf が生まれた ply の中で、release の前に**行う。
+
+- `_settle_pending_leaves()` を、ループ内の 2 つの release 呼び出しの直前と、ループ後に呼ぶ。
+  `settled_branch_ids` で二重採点を防ぐ
+- ループ後の呼び出しは、最後の ply の leaf（`break` により release されていない）と、
+  `waiting_stable` / `beam` の残りを拾う
+- root は `_settle_root_as_a_leaf()` が引き続きループ後に処理する。root branch は
+  release されないため安全
+- `_settle_batch()` は、サーバの batch 上限に加えて **生存中ブランチ数から算出した
+  capacity の余地**でチャンク分割し、各チャンクの DTO を受け取り次第そのチャンクの
+  ブランチを release する。採点済み state は二度と展開しないので保持する理由が無く、
+  返した slot が次のチャンクの余地になる
+
+leaf の保持が 1 ply 内に収まるため、`finished` を release 対象から外す必要がなく、
+`_fit_whole_run_frontier_to_active_capacity` の capacity 会計も変えずに済む。
+
+コストは `emulate_actions` が探索あたり ply 数ぶん増える（幅と深さは不変）。
+
+### 11.8.3 検証
+
+`ReleasedLeafTest.test_a_leaf_is_settled_before_its_branch_is_released`。
+コストの違う 2 枚のカードで、行ごとにエネルギーが尽きる ply をずらし、
+release 済みブランチを親に持つバッチを reject する fake Whole Run client を使う。
+**per-ply 採点を無効にすると、実運用と同じ WARNING を出して実際に落ちる**ことを確認済み。
+
+`test_end_turn_is_never_expanded_during_the_search` は、採点バッチが ply ごとに
+挟まるようになったため「各バッチは全 End Turn か End Turn を含まないかのどちらかで、
+混在しない」というより強い不変条件に書き換えた。
+
+全体 872 passed / 6 skipped。
+
+### 11.8.4 次の測定
+
+同条件でもう 1 回。受け入れ基準は `leaves_turn_aligned == 0` の探索が
+（`not_beam_searchable` など採点対象が無いケースを除いて）ほぼ消えること。
+効いていなかった 26% は **3 ply 以上＝最も深く leaf が多い探索**なので、
+202608210802 の「0.2%」「平均到達階層 17.56」もまだ完全な状態の数字ではない。
 

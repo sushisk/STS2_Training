@@ -352,6 +352,7 @@ class BeamSearchEngine:
         root_turn = _turn_number(root_dto)
         waiting_stable: list[BeamNode] = []
         finished: list[BeamNode] = []
+        settled_branch_ids: set[str] = set()
         all_branch_ids: list[str] = []
         released_branch_ids: set[str] = set()
         reason = "max_depth"
@@ -412,6 +413,17 @@ class BeamSearchEngine:
                 )
                 finished.extend(capacity_finished)
                 if capacity_limited:
+                    if cfg.turn_boundary_scoring:
+                        await self._settle_pending_leaves(
+                            instance_id,
+                            finished,
+                            settled_branch_ids,
+                            root_turn=root_turn,
+                            all_branch_ids=all_branch_ids,
+                            released_branch_ids=released_branch_ids,
+                            stats=stats,
+                            deadline=search_deadline,
+                        )
                     released = await self._release_unneeded_whole_run_branches(
                         instance_id,
                         all_branch_ids,
@@ -518,6 +530,17 @@ class BeamSearchEngine:
                         reason = "beam_exhausted"
                         break
 
+                if cfg.turn_boundary_scoring:
+                    await self._settle_pending_leaves(
+                        instance_id,
+                        finished,
+                        settled_branch_ids,
+                        root_turn=root_turn,
+                        all_branch_ids=all_branch_ids,
+                        released_branch_ids=released_branch_ids,
+                        stats=stats,
+                        deadline=search_deadline,
+                    )
                 released = await self._release_unneeded_whole_run_branches(
                     instance_id,
                     all_branch_ids,
@@ -537,14 +560,24 @@ class BeamSearchEngine:
                     instance_id, finished, all_branch_ids, stats, search_deadline
                 )
             elif cfg.turn_boundary_scoring:
-                finished = await self._score_leaves_at_turn_boundary(
+                await self._settle_pending_leaves(
+                    instance_id,
+                    finished,
+                    settled_branch_ids,
+                    root_turn=root_turn,
+                    all_branch_ids=all_branch_ids,
+                    released_branch_ids=released_branch_ids,
+                    stats=stats,
+                    deadline=search_deadline,
+                )
+                await self._settle_root_as_a_leaf(
                     instance_id,
                     root_node,
                     finished,
-                    all_branch_ids,
-                    released_branch_ids,
-                    stats,
-                    search_deadline,
+                    all_branch_ids=all_branch_ids,
+                    released_branch_ids=released_branch_ids,
+                    stats=stats,
+                    deadline=search_deadline,
                 )
         except BaseException as exc:
             search_error = exc
@@ -1288,103 +1321,122 @@ class BeamSearchEngine:
         stats.leaves_turn_aligned += len(aligned)
         return nodes
 
-    async def _score_leaves_at_turn_boundary(
+    def _turn_boundary_settle_action(
+        self, node: BeamNode, root_turn: int | None
+    ) -> str | None:
+        """The forced End Turn that settles this leaf, or None if it needs none."""
+
+        if node.branch_id == ROOT_BRANCH_ID or node.terminal:
+            return None
+        if not node.decision_point_id or not _is_macro_resolved(node):
+            return None
+        if _crossed_turn_boundary(node.masked_emulator_dto, root_turn):
+            # Already settled past the boundary by a card that ended the turn.
+            return None
+        return _end_turn_action_id(node.masked_emulator_dto)
+
+    async def _settle_pending_leaves(
         self,
         instance_id: str,
-        root_node: BeamNode,
-        finished: Sequence[BeamNode],
+        finished: list[BeamNode],
+        settled_branch_ids: set[str],
+        *,
+        root_turn: int | None,
         all_branch_ids: list[str],
         released_branch_ids: set[str],
         stats: BeamSearchStats,
         deadline: float,
-    ) -> list[BeamNode]:
-        """Score every leaf after the End Turn its line is going to play anyway.
+    ) -> None:
+        """Settle, in place, every leaf that has not been settled yet.
 
-        Under `turn_boundary_scoring` the search never expands End Turn, so no line
-        crosses into the next player turn and every leaf is "k cards played this turn"
-        for some k. Those states are not comparable to each other - the enemy's published
-        attack is still unpaid, and how much of it is unpaid depends on how much of the
-        turn each line had left. Settling all of them at the same boundary makes the whole
-        frontier answer one question: where does this turn leave me once the enemy has
-        moved.
+        Score each leaf after the End Turn its line is going to play anyway. Under
+        ``turn_boundary_scoring`` the search never expands End Turn, so no line crosses
+        into the next player turn and every leaf is "k cards played this turn" for some k.
+        Those states are not comparable to each other - the enemy's published attack is
+        still unpaid, and how much of it is unpaid depends on how much of the turn each
+        line had left. Settling them all at the same boundary makes the whole frontier
+        answer one question: where does this turn leave me once the enemy has moved.
 
-        This is what `_align_leaf_turns` was reaching for. That version lifted only the
-        lagging leaves, to `min(turn) + 1`, because lines that had already played End Turn
-        were sitting a half-move further on and could not be uncrossed. Keeping End Turn
-        out of the expandable set removes those lines, so the target is simply the root's
-        turn plus one and every leaf can reach it.
+        **This has to run before branches are released, not once at the end of the
+        search.** A leaf can only be settled while its branch still exists, and
+        ``_release_unneeded_whole_run_branches`` keeps only ``beam`` and
+        ``waiting_stable``; a node that becomes a leaf during a ply is released at the end
+        of that ply. Settling once at the end therefore worked only for searches whose
+        leaves were all born in the final ply, which never reaches that release because it
+        breaks out first. Measured over 1850 searches: every 2-ply search settled, while
+        44% of 3-ply, 63% of 4-ply and 77% of 5-ply searches settled nothing at all.
+        Nothing rather than some, because the server rejects a whole batch that names one
+        branch it no longer has, which takes the still-live leaves down with the dead one.
 
-        The root itself is one of the leaves: it is the k=0 line, "end the turn now". It
-        has no root action yet, so the forced End Turn becomes its root action, which is
-        how End Turn stays selectable without being searched through.
+        Settling per ply also keeps the hold short: a leaf's branch is used up inside the
+        ply that created it, so leaves never have to be kept alive across plies and the
+        active-branch accounting stays as it was.
 
-        Best effort by design: if the batch is rejected the unsettled scores stand, exactly
-        as in `_align_leaf_turns`.
+        Best effort by design: a leaf whose settling is rejected keeps its unsettled
+        score, because a missing refinement is better than dropping a candidate move.
         """
 
-        nodes = list(finished)
-        root_turn = _turn_number(root_node.masked_emulator_dto)
-
-        targets: list[tuple[int | None, BeamNode, str]] = []
-        for index, node in enumerate(nodes):
-            if node.branch_id == ROOT_BRANCH_ID or node.terminal:
+        pending: list[tuple[int, BeamNode, str]] = []
+        for index, node in enumerate(finished):
+            if node.branch_id in settled_branch_ids:
                 continue
-            if not node.decision_point_id or not _is_macro_resolved(node):
-                continue
-            if _crossed_turn_boundary(node.masked_emulator_dto, root_turn):
-                # Already settled past the boundary by a card that ended the turn.
-                continue
-            end_turn_action_id = _end_turn_action_id(node.masked_emulator_dto)
-            if end_turn_action_id is None:
-                continue
-            targets.append((index, node, end_turn_action_id))
+            settled_branch_ids.add(node.branch_id)
+            action_id = self._turn_boundary_settle_action(node, root_turn)
+            if action_id is not None:
+                pending.append((index, node, action_id))
+        if not pending:
+            return
 
-        root_end_turn = _end_turn_action_id(root_node.masked_emulator_dto)
-        if root_end_turn is not None and root_node.decision_point_id:
-            targets.append((None, root_node, root_end_turn))
+        settled = await self._settle_batch(
+            instance_id,
+            [(node, action_id) for _index, node, action_id in pending],
+            all_branch_ids=all_branch_ids,
+            released_branch_ids=released_branch_ids,
+            stats=stats,
+            deadline=deadline,
+        )
+        for index, node, _action_id in pending:
+            entry = settled.get(node.branch_id)
+            if entry is not None:
+                finished[index] = replace(finished[index], value=entry[0])
 
-        if not targets:
-            return nodes
+    async def _settle_batch(
+        self,
+        instance_id: str,
+        entries: Sequence[tuple[BeamNode, str]],
+        *,
+        all_branch_ids: list[str],
+        released_branch_ids: set[str],
+        stats: BeamSearchStats,
+        deadline: float,
+    ) -> dict[str, tuple[float, Mapping[str, Any]]]:
+        """Play the forced End Turn for each entry and score where it lands.
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return nodes
+        Returns the settled score and DTO per parent branch id. Chunked against both the
+        server batch limit and its active-branch capacity, and each chunk's branches are
+        released as soon as their DTOs are in hand: a settled state is never expanded, so
+        there is no reason to hold it, and returning the slots is what gives the next
+        chunk room to run.
+        """
 
         items: list[JsonObject] = []
-        meta: list[tuple[int | None, BeamNode, str, str, int]] = []
-        for index, node, end_turn_action_id in targets:
+        meta: list[tuple[str, str]] = []
+        for node, action_id in entries:
             branch_id = self._allocator.next_branch_id()
-            rng_id = (
-                self._allocator.next_rng_id()
-                if node.branch_id == ROOT_BRANCH_ID
-                else node.rng_id
-            )
             items.append(
                 {
                     "parent_branch_id": node.branch_id,
                     "branch_id": branch_id,
-                    "rng_id": rng_id,
+                    "rng_id": (
+                        self._allocator.next_rng_id()
+                        if node.branch_id == ROOT_BRANCH_ID
+                        else node.rng_id
+                    ),
                     "decision_point_id": node.decision_point_id,
-                    "action_id": end_turn_action_id,
+                    "action_id": action_id,
                 }
             )
-            meta.append((index, node, branch_id, end_turn_action_id, rng_id))
-
-        # Settling needs branch slots, and by this point the search is holding most of
-        # them. The server caps active branches (RL's `max_branches`), so a search that
-        # already holds ~50 of 64 has its settling batch rejected outright - and the
-        # rejection is best-effort here, which turned the whole mode into a silent no-op
-        # on exactly the searches with the most leaves to settle. Free everything the
-        # settling does not need first, then size the batch to the room that leaves.
-        target_nodes = [node for _index, node, _action in targets]
-        await self._release_unneeded_whole_run_branches(
-            instance_id,
-            all_branch_ids,
-            released_branch_ids,
-            target_nodes,
-            (),
-            deadline=deadline,
-        )
+            meta.append((node.branch_id, branch_id))
 
         batch_size = self.config.max_batch_size
         server_limit = _server_batch_limit(self._client)
@@ -1392,15 +1444,16 @@ class BeamSearchEngine:
             batch_size = min(batch_size, server_limit)
         capacity = _server_active_branch_capacity(self._client)
         if capacity is not None:
-            held = len({node.branch_id for node in target_nodes} - {ROOT_BRANCH_ID})
-            batch_size = max(1, min(batch_size, capacity - held))
+            alive = sum(1 for bid in all_branch_ids if bid not in released_branch_ids)
+            batch_size = max(1, min(batch_size, capacity - alive))
 
-        branch_results: dict[str, Any] = {}
+        settled: dict[str, tuple[float, Mapping[str, Any]]] = {}
         for start in range(0, len(items), batch_size):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             chunk = items[start : start + batch_size]
+            chunk_meta = meta[start : start + batch_size]
             t0 = time.monotonic()
             try:
                 response = await self._client.emulate_actions(
@@ -1417,67 +1470,112 @@ class BeamSearchEngine:
                     len(chunk),
                 )
                 if _client_unusable(self._client):
-                    return nodes
+                    return settled
                 continue
             stats.emulate_actions_ms += (time.monotonic() - t0) * 1000.0
-            all_branch_ids.extend(item["branch_id"] for item in chunk)
+            all_branch_ids.extend(branch_id for _parent, branch_id in chunk_meta)
             stats.branches_created += len(chunk)
-            chunk_results = response.get("branch_results") or {}
-            if isinstance(chunk_results, Mapping):
-                branch_results.update(chunk_results)
-            # A settled state is never expanded, so this chunk's branches - and the leaf
-            # branches they came from - can go back to the pool now. Without this the
-            # second chunk has no more room than the first one had.
-            await self._release_unneeded_whole_run_branches(
+
+            branch_results = response.get("branch_results") or {}
+            resolved: list[tuple[str, Mapping[str, Any]]] = []
+            if isinstance(branch_results, Mapping):
+                for parent_branch_id, branch_id in chunk_meta:
+                    result = branch_results.get(branch_id)
+                    if (
+                        not isinstance(result, Mapping)
+                        or result.get("status") not in _RESOLVED_STATUSES
+                    ):
+                        continue
+                    dto = result.get("masked_emulator_dto")
+                    if isinstance(dto, Mapping):
+                        resolved.append((parent_branch_id, dto))
+
+            if resolved:
+                t0 = time.monotonic()
+                raw_scores = self._value_fn.evaluate_batch([dto for _parent, dto in resolved])
+                stats.value_ms += (time.monotonic() - t0) * 1000.0
+                scores = _validated_state_scores(raw_scores, expected=len(resolved))
+                for (parent_branch_id, dto), score in zip(resolved, scores, strict=True):
+                    settled[parent_branch_id] = (score, dto)
+                stats.leaves_turn_aligned += len(resolved)
+
+            await self._release_settled_branches(
                 instance_id,
-                all_branch_ids,
+                [branch_id for _parent, branch_id in chunk_meta],
                 released_branch_ids,
-                [node for _index, node, _action in targets[start + batch_size :]],
-                (),
-                deadline=deadline,
+                deadline,
             )
-        settled: list[tuple[int | None, BeamNode, str, str, int, Mapping[str, Any]]] = []
-        for index, node, branch_id, end_turn_action_id, rng_id in meta:
-            result = branch_results.get(branch_id)
-            if not isinstance(result, Mapping) or result.get("status") not in _RESOLVED_STATUSES:
-                continue
-            dto = result.get("masked_emulator_dto")
-            if isinstance(dto, Mapping):
-                settled.append((index, node, branch_id, end_turn_action_id, rng_id, dto))
-        if not settled:
-            return nodes
+        return settled
 
-        t0 = time.monotonic()
-        raw_scores = self._value_fn.evaluate_batch([entry[5] for entry in settled])
-        stats.value_ms += (time.monotonic() - t0) * 1000.0
-        scores = _validated_state_scores(raw_scores, expected=len(settled))
-
-        for (index, node, branch_id, end_turn_action_id, rng_id, dto), score in zip(
-            settled, scores, strict=True
+    async def _release_settled_branches(
+        self,
+        instance_id: str,
+        branch_ids: Sequence[str],
+        released_branch_ids: set[str],
+        deadline: float,
+    ) -> None:
+        if (
+            getattr(self._client, "instance_type", None) != "whole_run"
+            or not self.config.release_branches_on_finish
         ):
-            if index is not None:
-                nodes[index] = replace(nodes[index], value=score)
-                continue
-            action = _action_for_id(node.masked_emulator_dto, end_turn_action_id)
-            nodes.append(
-                BeamNode(
-                    branch_id=branch_id,
-                    parent_branch_id=node.branch_id,
-                    rng_id=rng_id,
-                    decision_point_id="",
-                    masked_emulator_dto=dto,
-                    depth=node.depth + 1,
-                    value=score,
-                    root_action_id=end_turn_action_id,
-                    combat_depth=node.combat_depth + 1,
-                    terminal=_is_terminal(dto),
-                    action_id=end_turn_action_id,
-                    action_type="system",
-                    action=None if action is None else dict(action),
-                )
+            return
+        releasable = [bid for bid in branch_ids if bid not in released_branch_ids]
+        if not releasable or _client_unusable(self._client):
+            return
+        if await self._cleanup_call("release_branches", instance_id, releasable, deadline):
+            released_branch_ids.update(releasable)
+
+    async def _settle_root_as_a_leaf(
+        self,
+        instance_id: str,
+        root_node: BeamNode,
+        finished: list[BeamNode],
+        *,
+        all_branch_ids: list[str],
+        released_branch_ids: set[str],
+        stats: BeamSearchStats,
+        deadline: float,
+    ) -> None:
+        """Add "end the turn now" - the k=0 line - to the leaves being compared.
+
+        The root has no root action yet, so the forced End Turn becomes its root action.
+        That is how End Turn stays selectable without ever being searched through. The
+        root branch is never released, so this can run once, after the loop.
+        """
+
+        action_id = _end_turn_action_id(root_node.masked_emulator_dto)
+        if action_id is None or not root_node.decision_point_id:
+            return
+        settled = await self._settle_batch(
+            instance_id,
+            [(root_node, action_id)],
+            all_branch_ids=all_branch_ids,
+            released_branch_ids=released_branch_ids,
+            stats=stats,
+            deadline=deadline,
+        )
+        entry = settled.get(root_node.branch_id)
+        if entry is None:
+            return
+        score, dto = entry
+        action = _action_for_id(root_node.masked_emulator_dto, action_id)
+        finished.append(
+            BeamNode(
+                branch_id=root_node.branch_id,
+                parent_branch_id=root_node.branch_id,
+                rng_id=root_node.rng_id,
+                decision_point_id="",
+                masked_emulator_dto=dto,
+                depth=root_node.depth + 1,
+                value=score,
+                root_action_id=action_id,
+                combat_depth=root_node.combat_depth + 1,
+                terminal=_is_terminal(dto),
+                action_id=action_id,
+                action_type="system",
+                action=None if action is None else dict(action),
             )
-        stats.leaves_turn_aligned += len(settled)
-        return nodes
+        )
 
     def _record_out_of_scope_drop(
         self,

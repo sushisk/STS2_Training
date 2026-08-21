@@ -155,12 +155,18 @@ class TurnBoundaryScoringTest(unittest.IsolatedAsyncioTestCase):
 
         await _engine(client, boundary=True).search("inst", _ROOT_DECISION, timeout_s=5.0)
 
-        # Every End Turn belongs to the final settling batch, never to a depth batch.
-        depth_batches = client.emulate_calls[:-1]
-        self.assertTrue(depth_batches)
-        for batch in depth_batches:
-            self.assertNotIn("end", [item["action_id"] for item in batch])
-        self.assertTrue(all(item["action_id"] == "end" for item in client.emulate_calls[-1]))
+        # Settling runs per ply, so batches interleave. Every batch is therefore either a
+        # settling batch (all End Turn) or a depth batch (no End Turn) - never a mix,
+        # which is what "End Turn is not an expandable action" means in practice.
+        self.assertTrue(client.emulate_calls)
+        settling = 0
+        for batch in client.emulate_calls:
+            action_ids = [item["action_id"] for item in batch]
+            if all(action_id == "end" for action_id in action_ids):
+                settling += 1
+            else:
+                self.assertNotIn("end", action_ids)
+        self.assertGreater(settling, 0)
 
     async def test_the_winning_leaf_sits_past_the_turn_boundary(self) -> None:
         client = _Client()
@@ -289,3 +295,139 @@ class ConfigTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_LINE_UNSETTLED = {"": 0.0, "big": 1.0, "small": 2.0, "small,small": 3.0}
+_LINE_SETTLED = {"": 20.0, "big": 50.0, "small": 8.0, "small,small": 10.0}
+
+
+class _ReleaseTrackingClient:
+    """A Whole Run server that forgets released branches, like the real one.
+
+    Two cards of different cost make the lines run out of energy at different plies, so
+    leaves are born in different plies. The server rejects a whole batch that names a
+    branch it no longer has - which is why settling once at the end lost even the leaves
+    that were still alive.
+
+    Unsettled, the two-small line looks best; settled, the big line wins.
+    """
+
+    instance_type = "whole_run"
+    max_emulate_actions_items = 16
+    pending_retry = None
+    session_invalid = False
+
+    def __init__(self) -> None:
+        self.emulate_calls = []
+        self.released = set()
+        self.rejected_batches = 0
+        self.line_by_branch = {"root": ("", 2)}
+
+    def _dto(self, line, energy, *, settled):
+        actions = [dict(_END)]
+        if energy >= 2:
+            actions.append(
+                {"action_id": "big", "action_type": "card", "label": "BIG",
+                 "is_available": True, "parameters": {"cardId": "BIG", "cost": 2}}
+            )
+        if energy >= 1:
+            actions.append(
+                {"action_id": "small", "action_type": "card", "label": "SMALL",
+                 "is_available": True, "parameters": {"cardId": "SMALL", "cost": 1}}
+            )
+        table = _LINE_SETTLED if settled else _LINE_UNSETTLED
+        return {
+            "boundary": "stable",
+            "turnNumber": 2 if settled else 1,
+            "combatRoundNumber": 2 if settled else 1,
+            "score": table[line],
+            "legal_actions": [] if settled else actions,
+        }
+
+    async def emulate_actions(self, instance_id, items, *, timeout_s, simulation_options=None):
+        del instance_id, timeout_s, simulation_options
+        for item in items:
+            if item["parent_branch_id"] in self.released:
+                self.rejected_batches += 1
+                raise RequestRejectedError({"status": "rejected", "fault_kind": "unknown_branch"})
+        self.emulate_calls.append([dict(item) for item in items])
+        results = {}
+        for item in items:
+            line, energy = self.line_by_branch[item["parent_branch_id"]]
+            if item["action_id"] == "end":
+                dto = self._dto(line, energy, settled=True)
+                child = (line, energy)
+            else:
+                child = (
+                    f"{line},{item['action_id']}" if line else item["action_id"],
+                    energy - (2 if item["action_id"] == "big" else 1),
+                )
+                dto = self._dto(child[0], child[1], settled=False)
+            self.line_by_branch[item["branch_id"]] = child
+            results[item["branch_id"]] = {
+                "status": "completed",
+                "branch_id": item["branch_id"],
+                "parent_branch_id": item["parent_branch_id"],
+                "rng_id": item["rng_id"],
+                "decision_point_id": f"d-{item['branch_id']}",
+                "branch_log": [],
+                "masked_emulator_dto": dto,
+            }
+        return {"status": "completed", "branch_results": results}
+
+    async def cancel_branches(self, instance_id, branch_ids, *, timeout_s):
+        del instance_id, timeout_s
+        self.released.update(branch_ids)
+        return {"status": "completed", "branch_statuses": {b: "cancelled" for b in branch_ids}}
+
+    async def release_branches(self, instance_id, branch_ids, *, timeout_s):
+        del instance_id, timeout_s
+        self.released.update(branch_ids)
+        return {"status": "completed", "branch_statuses": {b: "released" for b in branch_ids}}
+
+
+_MULTI_PLY_ROOT = {
+    "decision_point_id": "d-root",
+    "masked_emulator_dto": {
+        "boundary": "stable",
+        "turnNumber": 1,
+        "combatRoundNumber": 1,
+        "score": 0.0,
+        "legal_actions": [
+            dict(_END),
+            {"action_id": "big", "action_type": "card", "label": "BIG",
+             "is_available": True, "parameters": {"cardId": "BIG", "cost": 2}},
+            {"action_id": "small", "action_type": "card", "label": "SMALL",
+             "is_available": True, "parameters": {"cardId": "SMALL", "cost": 1}},
+        ],
+    },
+}
+
+
+class ReleasedLeafTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_leaf_is_settled_before_its_branch_is_released(self) -> None:
+        """The big line becomes a leaf a ply before the small line does.
+
+        Settling once at the end named that earlier leaf after it had been released, and
+        the server rejected the whole batch - so no leaf was settled at all and the search
+        answered with the unsettled order.
+        """
+        client = _ReleaseTrackingClient()
+        engine = BeamSearchEngine(
+            client,
+            policy=_Policy(),
+            value_fn=_Value(),
+            config=BeamSearchConfig(
+                max_depth=3,
+                beam_width=4,
+                top_k_actions=3,
+                beam_searchable_action_types=COMBAT_BEAM_ACTION_TYPES,
+                turn_boundary_scoring=True,
+            ),
+        )
+
+        result = await engine.search("inst", _MULTI_PLY_ROOT, timeout_s=5.0)
+
+        self.assertEqual(client.rejected_batches, 0)
+        self.assertEqual(result.best_root_action_id, "big")
+        self.assertEqual(result.best_node_score, 50.0)
