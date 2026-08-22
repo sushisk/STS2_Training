@@ -1,9 +1,13 @@
-# Whole Run 到達階層 深化計画（P1）
+**Whole Run 到達階層 深化計画（P1）**
 
 P0（Beam scope 修正）後の `data/evaluation/score_logs/p0-verify`（5戦 / 453 探索 / 7,392 trace イベント）
 を解析し、次に到達階層を押し上げるための計画を示す。
 
-## 0. 出発点
+## 0. 文章の目的
+
+P0（Beam scope 修正）後の Whole Run 到達階層を押し上げるため、`data/evaluation/score_logs/p0-verify` を分析して作成した計画と、後続の実装・測定記録を保存する。現在の実装契約は [02_decision_core.md](02_decision_core.md) と `src/sts2_training/` を正本とし、この文書の将来案は契約として扱わない。
+
+### 出発点
 
 | 条件 | 平均到達階層 | 内訳 |
 |---|---:|---|
@@ -19,7 +23,15 @@ scope 系の健全性は回復している。
 - `branches_out_of_scope` = 4（全て後述 §1.7 の map_select 遷移。戦闘中の攻撃 drop はゼロ）
 - root 選択の最頻手が `STRIKE_IRONCLAD`（91回）になり、`SLIMED` を最善手に選ぶ挙動は消滅した
 
-## 1. p0-verify ログの解析結果
+## 1. 概要
+
+### 結論と適用状況
+
+中心課題は、固定深さ探索がターン内の異なる位置にある leaf を比較していたこと、そして戦闘外の選択が一部ランダムだったことである。後続実装では `effective_hp`、`DamageRaceValueFunction`、map / rest の heuristic、評価用 `--eval-epsilon`、並列評価、`turn_boundary_scoring` が追加された。価値学習の目的関数変更、報酬カード skip、ショップ heuristic、`--time-budget-ms`、Whole Run の combat snapshot 復元は、このリポジトリの現行ソースでは未実装である。
+
+## 2. Architecture
+
+### 1. p0-verify ログの解析結果
 
 ### 1.1 最大の戦術的損失: 打てるカードを手札に残したままターン終了
 
@@ -204,11 +216,11 @@ censor 内訳を見ると `value_bootstrap` 5,593 件はすべて `value_bootstr
 「学習が遅かった」のではなく、**現行の目的関数では収束先が board score にならない**。
 対処は §P1-B。
 
-## 2. 計画
+### 2. 計画
 
 ### P1-A 価値関数を turn-invariant にする（最優先）
 
-**A1. `effective_hp` 単一項化** — **実装済み（2026-08-20）。実装記録は §6。**
+**~~A1. `effective_hp` 単一項化~~**（実装済み: `src/sts2_training/decision/value.py` の `HeuristicValueFunction._extract_features` と `DEFAULT_WEIGHTS`。実装記録は §6。）
 
 `player_hp_ratio` / `player_block` / `predicted_incoming_damage` の 3 項を、
 
@@ -255,7 +267,7 @@ DEFAULT_WEIGHTS = {
 
 いずれも 1〜2 戦で確認できる。到達階層より先にこちらを見るべき。
 
-**A3. leaf のターン整列（A1 で不十分な場合）**
+**~~A3. leaf のターン整列（A1 で不十分な場合）~~**（実装済み: `src/sts2_training/decision/beam_search.py` の `BeamSearchConfig.turn_aligned_leaves` と `BeamSearchEngine._align_leaf_turns`。）
 
 A1 は静的近似なので、複数ターン先の状態（block の持ち越し、次の intent の変化）までは揃わない。
 残る場合は、mid-turn leaf に対して `End Turn` を強制的に 1 手延長してから評価する
@@ -313,14 +325,14 @@ value feature schema v2 は `player_hp_ratio` / `player_block` / `incoming_damag
 
 ### P1-C 戦闘外方策（Aと並行可能・独立）
 
-1. **`choice_rest_option` の heuristic**（最優先）。最小構成として
+1. **~~`choice_rest_option` の heuristic~~**（実装済み: `src/sts2_training/selection/rest_heuristic.py` の `rest_option_preference_scores` と `HeuristicCombatSelector._choose_rest_option`）。最小構成として
    「HP 比が閾値未満なら休息、そうでなければ強化」。
 2. **`choice_shop_*` の heuristic**。カード削除を最優先、次に relic、`skada_score` 上位のカード、
    所持金が足りなければ `choice_shop_leave`。
 3. `choice_event_throw_potion` は当面「投げない」を既定にする。
 4. **報酬カードの skip**。`CardDataRewardCardSelectionPolicy` は必ずカードを取る。
    「デッキ枚数が閾値超 かつ `skada_score` が閾値未満なら skip」を入れる。
-5. **評価中の ε を 0 にする**（P0.5 未実施）。`floor_reach_eval` に `--eval-epsilon`（既定 0.0）。
+5. **~~評価中の ε を 0 にする~~**（実装済み: `tools/evaluate_whole_run.py` の `--eval-epsilon` と `src/sts2_training/runner/floor_reach_eval.py` の `eval_epsilon`。既定 0.0）。
 
 1〜3 は現状「一様ランダム」なので、雑な heuristic でも期待値は必ず上がる。
 
@@ -340,7 +352,7 @@ A1 適用後に `--beam-depth 1 / 2 / 3` を同条件で比較する。
 2. n=30 のベースラインを取り直す。現在の n=5 は母標準偏差が大きく（P0 後 5戦の分散 5.2）、
    平均 7.0 の差は判定に足りない。
 
-## 3. 実施順序
+### 3. 実施順序
 
 ```
 P1-A1 (value.py)  →  1〜2戦で §A2 の受け入れ基準を検証
@@ -361,7 +373,7 @@ board score は HP・block の符号が反転しており、heuristic より明�
 P1-B1 と B2（目的関数の変更）は Oracle 再収集を待たずにオフラインで実施・検証できるので、
 A1 と並行して進めてよい（既存データで順位相関が改善するかは今の artifact でも測れる）。
 
-## 4. 計算コスト
+### 4. 計算コスト
 
 P0 後の実測: 1 探索あたり約 2.7〜3.3 秒、1 戦あたり探索 59〜165 回 → **1 戦 2.5〜9 分**。
 
@@ -377,7 +389,7 @@ P0 後の実測: 1 探索あたり約 2.7〜3.3 秒、1 戦あたり探索 59〜
 途中で打ち切ると結果が全部失われる（`topk8-20260820` の事例）。
 **run ごとの逐次書き出しを先に入れておくこと。**
 
-## 5. 優先度まとめ
+### 5. 優先度まとめ
 
 | # | 項目 | 根拠 | 見込み |
 |---|---|---|---|
@@ -393,7 +405,7 @@ P0 後の実測: 1 探索あたり約 2.7〜3.3 秒、1 戦あたり探索 59〜
 
 **当面の運用**: `--board-score heuristic` を維持する（§1.8 / §P1-B）。
 
-## 6. P1-A1 実装記録（2026-08-20）
+### 6. P1-A1 実装記録（2026-08-20）
 
 ### 6.1 変更内容
 
@@ -488,7 +500,7 @@ python tools/evaluate_whole_run.py --character-id IRONCLAD --num-runs 2 \
 到達階層より先にこの 3 つを見る。1 と 2 が改善していなければ、
 `effective_hp` だけでは不足で A3（leaf のターン整列）に進む判断材料になる。
 
-## 7. A1 検証結果と P1-C 第一弾（2026-08-20, a1-verify-2）
+### 7. A1 検証結果と P1-C 第一弾（2026-08-20, a1-verify-2）
 
 ### 7.1 scope の健全性
 
@@ -555,7 +567,7 @@ Emulator の実装（`Core.Odds/UnknownMapPointOdds.cs:21-34`）では、`?` の
 
 ### 7.5 実装（P1-C 第一弾）
 
-**1. `Unknown` を `Monster` より上に**（`selection/room_heuristic.py`）
+**~~1. `Unknown` を `Monster` より上に~~**（実装済み: `src/sts2_training/selection/room_heuristic.py` の `_POINT_TYPE_SCORE`）
 
 ```
 Treasure 6.0 > RestSite 5.0 > Shop 3.0 > Unknown 2.0 > Monster 0.0 > Elite -2.0
@@ -566,7 +578,7 @@ module docstring に Emulator の抽選確率と、この順序を誤ると戦�
 
 a1-verify-2 のログで再生したところ、**選択肢が分かれた 3 回すべてが `Monster` → `Unknown` に反転**した。
 
-**2. `--eval-epsilon`（既定 0.0）**（`floor_reach_eval` / `evaluate_whole_run`）
+**~~2. `--eval-epsilon`（既定 0.0）~~**（実装済み: `tools/evaluate_whole_run.py` の `--eval-epsilon` と `run_floor_reach_eval`）
 
 `HeuristicCombatSelector` の `epsilon=0.1` が評価中も有効で、map_room 選択とカード fallback の
 10% が一様ランダムになっていた（§1.6）。評価は方策そのものを測るべきなので既定を 0.0 にし、
@@ -592,7 +604,7 @@ a1-verify-2 のログで再生したところ、**選択肢が分かれた 3 回
 **d. 焚き火** — 6F までに `rest_choice` は一度も出現しなかった。
 深く到達するようになってから効いてくるので、優先度は a/b より後。
 
-## 8. route-verify 結果（2026-08-20, n=5）
+### 8. route-verify 結果（2026-08-20, n=5）
 
 ### 8.1 到達階層
 
@@ -695,9 +707,9 @@ routing 修正で RestSite に 11 回入れるようになった結果、`choice
 - `heuristic_fallback` の決定数が 1 戦あたり 10〜25 に増加した（変更前は 3〜11）。
   深く到達するほど戦闘外の意思決定の比重が上がるため、8.4 / 8.5 の価値は今後さらに増す。
 
-## 9. 焚き火ヒューリスティックと評価の並列化（2026-08-20）
+### 9. 焚き火ヒューリスティックと評価の並列化（2026-08-20）
 
-### 9.1 焚き火（§8.4 の対処）
+### ~~9.1 焚き火（§8.4 の対処）~~（実装済み: `src/sts2_training/selection/rest_heuristic.py`）
 
 新規 `selection/rest_heuristic.py`。`choice_rest_option` に分岐が無く一様ランダムだった。
 
@@ -719,7 +731,7 @@ route-verify の実データ 11 件を再生した結果、**5 件が変化**し
 
 低 HP の 3 件（うち 1 件は HP 8）がすべて回復に、高 HP の無駄な回復 2 件が強化に変わった。
 
-### 9.2 評価の並列化（`--ports`）
+### ~~9.2 評価の並列化（`--ports`）~~（実装済み: `tools/evaluate_whole_run.py` の `--ports` と `src/sts2_training/runner/floor_reach_eval.py` の sharding）
 
 **計測**: 1 戦あたりの `emulate_actions` は 322〜662 リクエスト、1 リクエスト 0.2〜0.6 秒。
 バッチサイズは平均 7.4、最大 32 で、これは `beam_width × top_k_actions` = 8×4 = 32 が上限。
@@ -751,7 +763,7 @@ Emulator 側も `RunManager.Instance` などの singleton を持つため、こ�
 
 全体 811 passed / 6 skipped。
 
-### 9.4 サーバ起動の内製化（`--start-rl-servers`）
+### ~~9.4 サーバ起動の内製化（`--start-rl-servers`）~~（実装済み: `tools/evaluate_whole_run.py` の `--start-rl-servers` と `src/sts2_training/runner/rl_server_pool.py` の `RlServerPool`）
 
 サーバを N 個手で立てるのは評価のたびに面倒で、1 台立て忘れるとその worker の担当分が
 丸ごと接続エラーになる。`tools/evaluate_whole_run.py` に起動・停止を持たせた。
@@ -792,7 +804,7 @@ stub checkout で、起動→listen 待ち→ツリー停止、起動時死亡�
 listen しない場合のタイムアウト、例外時もサーバが残らないこと、
 および `evaluate_whole_run` 側の配線を検証する。全体 830 passed / 6 skipped。
 
-## 10. A3: leaf のターン整列（2026-08-20）
+### ~~10. A3: leaf のターン整列（2026-08-20）~~（実装済み: `src/sts2_training/decision/beam_search.py` の `_align_leaf_turns`）
 
 ### 10.1 何を直すか
 
@@ -919,7 +931,7 @@ prune trace の深さ1ノードは整列されていない一方 leaf は整列�
 `--turn-aligned-leaves` は既定 off のまま残す（実装とテストは正しく、
 上記の形に進むときの土台になる）。**現時点で on にしてはいけない。**
 
-## 11. ターン境界での leaf 採点（2026-08-20）
+### ~~11. ターン境界での leaf 採点（2026-08-20）~~（実装済み: `src/sts2_training/decision/beam_search.py` の `turn_boundary_scoring`、`_settle_pending_leaves`、`_settle_root_as_a_leaf`）
 
 ### 11.1 §10.7 を採らなかった理由
 
@@ -998,7 +1010,36 @@ A3 が効かなかったのは `[End Turn, カード]` という行が残り、�
 
 現状値は `data/evaluation/detailed_logs/202608201812` の 11 戦から算出した。
 
-## 11.7 測定結果（2026-08-20, 202608202142, n=10）
+## 3. API
+
+### 現在の設定・CLI
+
+`BeamSearchConfig.turn_boundary_scoring`、`BeamSearchConfig.turn_aligned_leaves`、および `tools/evaluate_whole_run.py` の `--turn-boundary-scoring` / `--turn-aligned-leaves` / `--eval-epsilon` / `--ports` / `--start-rl-servers` は実装済みである。各引数の現在のシグネチャと既定値は [02_decision_core.md](02_decision_core.md) と対応するソースを正本とする。`--turn-boundary-scoring` と `--turn-aligned-leaves` は同時指定できない。
+
+`--time-budget-ms` は `BeamSearchConfig` には存在するが `tools/evaluate_whole_run.py` には公開されていないため、この計画に書かれた CLI は未実装である。
+
+## 4. 使用例
+
+### Whole Run 評価
+
+次は現行の `tools/evaluate_whole_run.py` が受け付ける引数だけを使う例である。
+
+```powershell
+python tools/evaluate_whole_run.py --character-id IRONCLAD --num-runs 2 --models learned --search-modes standard --board-score damage_race --beam-depth 2 --beam-width 8 --top-k-actions 4 --turn-boundary-scoring --output-dir data/evaluation/whole_run/turn-boundary --detailed-log-dir data/evaluation/detailed_logs/turn-boundary
+```
+
+## 5. 補足説明
+
+### 未実装または部分実装の計画項目
+
+- P1-B1/B2 は未実装である。`tools/train_combat_value.py` は現在も `Ridge` による `weighted_ridge_regression` を使い、終端サンプルを学習データから除外していない。
+- P1-B3/B4 の Oracle 再収集・feature schema v3 は未実装である。`src/sts2_training/decision/value_features.py` は schema v2 のままである。
+- P1-C の `choice_shop_*` heuristic、報酬カードの条件付き skip、`choice_event_throw_potion` の「投げない」既定は未実装である。`HeuristicCombatSelector.select()` に shop / throw 専用分岐はなく、`CardDataRewardCardSelectionPolicy` は提供されたカードを常に選ぶ。
+- P1-D の `tools/evaluate_whole_run.py --time-budget-ms` は未実装である。`BeamSearchConfig.time_budget_ms` だけが存在する。
+- §11.9 の Whole Run combat snapshot 復元は未実装である。`src/sts2_training/api/async_client.py` は Whole Run の `snapshot_json` を fail-closed で拒否する。
+- §11.7.2 の STS2_RL 側修正はこのリポジトリ外のため、Training の `src/` と `tests/` だけでは完了を再検証できない。したがって取り消し線にはしていない。
+
+### 測定結果（2026-08-20, 202608202142, n=10）
 
 `--turn-boundary-scoring` を有効にした 10 戦。比較対象は同条件の
 `data/evaluation/detailed_logs/202608201812`（`search_start` trace で
@@ -1016,7 +1057,7 @@ beam_width 8 / top_k 4 / max_depth 2 / learned pruner / `damage_race` の一致�
 （31 と 15）を含めた 10 戦では平均 16.0。同条件の `dmgrace-verify` は 13.5（n=10）。
 n=10 では CI が足りないため**判定には使わない**（§10.4）。
 
-### 11.7.1 採点が 31% の探索で発火していなかった（修正済み）
+### ~~11.7.1 採点が 31% の探索で発火していなかった~~（実装済み: `src/sts2_training/decision/beam_search.py` の `_settle_batch` による capacity-aware chunking）
 
 ```
 leaves_turn_aligned = 0 の探索: 425 / 1374 (31%)
@@ -1090,7 +1131,7 @@ publish されていないため ordinal で区別する）。
   継続する形にする
 - 根本原因（Emulator の legal/illegal 不一致）は STS2_Emulator 側の調査が要る
 
-### 11.7.3 解決済み: 落ちた決定の `score_trace` が失われる
+### ~~11.7.3 落ちた決定の `score_trace` が失われる~~（実装済み: `src/sts2_training/runner/floor_reach_eval.py` の `_TrackingCombatDecisionEngine.decide` と `tests/runner/test_failed_decision_logging.py`）
 
 `_TrackingCombatDecisionEngine.decide()` は `super().decide()` が**返ってから**
 detailed log を書いていた。したがって `decide()` が送出すると、
@@ -1115,7 +1156,7 @@ detailed log を書いていた。したがって `decide()` が送出すると�
 trace が 1 件も無い時点での送出、および成功パスのラベル付けを固定する。
 **try/except を外すと 4 件が実際に落ちる**ことを確認済み。
 
-## 11.8 採点を ply ごとに行う（2026-08-21）
+### ~~採点を ply ごとに行う（2026-08-21）~~（実装済み: `src/sts2_training/decision/beam_search.py` の ply 内 `_settle_pending_leaves` 呼び出し）
 
 ### 11.8.1 何が起きていたか
 
@@ -1186,7 +1227,7 @@ release 済みブランチを親に持つバッチを reject する fake Whole R
 効いていなかった 26% は **3 ply 以上＝最も深く leaf が多い探索**なので、
 202608210802 の「0.2%」「平均到達階層 17.56」もまだ完全な状態の数字ではない。
 
-## 11.9 Whole Run の戦闘分岐を Combat snapshot 復元へ変える（2026-08-21）
+### Whole Run の戦闘分岐を Combat snapshot 復元へ変える（2026-08-21）
 
 ### 11.9.1 調査で分かったこと
 
@@ -1269,4 +1310,3 @@ fault にする。静かに旧経路へ落ちると、今回のような乖離�
    導出している。combat snapshot に変わると同一性の定義が変わる
 6. **Training 側は無変更で済むか。** wire contract は変わらない見込みだが、
    `branches_out_of_scope` の出方は変わりうる
-

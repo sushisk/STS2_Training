@@ -10,7 +10,7 @@ decision core は、1 つの Combat decision DTO から action を選ぶ層で�
 
 `BeamSearchEngine` は `PolicyModel` が提案した候補 action を `AsyncTrainingApiClient.emulate_action(s)` で分岐実行し、`ValueModel` が stable/terminal state を評価し、beam width と depth budget の範囲で best root action を返す。`candidate_coverage.py` は policy ranking の後に構造的に必要な action type を補い、policy-only の blind spot を減らす。
 
-Value は 2 つの heuristic 実装（`HeuristicValueFunction` / `DamageRaceValueFunction`）に加えて `LinearValueModel` を利用できる。`DamageRaceValueFunction` は出力を「この戦闘が終わったときの自 HP の見積り」に定義し、全項を自 HP 単位で表す。ターン途中の state とターン開始時の state が同じ問いに答えるため直接比較できる（§5.3）。learned Value は `VALUE_FEATURE_SCHEMA_VERSION = 2` の feature を使い、artifact schema `3`、mask version `1.2`、学習時の exact `dto_version`、feature names を load 時に検証する。runtime inference は artifact の scaler/係数を使う線形評価で、terminal utility が DTO から exact に得られる場合はそれを優先する。
+Value は 2 つの heuristic 実装（`HeuristicValueFunction` / `DamageRaceValueFunction`）に加えて `LinearValueModel` を利用できる。`DamageRaceValueFunction` は出力を「この戦闘が終わったときの自 HP の見積り」に定義し、全項を自 HP 単位で表す。leaf を同じターン境界で比較する必要がある場合は、`turn_boundary_scoring` を有効にする（§5.4）。learned Value は `VALUE_FEATURE_SCHEMA_VERSION = 2` の feature を使い、artifact schema `3`、mask version `1.2`、学習時の exact `dto_version`、feature names を load 時に検証する。runtime inference は artifact の scaler/係数を使う線形評価で、terminal utility が DTO から exact に得られる場合はそれを優先する。
 
 Policy は bootstrap の `PriorHeuristicPolicy` に加えて `LinearActionScorePolicy` を利用できる。learned `action_score` は Oracle root action の `estimated_q` の絶対値を回帰するのではなく、同一 decision 内の順位を pairwise logistic で distill する。runtime artifact は schema `1`、feature schema `4`、mask version `1.2`、exact `dto_version`、feature names を検証し、linear score を `ActionCandidate.action_score` に保持したまま候補を並べる。
 
@@ -234,12 +234,18 @@ from sts2_training.decision.beam_search import BeamSearchEngine, BeamSearchConfi
 from sts2_training.decision.damage_race_value import DamageRaceValueFunction
 from sts2_training.decision.policy import PriorHeuristicPolicy
 
-engine = BeamSearchEngine(
-    client,
-    policy=PriorHeuristicPolicy(),
-    value_fn=DamageRaceValueFunction(),
-    config=BeamSearchConfig(beam_width=8, top_k_actions=4, max_depth=2),
-)
+def build_damage_race_engine(client):
+    return BeamSearchEngine(
+        client,
+        policy=PriorHeuristicPolicy(),
+        value_fn=DamageRaceValueFunction(),
+        config=BeamSearchConfig(
+            beam_width=8,
+            top_k_actions=4,
+            max_depth=2,
+            turn_boundary_scoring=True,
+        ),
+    )
 ```
 
 Whole Run 評価では `--board-score` の既定が `damage_race` なので指定は不要。
@@ -407,7 +413,7 @@ Loss(R, D) = min over 0 < x <= E of  R/(x·κ) · (max(0, D - (E-x)·σ) + c)
 を外すと `End Turn` が常に合法である以上すべての Combat state が探索対象外になる。
 展開してよい行動の集合はこの判定とは分けて持つ。
 
-`turn_aligned_leaves`（§10、`_align_leaf_turns`）は遅れた leaf だけを `min(turn) + 1` へ
+`turn_aligned_leaves`（`_align_leaf_turns`）は遅れた leaf だけを `min(turn) + 1` へ
 持ち上げる別の規則で、両方を同時に有効にすると `BeamSearchConfig.__post_init__` が
 `ValueError` を投げる。
 

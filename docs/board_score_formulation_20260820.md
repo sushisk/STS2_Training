@@ -1,6 +1,10 @@
-# Combat Board Score の数式化と再設計
+**Combat Board Score の数式化と再設計**
 
-## 0. 記号
+## 0. 文章の目的
+
+この文書は、`HeuristicValueFunction` の加算型 board score がターン途中の Combat 状態を比較する際に持つ問題を数式で特定し、代替となる `DamageRaceValueFunction` の設計根拠を残す。記述時点の案とその後の実装を区別し、現在の公開契約は [02_decision_core.md](02_decision_core.md) を正本とする。
+
+### 記号
 
 | 記号 | 意味 | DTO |
 |---|---|---|
@@ -16,7 +20,9 @@
 
 ---
 
-## 1. 現行の数式（A1 適用後）
+## 1. 概要
+
+### 1. 現行の数式（A1 適用後）
 
 $$
 V_{\text{now}}(s)\;=\;
@@ -33,7 +39,7 @@ $N$ は名前付き power スコアだが $\texttt{DEFAULT\_POWER\_VALUES}=\{\}$
 
 ---
 
-## 2. 次元解析 — なぜこの形では成立しないか
+### 2. 次元解析 — なぜこの形では成立しないか
 
 ### 2.1 単位が状況依存
 
@@ -97,7 +103,7 @@ A は「次の予告 $I'$ をまだ防げる」のに、$V_{\text{now}}$ は $-\
 
 ---
 
-## 3. 概念化
+### 3. 概念化
 
 状態を 2 つに分ける。
 
@@ -119,9 +125,23 @@ $$s=(\underbrace{H,\;R,\;\text{powers},\;\text{deck}}_{\text{持続 (durable)}},
 $V_{\text{now}}$ が A3 を満たすように見えたのは、$b$ と $I$ を打ち消し合わせて
 **変換後の量だけを見た**からで、変換**前**の量（$\varepsilon$, hand）は依然として見えていない。
 
+### まとめ
+
+現行の欠陥は「未消費エネルギーを加点していない」ではなく、
+
+> **まだ防ぐ資源が残っている状態に、次ターンの被弾を満額請求していること**
+
+であり、根はスカラー加算モデルが**変換**（エネルギー→防御/攻撃、敵HP→残ターン→被弾）を
+表現できないことにある。提案は全項を自 HP 単位に揃え、変換を明示することで
+公理 A1〜A4 を満たし、§5 の 3 ケースすべてで正しい順序を与える。
+
 ---
 
-## 4. 提案する数式
+## 2. Architecture
+
+### 4. 提案する数式
+
+以下は当時の設計案である。閉形式による最終形（補遺）は `DamageRaceValueFunction` として実装されたが、この節の初期案そのものを現在の契約として扱わない。
 
 **単位は自 HP に統一する。$V$ は「この戦闘が終わったときの HP の見積り」。**
 
@@ -178,7 +198,7 @@ $\tau=1$ では分母が無いのでキャラ別事前分布にフォールバ�
 
 ---
 
-## 5. 検証（既知の 3 ケースに当てはめる）
+### 5. 検証（既知の 3 ケースに当てはめる）
 
 $H_{\max}=80,\;E=3,\;\sigma=5,\;I=I'=12$ とする。
 
@@ -225,7 +245,7 @@ need $=0$ → $\varepsilon_b=0$ → 全エネルギーが $\varepsilon_a$ に回
 
 ---
 
-## 6. 現行式との対応
+### 6. 現行式との対応
 
 | 現行の項 | 提案での扱い |
 |---|---|
@@ -241,7 +261,17 @@ $\rho,\kappa$ は自己校正、残りは DTO の実量である。
 
 ---
 
-## 7. リスクと段階
+## 3. API
+
+現在の値関数は `sts2_training.decision.damage_race_value.DamageRaceValueFunction` であり、公開する初期化引数と `ValueModel` 契約は [02_decision_core.md](02_decision_core.md) および実装の `src/sts2_training/decision/damage_race_value.py` を参照する。この計画文書は API の正本ではない。
+
+## 4. 使用例
+
+この文書には、現在の API に対して実行可能と検証した単独コマンド例はない。評価用の実行方法は [02_decision_core.md](02_decision_core.md) を参照する。
+
+## 5. 補足説明
+
+### 7. リスクと段階
 
 | リスク | 対処 |
 |---|---|
@@ -252,26 +282,14 @@ $\rho,\kappa$ は自己校正、残りは DTO の実量である。
 
 **段階**
 
-1. §4 の式を `HeuristicValueFunction` の隣に新実装（既存は残す）
+1. ~~§4 の式を `HeuristicValueFunction` の隣に新実装（既存は残す）~~（実装済み: `src/sts2_training/decision/damage_race_value.py` の `DamageRaceValueFunction`）
 2. `selection-logs` の全 DTO で両者を再生し、§5 の 3 ケースと
    `whole_run_deepening_plan` §A2 の指標をオフライン比較（エミュレータ不要、数分）
 3. オフラインで改善が出たら実戦 n=20〜30
 
-## 8. まとめ
+### 補遺: $T\cdot L$ を閉形式で解く
 
-現行の欠陥は「未消費エネルギーを加点していない」ではなく、
-
-> **まだ防ぐ資源が残っている状態に、次ターンの被弾を満額請求していること**
-
-であり、根はスカラー加算モデルが**変換**（エネルギー→防御/攻撃、敵HP→残ターン→被弾）を
-表現できないことにある。提案は全項を自 HP 単位に揃え、変換を明示することで
-公理 A1〜A4 を満たし、§5 の 3 ケースすべてで正しい順序を与える。
-
----
-
-# 補遺: $T\cdot L$ を閉形式で解く
-
-## A.1 $T\cdot L$ の何が概念的だったか
+#### A.1 $T\cdot L$ の何が概念的だったか
 
 §4.3 の $V=H-\text{leak}-T\cdot L$ には**内部矛盾**がある。
 
@@ -282,7 +300,7 @@ $\rho,\kappa$ は自己校正、残りは DTO の実量である。
 さらに $T$ と $L$ を独立な因子として掛けているが、**両者は同じエネルギー予算を奪い合う**
 （攻撃に回せば $T$ が減り $L$ が増える）。この結合を無視した積は根拠を持たない。
 
-## A.2 正しい定式化 — 配分を最適化問題として書く
+#### A.2 正しい定式化 — 配分を最適化問題として書く
 
 1 ターンのエネルギー予算 $E$ を、攻撃 $x$ と防御 $E-x$ に分ける。
 
@@ -307,7 +325,7 @@ $$
 \mathrm{Loss}(R,\bar D)\;=\;\min_{0<x\le E}\ \frac{R}{x\kappa}\Bigl(\max\bigl(0,\ \bar D-(E-x)\sigma\bigr)+c\Bigr)
 $$
 
-## A.3 閉形式解
+#### A.3 閉形式解
 
 被積分関数は $x$ について区分的に単調なので、解析的に解ける。
 
@@ -350,7 +368,7 @@ $$\frac{\partial\,\mathrm{Loss}}{\partial R}=\frac{1}{\kappa}\min\!\left(\frac{c
 $\lambda$ が **§2.1 で問題にした「自 HP と敵 HP の交換レート」の正体**である。
 手で置いた重みではなく、$\kappa,\sigma,\bar D,E,c$ から導出される量になる。
 
-## A.4 今ターンは近似せず厳密に解く
+#### A.4 今ターンは近似せず厳密に解く
 
 今ターンだけは $I$、$b$、$\varepsilon$ が既知なので、貪欲配分ではなく同じ最小化を厳密に行う。
 防御に回すエネルギーを $u\in[0,\varepsilon]$ とすると
@@ -368,7 +386,7 @@ $$u\in\Bigl\{\,0,\quad \min\bigl(\varepsilon,\ \max(0,I-b)/\sigma\bigr),\quad \v
 
 $R_v=\sum_i (e_i+\beta_i)\,v_i$ は Vulnerable 等の係数 $v_i$ で補正した実効残敵 HP。
 
-## A.5 最終形
+#### A.5 最終形
 
 $$
 \boxed{\;
@@ -378,7 +396,7 @@ $$
 終端は exact（$\pm$ terminal utility）。$V$ は**「この戦闘が終わったときの HP の見積り」**であり、
 単位は自 HP で統一されている。
 
-## A.6 パラメータ
+#### A.6 パラメータ
 
 | 記号 | 意味 | 決め方 |
 |---|---|---|
@@ -392,7 +410,7 @@ $$
 **手置きは $\sigma$ と $c$ の 2 個**。現行の 6 個の重み（40 / −30 / −2 / 2 / 2 / 1）より自由度が減る。
 しかも $\rho$ が消えたことで §4 の素案よりさらに 1 個減っている。
 
-## A.7 検証（§5 の 3 ケースを新式で）
+#### A.7 検証（§5 の 3 ケースを新式で）
 
 $H_{\max}=80,\ E=3,\ \sigma=5,\ \kappa=6,\ c=1,\ I=I'=12$。
 
@@ -436,7 +454,7 @@ $\mathrm{Loss}_1=\mathrm{Loss}_2=\dfrac{Rc}{E\kappa}$ で一致。被弾は無�
 
 現行式では 3 つとも同点だった。
 
-## A.8 退化ケースの扱い
+#### A.8 退化ケースの扱い
 
 | 条件 | 扱い |
 |---|---|
@@ -446,8 +464,14 @@ $\mathrm{Loss}_1=\mathrm{Loss}_2=\dfrac{Rc}{E\kappa}$ で一致。被弾は無�
 | $E\sigma\le\bar D$ | 第1項 $=+\infty$、自動的にレース解に落ちる |
 | $V<0$ | 死亡予測。`defeat_penalty` へ滑らかに接続 |
 
-## A.9 実装量
+#### A.9 実装量
 
-- `HeuristicValueFunction` と同じ `ValueModel` インタフェース、新クラス 1 個
-- 分岐 3 本 + 閉形式 1 本。ループ無し、追加の emulate 呼び出し無し
-- 既存の `CombatObservation` に $\varepsilon$、`maxEnergy`、敵 block、intentTypes の読み出しを追加
+- ~~`HeuristicValueFunction` と同じ `ValueModel` インタフェース、新クラス 1 個~~（実装済み: `src/sts2_training/decision/damage_race_value.py` の `DamageRaceValueFunction`）
+- ~~分岐 3 本 + 閉形式 1 本。ループ無し、追加の emulate 呼び出し無し~~（実装済み: `DamageRaceValueFunction._turn_cost()` と `_remaining_loss()`）
+- ~~既存の `CombatObservation` に $\varepsilon$、`maxEnergy`、敵 block、intentTypes の読み出しを追加~~（実装済み: `src/sts2_training/decision/combat_observation.py` の `CombatObservation`）
+
+### 実装との相違・未完了事項
+
+- §4.2〜§4.3 の最初の貪欲配分案は実装されていない。実装は補遺 A.2〜A.5 の閉形式を採用する。
+- `enemy_effective_hp_multipliers` は `DamageRaceValueFunction` にあるが既定値は空である。Vulnerable や Minion の係数を既定契約にはしていない。
+- 段階 2 の selection log 全 DTO によるオフライン比較、および段階 3 の n=20〜30 実戦比較は、このリポジトリのソースとテストから完了を確認できないため未実装の記録として残す。

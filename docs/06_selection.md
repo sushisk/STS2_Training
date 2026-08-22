@@ -2,11 +2,11 @@
 
 ## 0. 文章の目的
 
-この文書は `src/sts2_training/selection/` の非 Combat / fallback heuristic selection を説明する。Combat Beam Search の詳細は [02_decision_core.md](02_decision_core.md) に分け、ここでは legal action の分類、reward card、map room、event option、canonical choice-card semantics を扱う。
+この文書は `src/sts2_training/selection/` の非 Combat / fallback heuristic selection を説明する。Combat Beam Search の詳細は [02_decision_core.md](02_decision_core.md) に分け、ここでは legal action の分類、reward card、map room、rest site、event option、canonical choice-card semantics を扱う。
 
 ## 1. 概要
 
-`selection/` は初期 self-play や fallback で使う action selector 群である。`HeuristicCombatSelector` は available legal actions を action type ごとに分類し、choice-card、card、map room、event option などに専用 scoring があればそれを使い、最後は候補から選ぶ。
+`selection/` は初期 self-play や fallback で使う action selector 群である。`HeuristicCombatSelector` は available legal actions を action type ごとに分類し、choice-card、card、map room、rest option、event option などに専用 scoring があればそれを使い、最後は候補から選ぶ。
 
 Training は canonical `pendingChoice.choiceSemantics` を消費し、prompt text、label、card id、option shape から mechanics を推測しない。未知または future semantics は `operation="unknown"` に degrade し、policy-neutral に扱う。
 
@@ -19,12 +19,17 @@ Training は canonical `pendingChoice.choiceSemantics` を消費し、prompt tex
 | `choice_card_heuristic.py` | canonical choice-card の option preference |
 | `reward_card_selection.py` | reward card selection policy。random と card-data score based |
 | `room_heuristic.py` | map room の metadata-only preference |
+| `rest_heuristic.py` | `choice_rest_option` の HP 依存 preference |
 | `event_choice_heuristic.py` | confirmed lethal event option を除外する safety filter |
 | `heuristic_selector.py` | 上記を統合する `HeuristicCombatSelector` |
 
 `action_classification.available_actions()` は `is_available is not False` の action だけを残す。つまり `is_available` が明示的に `False` の action だけを除外し、field がない action や `None`/`0`/空文字など他の falsy value は除外しない。各 type helper は order を保って filter し、`group_by_action_type()` は available action を `action_type` ごとの dict にする。
 
 `RewardCardSelectionPolicy` は Protocol で、`RandomRewardCardSelectionPolicy` と `CardDataRewardCardSelectionPolicy` がある。後者は sts2log.com card stats export 由来の `skada_score` を参照する。
+
+`map_room` の基礎 score は `Treasure=6.0`、`RestSite=5.0`、`Shop=3.0`、`Unknown=2.0`、`Monster=0.0`、`Elite=-2.0`、`Boss=0.0` である。HP 比率が 0.5 未満なら `RestSite` に `10.0 * (0.5 - hp_ratio) / 0.5` を加算し、`Elite` から `8.0 * (0.5 - hp_ratio) / 0.5` を減算する。HP が読めない場合は基礎 score だけを使う。
+
+`choice_rest_option` では `HEAL` と `MEND` を欠損 HP 比率 `× 10.0`、`SMITH` を `3.0` として採点する。このため HP が読める場合は 70% 未満で heal が `SMITH` より高く、70% 超では `SMITH` が高い（ちょうど 70% では同点）。HP が読めない場合の heal は `10.0`、未認識 option は `0.0` であり、推測による評価はしない。rest の soft preference にも `HeuristicCombatSelector` の `epsilon`（既定 `0.1`）が適用される。
 
 ## 3. API
 
@@ -35,7 +40,13 @@ choice_card_actions(legal_actions) -> list[Mapping[str, Any]]
 reward_card_actions(legal_actions) -> list[Mapping[str, Any]]
 map_room_actions(legal_actions) -> list[Mapping[str, Any]]
 choice_event_option_actions(legal_actions) -> list[Mapping[str, Any]]
+rest_option_actions(legal_actions) -> list[Mapping[str, Any]]
 group_by_action_type(legal_actions) -> dict[str, list[Mapping[str, Any]]]
+```
+
+```python
+rest_option_preference_scores(legal_actions, masked_emulator_dto) -> dict[str, float]
+rest_option_quality_score(option_id: str | None, hp_ratio: float | None) -> float
 ```
 
 ```python
@@ -86,6 +97,33 @@ option_id = choice_option_id({
     "action_type": "choice_card",
     "parameters": {"optionId": "opt-1"},
 })
+```
+
+rest site を選ぶ例:
+
+```python
+from sts2_training.selection import HeuristicCombatSelector
+
+rest_actions = [
+    {
+        "action_id": "heal",
+        "action_type": "choice_rest_option",
+        "is_available": True,
+        "parameters": {"restOptionId": "HEAL"},
+    },
+    {
+        "action_id": "smith",
+        "action_type": "choice_rest_option",
+        "is_available": True,
+        "parameters": {"restOptionId": "SMITH"},
+    },
+]
+
+action = HeuristicCombatSelector(epsilon=0.0).select(
+    rest_actions,
+    {"hp": 50, "maxHp": 100},
+)
+assert action["action_id"] == "heal"
 ```
 
 ## 5. 補足説明

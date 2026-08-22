@@ -29,6 +29,8 @@
 
 `TcpConnection` は server epoch が途中で変わると `ServerEpochChangedError` を投げる。request bytes が送信済みの timeout/connection loss は completion が不確実なため、exception に `retry_request` を付け、`AsyncTrainingApiClient.retry_request()` で同じ request を再送できる設計になっている。
 
+selection audit は branch result が `status="faulted"` のとき、Training が観測した親 decision の `masked_emulator_dto` を `replay_snapshot` として記録する。これは Emulator の restore snapshot ではない。併せて `fault_context` に親の decision point / boundary / choice scope / pending choice / legal actions と branch request/result を残すため、公開 API から見える branch fault を後で調べられる。
+
 ## 3. API
 
 主要 public interface は次である。
