@@ -138,7 +138,10 @@ leaf をターン境界に揃えたことが前提整備になっている。
 
 **2. 戦闘開始時 pending choice**
 
-`GAMBLING_CHIPS` のような開始時効果があると戦闘が `pending_choice` で始まる。
+`GAMBLING_CHIP` のような開始時効果があると戦闘が `pending_choice` で始まる
+（relic id は単数形。クラスは `GamblingChip`。複数形 `GAMBLING_CHIPS` は認識されず
+`DEPRECATED_RELIC` に落ちるため、その綴りで再現を試すと「発火しない」という誤った
+結論になる。2026-08-22 に実測して訂正）。
 `pending_choice` の snapshot は復元できない（`unsupported_capture_boundary:published_target`）
 ため、その時点で復元可能なアンカーが存在せず、**最初の `stable` に達するまで分岐できない**。
 現状はその期間の分岐要求を明示的な理由付きで拒否し、Training 側の search trace に
