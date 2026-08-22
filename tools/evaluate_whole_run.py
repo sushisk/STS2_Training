@@ -17,6 +17,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import sys
 import csv
 import hashlib
 import json
@@ -328,7 +329,34 @@ async def _evaluate(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _reject_repeated_options(argv: "list[str] | None") -> None:
+    """Refuse an option given more than once.
+
+    argparse keeps the last occurrence and says nothing, so a repeated `--rl-root`
+    silently evaluates a different checkout than the one the reader of the command
+    believes. That happened here: two runs measured a stale worktree and their failures
+    were diagnosed as engine bugs before anyone looked at which tree served them. A
+    duplicated flag is a mistake in every case - there is no option here where passing it
+    twice means anything - so it is worth a hard stop rather than a quiet last-wins.
+    """
+    raw = sys.argv[1:] if argv is None else list(argv)
+    seen: dict[str, int] = {}
+    for token in raw:
+        if not token.startswith("--"):
+            continue
+        name = token.split("=", 1)[0]
+        seen[name] = seen.get(name, 0) + 1
+    repeated = sorted(name for name, count in seen.items() if count > 1)
+    if repeated:
+        raise SystemExit(
+            "error: option(s) given more than once: "
+            + ", ".join(f"{name} (x{seen[name]})" for name in repeated)
+            + "\nargparse would keep only the last value; pass each option once."
+        )
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    _reject_repeated_options(argv)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=_port, default=8765)

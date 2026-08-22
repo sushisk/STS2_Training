@@ -39,6 +39,8 @@ from typing import Sequence
 
 __all__ = ["RlServer", "RlServerPool", "free_ports", "resolve_rl_root"]
 
+logger = logging.getLogger(__name__)
+
 _LOG = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
@@ -173,7 +175,28 @@ class RlServerPool:
         self._processes: list[subprocess.Popen] = []
         self.servers: list[RlServer] = []
 
+    def describe_checkout(self) -> str:
+        """Name the checkout being measured, with its commit when git can say.
+
+        The evaluation report records floors and faults but not which tree produced
+        them, and two runs here were diagnosed as engine bugs before anyone noticed they
+        had measured a stale worktree. The path alone is not enough - two checkouts of
+        the same repo differ only by commit.
+        """
+        head = "unknown"
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(self._root), "log", "--oneline", "-1"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if completed.returncode == 0 and completed.stdout.strip():
+                head = completed.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return f"{self._root} @ {head}"
+
     def __enter__(self) -> list[int]:
+        logger.info("RL checkout under test: %s", self.describe_checkout())
         try:
             self._start_all()
         except BaseException:
